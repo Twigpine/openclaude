@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   utimes,
   writeFile,
@@ -43,13 +44,26 @@ const realLinkSync = realFs.linkSync
 const realRenameSync = realFs.renameSync
 const realWriteFileSync = realFs.writeFileSync
 const realOpenSync = realFs.openSync
+const realUnlink = realFsPromises.unlink
+const realUnlinkSync = realFs.unlinkSync
+const realUtimes = realFsPromises.utimes
+const realUtimesSync = realFs.utimesSync
+let beforeReclaimUnlink: ((path: string) => void) | undefined
+let beforeInstallStamp: ((path: string) => void) | undefined
+
+function injectStamp(path: string): void {
+  if (!basename(path).startsWith('installing.')) return
+  const inject = beforeInstallStamp
+  beforeInstallStamp = undefined
+  inject?.(path)
+}
 
 // One-shot fault at the copy-to-open boundary for the private staged
 // record, before its fsync descriptor is opened in either runtime.
 let stagedOpenInjection: ((path: string) => void) | undefined
 
 function injectStagedOpen(path: unknown): void {
-  if (typeof path !== 'string' || !basename(path).startsWith('staged.')) return
+  if (typeof path !== 'string' || !basename(path).startsWith('installing.')) return
   const inject = stagedOpenInjection
   stagedOpenInjection = undefined
   inject?.(path)
@@ -356,7 +370,10 @@ describe('terminal-fact publish across withdrawn claims', () => {
   // the stale-claim probe from maintainer review 5948202472 on #2497.
   async function ageCommitClaim(target: string): Promise<void> {
     const stale = new Date(Date.now() - 11_000)
-    await utimes(`${target}.commit`, stale, stale)
+    const dir = `${target}.commit`
+    const entries = await readdir(dir)
+    for (const entry of entries) await utimes(join(dir, entry), stale, stale)
+    await utimes(dir, stale, stale)
   }
 
   // Arms the commit-publish hook so only the first commit call pauses:
@@ -536,6 +553,14 @@ describe('terminal-fact publish across withdrawn claims', () => {
       ...realFsPromises,
       readFile: mockedReadFile,
       open: mockedOpen,
+      unlink: (...args: Parameters<typeof realUnlink>) => {
+        if (typeof args[0] === 'string') beforeReclaimUnlink?.(args[0])
+        return realUnlink(...args)
+      },
+      utimes: async (...args: Parameters<typeof realUtimes>) => {
+        if (typeof args[0] === 'string') injectStamp(args[0])
+        await realUtimes(...args)
+      },
       writeFile: mockedWriteFile,
       link: mockedLink,
       rename: mockedRename,
@@ -544,6 +569,14 @@ describe('terminal-fact publish across withdrawn claims', () => {
       ...realFs,
       linkSync: mockedLinkSync,
       openSync: mockedOpenSync,
+      unlinkSync: (...args: Parameters<typeof realUnlinkSync>) => {
+        if (typeof args[0] === 'string') beforeReclaimUnlink?.(args[0])
+        realUnlinkSync(...args)
+      },
+      utimesSync: (...args: Parameters<typeof realUtimesSync>) => {
+        if (typeof args[0] === 'string') injectStamp(args[0])
+        realUtimesSync(...args)
+      },
       renameSync: mockedRenameSync,
     }))
     registry = await import('./bgRegistry.js')
@@ -555,6 +588,8 @@ describe('terminal-fact publish across withdrawn claims', () => {
   afterEach(async () => {
     pausedClaimWrite = undefined
     stagedOpenInjection = undefined
+    beforeReclaimUnlink = undefined
+    beforeInstallStamp = undefined
     onClaimRead = undefined
     commitInjection = undefined
     claimInstallInjection = undefined
@@ -579,6 +614,8 @@ describe('terminal-fact publish across withdrawn claims', () => {
       ...realFsPromises,
       readFile: realReadFile,
       open: realOpen,
+      unlink: realUnlink,
+      utimes: realUtimes,
       writeFile: realWriteFile,
       link: realLink,
       rename: realRename,
@@ -587,6 +624,8 @@ describe('terminal-fact publish across withdrawn claims', () => {
       ...realFs,
       linkSync: realLinkSync,
       openSync: realOpenSync,
+      unlinkSync: realUnlinkSync,
+      utimesSync: realUtimesSync,
       renameSync: realRenameSync,
     }))
     registry?._setBackgroundSessionsRootForTesting(undefined)
@@ -1420,7 +1459,11 @@ describe('terminal-fact publish across withdrawn claims', () => {
       const target = terminalFactPath(session.id, 'natural')
       realFs.rmSync(`${target}.claim`, { force: true, recursive: true })
       const stale = new Date(Date.now() - 11_000)
-      realFs.utimesSync(`${target}.commit`, stale, stale)
+      const dir = `${target}.commit`
+      for (const entry of realFs.readdirSync(dir)) {
+        realUtimesSync(join(dir, entry), stale, stale)
+      }
+      realUtimesSync(dir, stale, stale)
       // The holder's per-ID lock is held, so this sync termination
       // takes the ELOCKED fallback and publishes without it.
       registry.recordBackgroundSessionNaturalTerminationSync(
@@ -1602,7 +1645,11 @@ describe('terminal-fact publish across withdrawn claims', () => {
       const target = terminalFactPath(session.id, 'natural')
       realFs.rmSync(`${target}.claim`, { force: true, recursive: true })
       const stale = new Date(Date.now() - 11_000)
-      realFs.utimesSync(`${target}.commit`, stale, stale)
+      const dir = `${target}.commit`
+      for (const entry of realFs.readdirSync(dir)) {
+        realUtimesSync(join(dir, entry), stale, stale)
+      }
+      realUtimesSync(dir, stale, stale)
       // The holder's per-ID lock is held, so this sync termination
       // takes the ELOCKED fallback and publishes without it.
       registry.recordBackgroundSessionNaturalTerminationSync(
@@ -1624,184 +1671,6 @@ describe('terminal-fact publish across withdrawn claims', () => {
     } finally {
       linkUnsupported = false
       registry._setCommitPublishOwnedHookForTestingSync(undefined)
-    }
-      },
-    },
-    {
-      name: 'keeps a paused holder claim that was staged longer than the stale threshold',
-      run: async () => {
-    // Regression test for the CodeRabbit review on #2564: rename()
-    // preserves the staged directory's mtime, so a holder that paused
-    // longer than the stale threshold between staging and installing
-    // its claim looked stale the moment it acquired the claim — and a
-    // successor revoked it immediately. The claim age must be measured
-    // from installation: the installed claim is restamped, so the
-    // successor waits for the paused holder instead of revoking it.
-    const session = await registry.createBackgroundSession({
-      id: 'bg-claim-age-install-async',
-      pid: 424242,
-      cwd: '/repo',
-      command: ['sleep', '30'],
-      sessionId: 'sess-claim-age-install-async',
-      processMarker: TEST_PROCESS_MARKER,
-    })
-    const target = terminalFactPath(session.id, 'natural')
-    const options = { ownerPid: session.pid, expectedSession: session }
-    linkUnsupported = true
-    // Backdate the staged directory right before the rename installs
-    // it, reproducing a holder paused past the stale threshold before
-    // the directory rename: the installed claim inherits the old mtime.
-    claimInstallInjection = from => {
-      const stale = new Date(Date.now() - 11_000)
-      realFs.utimesSync(from, stale, stale)
-    }
-    const { entered, release } = armCommitOwnedHookPause()
-    const holder = registry.recordBackgroundSessionNaturalTermination(
-      session.id,
-      { exitCode: 0 },
-      options,
-    )
-    holder.catch(() => {})
-    try {
-      await awaitCommitHookEntered(entered)
-      // Withdraw the holder's terminal-fact claim and age the per-ID
-      // lock, so the successor claims the publish itself instead of
-      // adopting the holder's tmp while the holder is paused.
-      await rm(`${target}.claim`, { force: true, recursive: true })
-      await ageSessionLock(session.id)
-      const successor = registry.recordBackgroundSessionNaturalTermination(
-        session.id,
-        { exitCode: 3 },
-        options,
-      )
-      successor.catch(() => {})
-      let successorSettled = false
-      void successor.then(
-        () => {
-          successorSettled = true
-        },
-        () => {
-          successorSettled = true
-        },
-      )
-      // The successor must wait on the freshly installed claim instead
-      // of revoking it: after several poll iterations it has neither
-      // settled nor removed the holder's staged record.
-      await new Promise(resolve => setTimeout(resolve, 150))
-      expect(successorSettled).toBe(false)
-      const holderStaged = realFs
-        .readdirSync(`${target}.commit`)
-        .find(name => name.startsWith('staged.'))
-      expect(holderStaged).toBeDefined()
-      release()
-      expect(await holder).toMatchObject({ status: 'exited', exitCode: 0 })
-      expect(await successor).toMatchObject({ status: 'exited', exitCode: 0 })
-      expect(await storedExitCode(session.id)).toBe(0)
-    } finally {
-      linkUnsupported = false
-      release()
-      await Promise.allSettled([holder])
-    }
-      },
-    },
-    {
-      name: 'a stale-claim reclaim must not remove a successor claim installed after the stale check',
-      run: async () => {
-    // Regression test for the CodeRabbit review on #2564: the reclaim
-    // removed the claim directory by pathname, so a reclaimer delayed
-    // after its stale check would delete a fresh successor claim
-    // installed in between — and with it the successor's staged record.
-    // The reclaim must remove only the claim it verified as stale, and
-    // the fresh writer's staged record must survive and publish.
-    const session = await registry.createBackgroundSession({
-      id: 'bg-reclaim-successor-async',
-      pid: 424242,
-      cwd: '/repo',
-      command: ['sleep', '30'],
-      sessionId: 'sess-reclaim-successor-async',
-      processMarker: TEST_PROCESS_MARKER,
-    })
-    const target = terminalFactPath(session.id, 'natural')
-    const claimDir = `${target}.commit`
-    const options = { ownerPid: session.pid, expectedSession: session }
-    linkUnsupported = true
-    const { entered, release } = armCommitOwnedHookPause()
-    const holder = registry.recordBackgroundSessionNaturalTermination(
-      session.id,
-      { exitCode: 0 },
-      options,
-    )
-    holder.catch(() => {})
-    const writers = [holder]
-    try {
-      await awaitCommitHookEntered(entered)
-      // Age the holder's claim (installed fresh) and the per-ID lock so
-      // the contender can proceed while the holder stays paused, and
-      // withdraw the terminal-fact claim so the contender publishes its
-      // own fact instead of adopting the holder's tmp.
-      await ageCommitClaim(target)
-      await ageSessionLock(session.id)
-      await rm(`${target}.claim`, { force: true, recursive: true })
-      // The contender observes the stale claim and pauses inside the
-      // reclaim window, right after its stale check.
-      const reclaimEntered = Promise.withResolvers<void>()
-      let releaseContender!: () => void
-      const contenderGate = new Promise<void>(resolve => {
-        releaseContender = resolve
-      })
-      registry._setCommitPublishReclaimHookForTesting(async () => {
-        reclaimEntered.resolve()
-        await contenderGate
-      })
-      const contender = registry.recordBackgroundSessionNaturalTermination(
-        session.id,
-        { exitCode: 3 },
-        options,
-      )
-      contender.catch(() => {})
-      writers.push(contender)
-      try {
-        await Promise.race([
-          reclaimEntered.promise,
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () => reject(new Error('reclaim hook never fired')),
-              5000,
-            ),
-          ),
-        ])
-        // While the contender is paused after its stale check, another
-        // reclaimer removes the stale claim and a fresh publisher
-        // installs its own claim with a complete staged record.
-        await rm(claimDir, { force: true, recursive: true })
-        const manualPending = join(dirname(claimDir), '.publish-manual')
-        await mkdir(manualPending)
-        await realWriteFile(
-          join(manualPending, 'staged.manual'),
-          JSON.stringify(successorFact(session.id, 3)),
-        )
-        await realRename(manualPending, claimDir)
-        releaseContender()
-        // The resumed contender must abort its reclaim: the installed
-        // claim is not the one it observed stale. Give it a few poll
-        // iterations, then confirm the successor's staged record
-        // survived the reclaim attempt.
-        await new Promise(resolve => setTimeout(resolve, 100))
-        expect(realFs.existsSync(join(claimDir, 'staged.manual'))).toBe(true)
-        // The surviving record is complete and publishes.
-        realFs.renameSync(join(claimDir, 'staged.manual'), target)
-        realFs.rmdirSync(claimDir)
-        const contenderResult = await contender
-        expect(contenderResult).toMatchObject({ status: 'failed', exitCode: 3 })
-        expect(await storedExitCode(session.id)).toBe(3)
-      } finally {
-        releaseContender()
-        registry._setCommitPublishReclaimHookForTesting(undefined)
-      }
-    } finally {
-      linkUnsupported = false
-      release()
-      await Promise.allSettled(writers)
     }
       },
     },
@@ -1879,7 +1748,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
   }
 
   for (const synchronous of [false, true]) {
-    for (const outcome of ['collision', 'denied', 'reclaimed'] as const) {
+    for (const outcome of ['collision', 'reclaimed'] as const) {
       it(`handles claim ${outcome} during ${synchronous ? 'sync' : 'async'} publication`, async () => {
         const session = await registry.createBackgroundSession({
           id: 'bg-claim-install-race',
@@ -1893,14 +1762,6 @@ describe('terminal-fact publish across withdrawn claims', () => {
         const options = { ownerPid: session.pid, expectedSession: session }
         let injected = false
         linkUnsupported = true
-        if (outcome === 'denied') {
-          // After the Windows collision fix, an EACCES with both the
-          // claim directory and the target absent is a retryable
-          // collision on win32 by design. This case asserts the
-          // non-Windows permission failure, so pin the platform and
-          // keep the expectation deterministic on every host.
-          pinProcessPlatform('linux')
-        }
         if (outcome === 'reclaimed') {
           const reclaim = () => {
             if (injected) return
@@ -1913,9 +1774,6 @@ describe('terminal-fact publish across withdrawn claims', () => {
           claimInstallInjection = (from, to) => {
             injected = true
             expect(to).toBe(`${target}.commit`)
-            if (outcome === 'denied') {
-              throw Object.assign(new Error('claim install denied'), { code: 'EACCES' })
-            }
             // Another cooperating writer acquires the claim between the
             // contender's stat and directory rename. Attempt the actual
             // rename while the winner's complete staged source is live.
@@ -1943,136 +1801,195 @@ describe('terminal-fact publish across withdrawn claims', () => {
           const terminate = () => registry.recordBackgroundSessionNaturalTerminationSync(
             session.id, { exitCode: 0 }, options,
           )
-          if (outcome === 'denied') expect(terminate).toThrow('claim install denied')
-          else terminate()
+          terminate()
         } else {
           const pending = registry.recordBackgroundSessionNaturalTermination(
             session.id, { exitCode: 0 }, options,
           )
-          if (outcome === 'denied') {
-            await expect(pending).rejects.toMatchObject({ code: 'EACCES' })
-          } else {
-            await expect(pending).resolves.toMatchObject({ exitCode })
-          }
+          await expect(pending).resolves.toMatchObject({ exitCode })
         }
         expect(injected).toBe(true)
-        if (outcome === 'denied') {
-          expect(realFs.existsSync(target)).toBe(false)
-        } else {
-          expect(await storedExitCode(session.id)).toBe(exitCode)
-        }
+        expect(await storedExitCode(session.id)).toBe(exitCode)
         expect(realFs.existsSync(`${target}.commit`)).toBe(false)
         expect(realFs.readdirSync(dirname(target)).filter(name => name.startsWith('.publish-'))).toEqual([])
       })
     }
   }
 
-  it('restamps a no-hard-link claim at installation through the sync fallback', async () => {
-    // Regression test for the CodeRabbit review on #2564: rename()
-    // preserves the staged directory's mtime, so a holder that paused
-    // longer than the stale threshold between staging and installing
-    // its claim looked stale the moment it acquired the claim. The sync
-    // installation itself must record a reliable acquisition time: the
-    // claim's mtime is observed inside the owned-commit hook, before
-    // the holder publishes and cleans up its claim.
+  async function publishForTest(
+    synchronous: boolean,
+    session: Awaited<ReturnType<typeof registry.createBackgroundSession>>,
+  ): Promise<void> {
+    const options = { ownerPid: session.pid, expectedSession: session }
+    if (synchronous) {
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id, { exitCode: 0 }, options,
+      )
+    } else {
+      await registry.recordBackgroundSessionNaturalTermination(
+        session.id, { exitCode: 0 }, options,
+      )
+    }
+  }
+
+  async function createPublishFixture() {
     const session = await registry.createBackgroundSession({
-      id: 'bg-claim-age-install-sync',
+      id: 'bg-claim-boundary',
       pid: 424242,
       cwd: '/repo',
       command: ['sleep', '30'],
-      sessionId: 'sess-claim-age-install-sync',
+      sessionId: 'sess-claim-boundary',
       processMarker: TEST_PROCESS_MARKER,
     })
     const target = terminalFactPath(session.id, 'natural')
     linkUnsupported = true
-    // Backdate the staged directory right before the rename installs
-    // it, reproducing a holder paused past the stale threshold before
-    // the directory rename.
-    claimInstallInjection = from => {
-      const stale = new Date(Date.now() - 11_000)
-      realFs.utimesSync(from, stale, stale)
-    }
-    const startedAt = Date.now()
-    let observedMtimeMs: number | undefined
-    registry._setCommitPublishOwnedHookForTestingSync(() => {
-      observedMtimeMs = realFs.statSync(`${target}.commit`).mtimeMs
-    })
-    try {
-      registry.recordBackgroundSessionNaturalTerminationSync(
-        session.id,
-        { exitCode: 0 },
-        { ownerPid: session.pid, expectedSession: session },
-      )
-      expect(observedMtimeMs).toBeGreaterThanOrEqual(startedAt - 1000)
-      expect(await storedExitCode(session.id)).toBe(0)
-    } finally {
-      linkUnsupported = false
-    }
-  })
+    return { session, target, claimDir: `${target}.commit` }
+  }
+
+  async function seedStaleClaim(claimDir: string, name = 'staged.dead') {
+    const stale = new Date(Date.now() - 11_000)
+    await mkdir(claimDir)
+    await writeFile(join(claimDir, name), '{}')
+    await realUtimes(join(claimDir, name), stale, stale)
+    await realUtimes(claimDir, stale, stale)
+  }
 
   for (const synchronous of [false, true]) {
-    it(
-      `retries a Windows access-denied claim collision when the claim and target are both absent (${synchronous ? 'sync' : 'async'})`,
-      async () => {
-        // Regression test for the CodeRabbit review on #2564: on
-        // Windows a directory-rename collision reports EACCES/EPERM
-        // instead of ENOTEMPTY. When the competing publisher removed
-        // its claim and has not published yet, neither the claim
-        // directory nor the target exists: the collision is retryable
-        // — the staged record is complete — so the publisher must keep
-        // polling like the EEXIST/ENOTEMPTY branches instead of
-        // failing the publish.
-        const session = await registry.createBackgroundSession({
-          id: `bg-claim-eacces-retry-${synchronous ? 'sync' : 'async'}`,
-          pid: 424242,
-          cwd: '/repo',
-          command: ['sleep', '30'],
-          sessionId: `sess-claim-eacces-retry-${synchronous ? 'sync' : 'async'}`,
-          processMarker: TEST_PROCESS_MARKER,
-        })
-        const target = terminalFactPath(session.id, 'natural')
-        const options = { ownerPid: session.pid, expectedSession: session }
-        let injected = false
-        linkUnsupported = true
-        pinProcessPlatform('win32')
-        // Windows denies the directory rename while the competing claim
-        // exists; by the time the publisher rechecks, that claim is
-        // gone and the target has not appeared yet.
-        claimInstallInjection = () => {
-          injected = true
-          throw Object.assign(new Error('simulated Windows collision'), {
-            code: 'EACCES',
-          })
+    const runtime = synchronous ? 'sync' : 'async'
+    it(`ages only the sealed payload from claim installation (${runtime})`, async () => {
+      const { session, target, claimDir } = await createPublishFixture()
+      claimInstallInjection = from => {
+        const stale = new Date(Date.now() - 11_000)
+        for (const entry of realFs.readdirSync(from)) {
+          realUtimesSync(join(from, entry), stale, stale)
         }
+        realUtimesSync(from, stale, stale)
+      }
+      const startedAt = Date.now()
+      const checkStamp = mock(() => {
+        const entries = realFs.readdirSync(claimDir)
+        expect(entries).toHaveLength(1)
+        expect(entries[0]).toStartWith('staged.')
+        expect(realFs.statSync(join(claimDir, entries[0]!)).mtimeMs)
+          .toBeGreaterThanOrEqual(startedAt - 1000)
+        expect(realFs.existsSync(target)).toBe(false)
+      })
+      registry._setCommitPublishOwnedHookForTesting(async () => checkStamp())
+      registry._setCommitPublishOwnedHookForTestingSync(checkStamp)
+      await publishForTest(synchronous, session)
+      expect(checkStamp).toHaveBeenCalledTimes(1)
+      expect(await storedExitCode(session.id)).toBe(0)
+    })
+
+    for (const abandoned of [false, true]) {
+      it(`handles an unsealed ${abandoned ? 'abandoned' : 'fresh'} claim (${runtime})`, async () => {
+        const { session, target, claimDir } = await createPublishFixture()
+        await seedStaleClaim(claimDir, 'installing.fixture')
+        // Ignore inherited mtime. Age the same observed installing name
+        // without sleeping for the stale threshold.
+        registry._setCommitPublishClaimMaxPollsForTesting(abandoned ? 3 : 1)
+        let observations = 0
+        const clock = spyOn(performance, 'now').mockImplementation(() =>
+          abandoned && observations++ > 0 ? 11_000 : 0,
+        )
         try {
-          if (synchronous) {
-            registry.recordBackgroundSessionNaturalTerminationSync(
-              session.id,
-              { exitCode: 0 },
-              options,
-            )
+          if (abandoned) {
+            await publishForTest(synchronous, session)
+            expect(await storedExitCode(session.id)).toBe(0)
+            expect(realFs.existsSync(claimDir)).toBe(false)
           } else {
-            const terminated =
-              await registry.recordBackgroundSessionNaturalTermination(
-                session.id,
-                { exitCode: 0 },
-                options,
-              )
-            expect(terminated).toMatchObject({ status: 'exited', exitCode: 0 })
+            await expect(publishForTest(synchronous, session))
+              .rejects.toThrow('Timed out waiting for a concurrent publish')
+            expect(realFs.existsSync(join(claimDir, 'installing.fixture'))).toBe(true)
+            expect(realFs.existsSync(target)).toBe(false)
           }
-          expect(injected).toBe(true)
-          expect(await storedExitCode(session.id)).toBe(0)
-          expect(realFs.existsSync(`${target}.commit`)).toBe(false)
-          expect(
-            realFs
-              .readdirSync(dirname(target))
-              .filter(name => name.startsWith('.publish-')),
-          ).toEqual([])
         } finally {
-          linkUnsupported = false
+          clock.mockRestore()
         }
-      },
-    )
+      })
+    }
+
+    for (const outcome of ['withdrawn', 'denied'] as const) {
+      it(`handles a ${outcome} claim before acquisition stamping (${runtime})`, async () => {
+        const { session, target, claimDir } = await createPublishFixture()
+        const inject = mock((path: string) => {
+          expect(dirname(path)).toBe(claimDir)
+          if (outcome === 'denied') {
+            throw Object.assign(new Error('claim stamp denied'), { code: 'EACCES' })
+          }
+          realUnlinkSync(path)
+          realFs.rmdirSync(claimDir)
+        })
+        beforeInstallStamp = inject
+        if (outcome === 'denied') {
+          await expect(publishForTest(synchronous, session))
+            .rejects.toMatchObject({ code: 'EACCES' })
+          expect(realFs.existsSync(target)).toBe(false)
+        } else {
+          await publishForTest(synchronous, session)
+          expect(await storedExitCode(session.id)).toBe(0)
+        }
+        expect(inject).toHaveBeenCalledTimes(1)
+        expect(realFs.existsSync(claimDir)).toBe(false)
+        expect((await readdir(dirname(target))).filter(name => name.startsWith('.publish-')))
+          .toEqual([])
+      })
+    }
+
+    it(`rejects a malformed pre-existing claim without replacing it (${runtime})`, async () => {
+      const { session, target, claimDir } = await createPublishFixture()
+      await writeFile(claimDir, 'not a directory')
+      await expect(publishForTest(synchronous, session))
+        .rejects.toThrow('Expected a commit claim directory')
+      expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
+      expect(realFs.existsSync(target)).toBe(false)
+    })
+
+    for (const code of ['EACCES', 'EPERM']) {
+      for (const outcome of ['retry', 'winner', 'active', 'not-directory', 'persistent', 'non-Windows'] as const) {
+        it(`classifies ${code} at claim installation: ${outcome} (${runtime})`, async () => {
+          const { session, target, claimDir } = await createPublishFixture()
+          pinProcessPlatform(outcome === 'non-Windows' ? 'linux' : 'win32')
+          registry._setCommitPublishClaimMaxPollsForTesting(2)
+          let attempts = 0
+          const deny = () => {
+            attempts++
+            if (outcome === 'active') {
+              realFs.mkdirSync(claimDir)
+              realWriteFileSync(join(claimDir, 'staged.active'), '{}')
+            } else if (outcome === 'not-directory') {
+              realWriteFileSync(claimDir, 'not a directory')
+            } else if (outcome === 'winner') {
+              realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+            } else if (outcome === 'persistent') {
+              claimInstallInjection = deny
+            }
+            throw Object.assign(new Error('claim install denied'), { code })
+          }
+          claimInstallInjection = deny
+          const publish = () => publishForTest(synchronous, session)
+          if (outcome === 'retry' || outcome === 'winner') {
+            await publish()
+            expect(await storedExitCode(session.id)).toBe(outcome === 'retry' ? 0 : 3)
+            expect(realFs.existsSync(claimDir)).toBe(false)
+          } else {
+            if (outcome === 'active') {
+              await expect(publish()).rejects.toThrow('Timed out waiting for a concurrent publish')
+              expect(realFs.existsSync(join(claimDir, 'staged.active'))).toBe(true)
+            } else {
+              await expect(publish()).rejects.toMatchObject({ code })
+            }
+            if (outcome === 'not-directory') {
+              expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
+            }
+            expect(realFs.existsSync(target)).toBe(false)
+          }
+          expect(attempts).toBe(outcome === 'persistent' ? 2 : 1)
+          expect((await readdir(dirname(target))).filter(name => name.startsWith('.publish-')))
+            .toEqual([])
+        })
+      }
+    }
   }
 
   for (const synchronous of [false, true]) {
@@ -2099,10 +2016,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
         // One stale claim: the only poll iteration takes the
         // stale-reclaim branch after its target check.
         const claimDir = `${target}.commit`
-        await mkdir(claimDir)
-        await writeFile(join(claimDir, 'staged.dead'), 'stale')
-        const stale = new Date(Date.now() - 11_000)
-        await utimes(claimDir, stale, stale)
+        await seedStaleClaim(claimDir)
         // During that only iteration — after its target check, inside
         // the reclaim window — a successor publishes the target.
         if (synchronous) {
@@ -2139,71 +2053,37 @@ describe('terminal-fact publish across withdrawn claims', () => {
     )
   }
 
-  it('a sync stale-claim reclaim must not remove a successor claim installed after the stale check', async () => {
-    // Regression test for the CodeRabbit review on #2564: the reclaim
-    // removed the claim directory by pathname, so a reclaimer delayed
-    // after its stale check could delete a successor claim installed in
-    // between — and with it the successor's staged record. The reclaim
-    // must remove only the claim it verified as stale.
-    const session = await registry.createBackgroundSession({
-      id: 'bg-reclaim-successor-sync',
-      pid: 424242,
-      cwd: '/repo',
-      command: ['sleep', '30'],
-      sessionId: 'sess-reclaim-successor-sync',
-      processMarker: TEST_PROCESS_MARKER,
-    })
-    const target = terminalFactPath(session.id, 'natural')
-    const claimDir = `${target}.commit`
-    const options = { ownerPid: session.pid, expectedSession: session }
-    linkUnsupported = true
-    registry._setCommitPublishClaimMaxPollsForTesting(1)
-    // A stale claim left by a dead publisher.
-    await mkdir(claimDir)
-    await writeFile(join(claimDir, 'staged.dead'), 'stale')
-    const stale = new Date(Date.now() - 11_000)
-    await utimes(claimDir, stale, stale)
-    let hookFired = false
-    registry._setCommitPublishReclaimHookForTestingSync(() => {
-      hookFired = true
-      // Between the stale check and the removal, another reclaimer
-      // frees the stale claim and a fresh publisher installs its own
-      // claim with a complete staged record.
-      realFs.rmSync(claimDir, { recursive: true, force: true })
-      const manualPending = join(dirname(claimDir), '.publish-manual')
-      realFs.mkdirSync(manualPending)
-      realFs.writeFileSync(
-        join(manualPending, 'staged.manual'),
-        JSON.stringify(successorFact(session.id, 3)),
-      )
-      realFs.renameSync(manualPending, claimDir)
-    })
-    try {
-      let timedOut = false
-      try {
-        registry.recordBackgroundSessionNaturalTerminationSync(
-          session.id,
-          { exitCode: 0 },
-          options,
-        )
-      } catch (error) {
-        timedOut = (error as Error).message.includes(
-          'Timed out waiting for a concurrent publish',
-        )
-      }
-      expect(hookFired).toBe(true)
-      // The single poll ended without a target to return.
-      expect(timedOut).toBe(true)
-      // The successor's staged record survived the reclaim.
-      expect(realFs.existsSync(join(claimDir, 'staged.manual'))).toBe(true)
-      // The surviving record is complete and publishes.
-      realFs.renameSync(join(claimDir, 'staged.manual'), target)
-      realFs.rmdirSync(claimDir)
-      expect(await storedExitCode(session.id)).toBe(3)
-    } finally {
-      linkUnsupported = false
+  for (const synchronous of [false, true]) {
+    for (const afterIdentityCheck of [false, true]) {
+      it(`preserves a successor at stale reclaim ${afterIdentityCheck ? 'unlink' : 'identity check'} (${synchronous ? 'sync' : 'async'})`, async () => {
+        const { session, target, claimDir } = await createPublishFixture()
+        registry._setCommitPublishClaimMaxPollsForTesting(1)
+        await seedStaleClaim(claimDir)
+        const replacement = mock(() => {
+          realUnlinkSync(join(claimDir, 'staged.dead'))
+          realFs.rmdirSync(claimDir)
+          const pending = realFs.mkdtempSync(join(dirname(claimDir), '.publish-'))
+          realWriteFileSync(join(pending, 'staged.successor'), JSON.stringify(successorFact(session.id, 3)))
+          realRenameSync(pending, claimDir)
+        })
+        if (afterIdentityCheck) {
+          beforeReclaimUnlink = path => {
+            if (path === join(claimDir, 'staged.dead')) replacement()
+          }
+        } else {
+          registry._setCommitPublishReclaimHookForTesting(async () => replacement())
+          registry._setCommitPublishReclaimHookForTestingSync(replacement)
+        }
+        await expect(publishForTest(synchronous, session))
+          .rejects.toThrow('Timed out waiting for a concurrent publish')
+        expect(replacement).toHaveBeenCalledTimes(1)
+        expect(realFs.existsSync(target)).toBe(false)
+        realRenameSync(join(claimDir, 'staged.successor'), target)
+        realFs.rmdirSync(claimDir)
+        expect(await storedExitCode(session.id)).toBe(3)
+      })
     }
-  })
+  }
 
   // Bounded staging-open matrix: async/sync x missing copy with/without
   // a competing winner, and a permission failure. ENOENT recovers;
@@ -2289,10 +2169,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
         try {
           const target = terminalFactPath(session.id, 'natural')
           const claimDir = `${target}.commit`
-          await mkdir(claimDir)
-          await writeFile(join(claimDir, 'staged.1234.deadbeef'), '{}')
-          const stale = new Date(Date.now() - 11_000)
-          await utimes(claimDir, stale, stale)
+          await seedStaleClaim(claimDir)
           let visibilityChecked = false
           const checkVisibility = () => {
             // Inspect the actual reader-visible pathname at the last

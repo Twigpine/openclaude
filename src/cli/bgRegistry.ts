@@ -1952,44 +1952,41 @@ async function commitPublishFile(
   const claimDir = `${target}.commit`
   const maxClaimPolls =
     commitPublishClaimMaxPollsForTesting ?? COMMIT_PUBLISH_CLAIM_MAX_POLLS
+  const claimIsStale = observeCommitPublishClaimAge()
   for (let attempt = 0; attempt < maxClaimPolls; attempt++) {
     if (await commitPublishPathStat(target)) return 'exists'
     const claim = await commitPublishPathStat(claimDir)
     if (claim) {
-      if (Date.now() - claim.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS) {
-        await commitPublishReclaimHookForTesting?.()
-        // Remove only the claim this waiter observed as stale: a
-        // successor may have installed a fresh claim since the stat,
-        // and a recursive rm by path would delete its staged record.
-        // Re-verify the directory is still the observed one, unlink
-        // the observed entries by name, then rmdir: a nonempty
-        // successor claim makes rmdir fail, so only a fully consumed
-        // stale claim is removed.
-        const entries = await readdir(claimDir).catch(() => undefined)
-        if (entries !== undefined) {
-          const current = await commitPublishPathStat(claimDir)
-          if (
-            current !== undefined &&
-            current.dev === claim.dev &&
-            current.ino === claim.ino &&
-            current.mtimeMs === claim.mtimeMs
-          ) {
-            for (const entry of entries) {
-              await unlink(join(claimDir, entry)).catch(() => {})
-            }
-            await rmdir(claimDir).catch(() => {})
-          }
-        }
-      } else {
-        await new Promise(resolve => setTimeout(resolve, 10))
+      if (!claim.isDirectory()) {
+        throw new Error(`Expected a commit claim directory at ${claimDir}`)
       }
+      const entries = await readCommitPublishEntries(claimDir)
+      if (!entries) continue
+      const sealedName = entries.find(name => name.startsWith('staged.'))
+      const sealedClaim = sealedName &&
+        (await commitPublishPathStat(join(claimDir, sealedName)))
+      if (sealedName && !sealedClaim) continue
+      if (claimIsStale(sealedClaim ? sealedClaim.mtimeMs : claim.mtimeMs, entries)) {
+        await commitPublishReclaimHookForTesting?.()
+        if (sameCommitPublishClaim(claim, await commitPublishPathStat(claimDir))) {
+          for (const entry of entries) {
+            await unlink(join(claimDir, entry)).catch(() => {})
+          }
+          // A successor has a different staged name and is nonempty.
+          await rmdir(claimDir).catch(() => {})
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
       continue
     }
-    const stagedName = `staged.${randomUUID()}`
+    const token = randomUUID()
+    const installingName = `installing.${token}`
     const pendingDir = await mkdtemp(join(dirname(target), '.publish-'))
-    const pending = join(pendingDir, stagedName)
-    const staged = join(claimDir, stagedName)
+    const pending = join(pendingDir, installingName)
+    const installing = join(claimDir, installingName)
+    const staged = join(claimDir, `staged.${token}`)
     let installed = false
+    let sealed = false
     try {
       try {
         await copyFile(tmp, pending)
@@ -2010,24 +2007,33 @@ async function commitPublishFile(
         installed = true
       } catch (error) {
         if (isErrno(error, 'EEXIST') || isErrno(error, 'ENOTEMPTY')) continue
-        if (isCommitPublishDirectoryCollisionOnWindows(error)) {
-          if ((await commitPublishPathStat(claimDir))?.isDirectory()) continue
-          // The winner may have removed its claim before we could stat it.
-          if (await commitPublishPathStat(target)) return 'exists'
-          // Neither path exists: the competing publisher removed its
-          // claim and has not published yet, so the collision is
-          // retryable — keep polling like EEXIST and ENOTEMPTY instead
-          // of failing a complete staged record.
+        if (!isCommitPublishDirectoryCollisionOnWindows(error)) throw error
+        const collision = await commitPublishPathStat(claimDir)
+        if (collision?.isDirectory()) continue
+        if (await commitPublishPathStat(target)) return 'exists'
+        if (collision) throw error // A non-directory is not a competing claim.
+        // Both paths are absent: the collision may have cleared, or this
+        // may be a real denial. Retry within the same poll budget.
+        if (attempt + 1 < maxClaimPolls) {
+          await new Promise(resolve => setTimeout(resolve, 10))
           continue
         }
+        // Preserve the denial on exhaustion, unless another writer won.
+        if (await commitPublishPathStat(target)) return 'exists'
         throw error
       }
-      // rename() preserves the staged directory's mtime, so a holder
-      // paused between staging and installing would already look stale
-      // on arrival. Stamp the claim with the installation time so its
-      // age is measured from acquisition.
-      const acquiredAt = new Date()
-      await utimes(claimDir, acquiredAt, acquiredAt).catch(() => {})
+      // Stamp a unique path, not the shared directory: a withdrawn
+      // holder cannot change its successor's age. Publishing the sealed
+      // name makes that stamp distinguishable from a pre-install mtime.
+      try {
+        const acquiredAt = new Date()
+        await utimes(installing, acquiredAt, acquiredAt)
+        await rename(installing, staged)
+        sealed = true
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+        continue
+      }
       if (await commitPublishPathStat(target)) return 'exists'
       await commitPublishHookForTesting?.()
       if (!(await commitPublishPathStat(staged))) continue
@@ -2042,7 +2048,7 @@ async function commitPublishFile(
       }
     } finally {
       if (installed) {
-        await unlink(staged).catch(() => {})
+        await unlink(sealed ? staged : installing).catch(() => {})
         // A fresh holder's claim is nonempty and rmdir cannot remove it.
         await rmdir(claimDir).catch(() => {})
       } else {
@@ -2073,48 +2079,44 @@ function commitPublishFileSync(
   const claimDir = `${target}.commit`
   const maxClaimPolls =
     commitPublishClaimMaxPollsForTesting ?? COMMIT_PUBLISH_CLAIM_MAX_POLLS
+  const claimIsStale = observeCommitPublishClaimAge()
   for (let attempt = 0; attempt < maxClaimPolls; attempt++) {
     if (commitPublishPathStatSync(target)) return 'exists'
     const claim = commitPublishPathStatSync(claimDir)
     if (claim) {
-      if (Date.now() - claim.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS) {
+      if (!claim.isDirectory()) {
+        throw new Error(`Expected a commit claim directory at ${claimDir}`)
+      }
+      const entries = readCommitPublishEntriesSync(claimDir)
+      if (!entries) continue
+      const sealedName = entries.find(name => name.startsWith('staged.'))
+      const sealedClaim = sealedName &&
+        commitPublishPathStatSync(join(claimDir, sealedName))
+      if (sealedName && !sealedClaim) continue
+      if (claimIsStale(sealedClaim ? sealedClaim.mtimeMs : claim.mtimeMs, entries)) {
         commitPublishReclaimHookForTestingSync?.()
-        // Remove only the claim this waiter observed as stale: a
-        // successor may have installed a fresh claim since the stat,
-        // and a recursive rm by path would delete its staged record.
-        // Re-verify the directory is still the observed one, unlink
-        // the observed entries by name, then rmdir: a nonempty
-        // successor claim makes rmdir fail, so only a fully consumed
-        // stale claim is removed.
-        try {
-          const entries = readdirSync(claimDir)
-          const current = commitPublishPathStatSync(claimDir)
-          if (
-            current !== undefined &&
-            current.dev === claim.dev &&
-            current.ino === claim.ino &&
-            current.mtimeMs === claim.mtimeMs
-          ) {
-            for (const entry of entries) {
-              try {
-                unlinkSync(join(claimDir, entry))
-              } catch {}
-            }
+        if (sameCommitPublishClaim(claim, commitPublishPathStatSync(claimDir))) {
+          for (const entry of entries) {
             try {
-              rmdirSync(claimDir)
+              unlinkSync(join(claimDir, entry))
             } catch {}
           }
-        } catch {}
-      } else {
-        sleepSync(10)
+          try {
+            rmdirSync(claimDir)
+          } catch {}
+        }
       }
+      sleepSync(10)
       continue
     }
-    const stagedName = `staged.${randomUUID()}`
+    const token = randomUUID()
+    const installingName = `installing.${token}`
     const pendingDir = mkdtempSync(join(dirname(target), '.publish-'))
-    const pending = join(pendingDir, stagedName)
-    const staged = join(claimDir, stagedName)
+    const pending = join(pendingDir, installingName)
+    const installing = join(claimDir, installingName)
+    const staged = join(claimDir, `staged.${token}`)
     let installed = false
+    let sealed = false
     try {
       try {
         copyFileSync(tmp, pending)
@@ -2135,25 +2137,33 @@ function commitPublishFileSync(
         installed = true
       } catch (error) {
         if (isErrno(error, 'EEXIST') || isErrno(error, 'ENOTEMPTY')) continue
-        if (isCommitPublishDirectoryCollisionOnWindows(error)) {
-          if (commitPublishPathStatSync(claimDir)?.isDirectory()) continue
-          if (commitPublishPathStatSync(target)) return 'exists'
-          // Neither path exists: the competing publisher removed its
-          // claim and has not published yet, so the collision is
-          // retryable — keep polling like EEXIST and ENOTEMPTY instead
-          // of failing a complete staged record.
+        if (!isCommitPublishDirectoryCollisionOnWindows(error)) throw error
+        const collision = commitPublishPathStatSync(claimDir)
+        if (collision?.isDirectory()) continue
+        if (commitPublishPathStatSync(target)) return 'exists'
+        if (collision) throw error // A non-directory is not a competing claim.
+        // Both paths are absent: the collision may have cleared, or this
+        // may be a real denial. Retry within the same poll budget.
+        if (attempt + 1 < maxClaimPolls) {
+          sleepSync(10)
           continue
         }
+        // Preserve the denial on exhaustion, unless another writer won.
+        if (commitPublishPathStatSync(target)) return 'exists'
         throw error
       }
-      // rename() preserves the staged directory's mtime, so a holder
-      // paused between staging and installing would already look stale
-      // on arrival. Stamp the claim with the installation time so its
-      // age is measured from acquisition.
-      const acquiredAt = new Date()
+      // Stamp a unique path, not the shared directory: a withdrawn
+      // holder cannot change its successor's age. Publishing the sealed
+      // name makes that stamp distinguishable from a pre-install mtime.
       try {
-        utimesSync(claimDir, acquiredAt, acquiredAt)
-      } catch {}
+        const acquiredAt = new Date()
+        utimesSync(installing, acquiredAt, acquiredAt)
+        renameSync(installing, staged)
+        sealed = true
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+        continue
+      }
       if (commitPublishPathStatSync(target)) return 'exists'
       commitPublishHookForTestingSync?.()
       if (!(commitPublishPathStatSync(staged))) continue
@@ -2169,7 +2179,7 @@ function commitPublishFileSync(
     } finally {
       if (installed) {
         try {
-          unlinkSync(staged)
+          unlinkSync(sealed ? staged : installing)
         } catch {}
         try {
           rmdirSync(claimDir)
@@ -2187,8 +2197,58 @@ function commitPublishFileSync(
   throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
 }
 
+// An atomically installed directory can retain an arbitrarily old mtime.
+// Until its payload is sealed, count age from the first observation of
+// that unique name. A crash before sealing is therefore still recoverable.
+function observeCommitPublishClaimAge() {
+  let unsealed: { name: string; firstSeen: number } | undefined
+  return (mtimeMs: number, entries: string[]): boolean => {
+    const installing = entries.find(name => name.startsWith('installing.'))
+    if (installing === undefined) {
+      unsealed = undefined
+      return Date.now() - mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
+    }
+    const now = performance.now()
+    if (unsealed?.name !== installing) {
+      unsealed = { name: installing, firstSeen: now }
+    }
+    return now - unsealed.firstSeen > COMMIT_PUBLISH_CLAIM_STALE_MS
+  }
+}
+
+function sameCommitPublishClaim(
+  observed: Stats,
+  current: Stats | undefined,
+): boolean {
+  return (
+    current !== undefined &&
+    current.isDirectory() &&
+    current.dev === observed.dev &&
+    current.ino === observed.ino &&
+    current.mtimeMs === observed.mtimeMs
+  )
+}
+
+async function readCommitPublishEntries(path: string): Promise<string[] | undefined> {
+  try {
+    return await readdir(path)
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
+    return undefined
+  }
+}
+
+function readCommitPublishEntriesSync(path: string): string[] | undefined {
+  try {
+    return readdirSync(path)
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
+    return undefined
+  }
+}
+
 // Windows can report access denied rather than ENOTEMPTY when a
-// directory rename collides. Callers confirm the destination exists.
+// directory rename collides. Callers distinguish a claim from a denial.
 function isCommitPublishDirectoryCollisionOnWindows(error: unknown): boolean {
   return process.platform === 'win32' &&
     (isErrno(error, 'EACCES') || isErrno(error, 'EPERM'))
