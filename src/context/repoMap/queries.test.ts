@@ -8,7 +8,13 @@ import type { SupportedLanguage } from './types.js'
 const __dirname = join(fileURLToPath(import.meta.url), '..')
 
 describe('bundled query drift guard', () => {
-  test.each<SupportedLanguage>(['typescript', 'javascript', 'python'])(
+  test.each<SupportedLanguage>([
+    'typescript',
+    'javascript',
+    'python',
+    'go',
+    'rust',
+  ])(
     '%s: bundled query matches the .scm source file byte-for-byte',
     (language) => {
       // Normalize CRLF → LF so Windows checkouts (where Git may convert line

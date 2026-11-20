@@ -79,4 +79,10 @@ export interface CacheStats {
   exists: boolean
 }
 
-export type SupportedLanguage = 'typescript' | 'tsx' | 'javascript' | 'python'
+export type SupportedLanguage =
+  | 'typescript'
+  | 'tsx'
+  | 'javascript'
+  | 'python'
+  | 'go'
+  | 'rust'

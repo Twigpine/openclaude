@@ -11,6 +11,8 @@ const SUPPORTED_EXTENSIONS: Record<string, SupportedLanguage> = {
   '.mjs': 'javascript',
   '.cjs': 'javascript',
   '.py': 'python',
+  '.go': 'go',
+  '.rs': 'rust',
 }
 
 const EXCLUDED_DIRS = new Set([
