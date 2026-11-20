@@ -1846,7 +1846,11 @@ describe('terminal-fact publish across withdrawn claims', () => {
     return { session, target, claimDir: `${target}.commit` }
   }
 
-  async function seedStaleClaim(claimDir: string, name = 'staged.dead') {
+  const staleStagedName = `staged.${randomUUID()}`
+  const liveStagedName = `staged.${randomUUID()}`
+  const unsealedName = `installing.${randomUUID()}`
+
+  async function seedStaleClaim(claimDir: string, name = staleStagedName) {
     const stale = new Date(Date.now() - 11_000)
     await mkdir(claimDir)
     await writeFile(join(claimDir, name), '{}')
@@ -1884,7 +1888,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     for (const abandoned of [false, true]) {
       it(`handles an unsealed ${abandoned ? 'abandoned' : 'fresh'} claim (${runtime})`, async () => {
         const { session, target, claimDir } = await createPublishFixture()
-        await seedStaleClaim(claimDir, 'installing.fixture')
+        await seedStaleClaim(claimDir, unsealedName)
         // Ignore inherited mtime. Age the same observed installing name
         // without sleeping for the stale threshold.
         registry._setCommitPublishClaimMaxPollsForTesting(abandoned ? 3 : 1)
@@ -1900,7 +1904,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
           } else {
             await expect(publishForTest(synchronous, session))
               .rejects.toThrow('Timed out waiting for a concurrent publish')
-            expect(realFs.existsSync(join(claimDir, 'installing.fixture'))).toBe(true)
+            expect(realFs.existsSync(join(claimDir, unsealedName))).toBe(true)
             expect(realFs.existsSync(target)).toBe(false)
           }
         } finally {
@@ -1945,6 +1949,47 @@ describe('terminal-fact publish across withdrawn claims', () => {
       expect(realFs.existsSync(target)).toBe(false)
     })
 
+    it(`reclaims an empty stale commit claim (${runtime})`, async () => {
+      const { session, claimDir } = await createPublishFixture()
+      await mkdir(claimDir)
+      const stale = new Date(Date.now() - 11_000)
+      await realUtimes(claimDir, stale, stale)
+      registry._setCommitPublishClaimMaxPollsForTesting(2)
+
+      await publishForTest(synchronous, session)
+
+      expect(await storedExitCode(session.id)).toBe(0)
+      expect(realFs.existsSync(claimDir)).toBe(false)
+    })
+
+    for (const shape of ['foreign name', 'multiple entries', 'non-file payload'] as const) {
+      it(`preserves unexpected contents of a stale commit claim: ${shape} (${runtime})`, async () => {
+        const { session, target, claimDir } = await createPublishFixture()
+        await seedStaleClaim(claimDir, shape === 'foreign name' ? 'staged.not-a-uuid' : staleStagedName)
+        const stale = new Date(Date.now() - 11_000)
+        const payload = join(claimDir, staleStagedName)
+        if (shape === 'multiple entries') {
+          await writeFile(join(claimDir, 'unrelated'), 'keep me')
+        } else if (shape === 'non-file payload') {
+          await realUnlink(payload)
+          await mkdir(payload)
+          await realUtimes(payload, stale, stale)
+        }
+        await realUtimes(claimDir, stale, stale)
+        const before = (await readdir(claimDir)).sort()
+        registry._setCommitPublishClaimMaxPollsForTesting(2)
+
+        const result: unknown = await publishForTest(synchronous, session)
+          .catch((error: unknown) => error)
+
+        const after = realFs.existsSync(claimDir) ? (await readdir(claimDir)).sort() : null
+        expect(after).toEqual(before)
+        expect(realFs.existsSync(target)).toBe(false)
+        expect(result).toBeInstanceOf(Error)
+        expect(result).toHaveProperty('message', `Timed out waiting for a concurrent publish to ${target}`)
+      })
+    }
+
     for (const code of ['EACCES', 'EPERM']) {
       for (const outcome of ['retry', 'winner', 'active', 'not-directory', 'persistent', 'non-Windows'] as const) {
         it(`classifies ${code} at claim installation: ${outcome} (${runtime})`, async () => {
@@ -1956,7 +2001,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
             attempts++
             if (outcome === 'active') {
               realFs.mkdirSync(claimDir)
-              realWriteFileSync(join(claimDir, 'staged.active'), '{}')
+              realWriteFileSync(join(claimDir, liveStagedName), '{}')
             } else if (outcome === 'not-directory') {
               realWriteFileSync(claimDir, 'not a directory')
             } else if (outcome === 'winner') {
@@ -1975,7 +2020,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
           } else {
             if (outcome === 'active') {
               await expect(publish()).rejects.toThrow('Timed out waiting for a concurrent publish')
-              expect(realFs.existsSync(join(claimDir, 'staged.active'))).toBe(true)
+              expect(realFs.existsSync(join(claimDir, liveStagedName))).toBe(true)
             } else {
               await expect(publish()).rejects.toMatchObject({ code })
             }
@@ -2060,15 +2105,15 @@ describe('terminal-fact publish across withdrawn claims', () => {
         registry._setCommitPublishClaimMaxPollsForTesting(1)
         await seedStaleClaim(claimDir)
         const replacement = mock(() => {
-          realUnlinkSync(join(claimDir, 'staged.dead'))
+          realUnlinkSync(join(claimDir, staleStagedName))
           realFs.rmdirSync(claimDir)
           const pending = realFs.mkdtempSync(join(dirname(claimDir), '.publish-'))
-          realWriteFileSync(join(pending, 'staged.successor'), JSON.stringify(successorFact(session.id, 3)))
+          realWriteFileSync(join(pending, liveStagedName), JSON.stringify(successorFact(session.id, 3)))
           realRenameSync(pending, claimDir)
         })
         if (afterIdentityCheck) {
           beforeReclaimUnlink = path => {
-            if (path === join(claimDir, 'staged.dead')) replacement()
+            if (path === join(claimDir, staleStagedName)) replacement()
           }
         } else {
           registry._setCommitPublishReclaimHookForTesting(async () => replacement())
@@ -2078,7 +2123,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
           .rejects.toThrow('Timed out waiting for a concurrent publish')
         expect(replacement).toHaveBeenCalledTimes(1)
         expect(realFs.existsSync(target)).toBe(false)
-        realRenameSync(join(claimDir, 'staged.successor'), target)
+        realRenameSync(join(claimDir, liveStagedName), target)
         realFs.rmdirSync(claimDir)
         expect(await storedExitCode(session.id)).toBe(3)
       })

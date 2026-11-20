@@ -1962,16 +1962,20 @@ async function commitPublishFile(
       }
       const entries = await readCommitPublishEntries(claimDir)
       if (!entries) continue
-      const sealedName = entries.find(name => name.startsWith('staged.'))
-      const sealedClaim = sealedName &&
-        (await commitPublishPathStat(join(claimDir, sealedName)))
-      if (sealedName && !sealedClaim) continue
-      if (claimIsStale(sealedClaim ? sealedClaim.mtimeMs : claim.mtimeMs, entries)) {
+      const payload = commitPublishClaimPayload(entries)
+      if (payload === null) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+        continue
+      }
+      const installing = payload?.startsWith('installing.') ? payload : undefined
+      const sealed = payload && !installing
+        ? await commitPublishPathStat(join(claimDir, payload))
+        : undefined
+      if (payload && !installing && !sealed) continue
+      if (claimIsStale(sealed?.mtimeMs ?? claim.mtimeMs, installing)) {
         await commitPublishReclaimHookForTesting?.()
         if (sameCommitPublishClaim(claim, await commitPublishPathStat(claimDir))) {
-          for (const entry of entries) {
-            await unlink(join(claimDir, entry)).catch(() => {})
-          }
+          if (payload) await unlink(join(claimDir, payload)).catch(() => {})
           // A successor has a different staged name and is nonempty.
           await rmdir(claimDir).catch(() => {})
         }
@@ -2089,16 +2093,22 @@ function commitPublishFileSync(
       }
       const entries = readCommitPublishEntriesSync(claimDir)
       if (!entries) continue
-      const sealedName = entries.find(name => name.startsWith('staged.'))
-      const sealedClaim = sealedName &&
-        commitPublishPathStatSync(join(claimDir, sealedName))
-      if (sealedName && !sealedClaim) continue
-      if (claimIsStale(sealedClaim ? sealedClaim.mtimeMs : claim.mtimeMs, entries)) {
+      const payload = commitPublishClaimPayload(entries)
+      if (payload === null) {
+        sleepSync(10)
+        continue
+      }
+      const installing = payload?.startsWith('installing.') ? payload : undefined
+      const sealed = payload && !installing
+        ? commitPublishPathStatSync(join(claimDir, payload))
+        : undefined
+      if (payload && !installing && !sealed) continue
+      if (claimIsStale(sealed?.mtimeMs ?? claim.mtimeMs, installing)) {
         commitPublishReclaimHookForTestingSync?.()
         if (sameCommitPublishClaim(claim, commitPublishPathStatSync(claimDir))) {
-          for (const entry of entries) {
+          if (payload) {
             try {
-              unlinkSync(join(claimDir, entry))
+              unlinkSync(join(claimDir, payload))
             } catch {}
           }
           try {
@@ -2202,8 +2212,7 @@ function commitPublishFileSync(
 // that unique name. A crash before sealing is therefore still recoverable.
 function observeCommitPublishClaimAge() {
   let unsealed: { name: string; firstSeen: number } | undefined
-  return (mtimeMs: number, entries: string[]): boolean => {
-    const installing = entries.find(name => name.startsWith('installing.'))
+  return (mtimeMs: number, installing: string | undefined): boolean => {
     if (installing === undefined) {
       unsealed = undefined
       return Date.now() - mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
@@ -2229,18 +2238,36 @@ function sameCommitPublishClaim(
   )
 }
 
-async function readCommitPublishEntries(path: string): Promise<string[] | undefined> {
+const COMMIT_PUBLISH_PAYLOAD_RE =
+  /^(?:installing|staged)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+function commitPublishClaimPayload(entries: Dirent[]): string | undefined | null {
+  const [entry] = entries
+  if (!entry) return undefined // An empty claim is recoverable via rmdir.
+  // Preserve unexpected contents. The snapshot can also straddle a seal
+  // rename, so retry rather than failing immediately on an ambiguous read.
+  if (
+    entries.length !== 1 ||
+    !entry.isFile() ||
+    !COMMIT_PUBLISH_PAYLOAD_RE.test(entry.name)
+  ) {
+    return null
+  }
+  return entry.name
+}
+
+async function readCommitPublishEntries(path: string): Promise<Dirent[] | undefined> {
   try {
-    return await readdir(path)
+    return await readdir(path, { withFileTypes: true })
   } catch (error) {
     if (!isErrno(error, 'ENOENT')) throw error
     return undefined
   }
 }
 
-function readCommitPublishEntriesSync(path: string): string[] | undefined {
+function readCommitPublishEntriesSync(path: string): Dirent[] | undefined {
   try {
-    return readdirSync(path)
+    return readdirSync(path, { withFileTypes: true })
   } catch (error) {
     if (!isErrno(error, 'ENOENT')) throw error
     return undefined
