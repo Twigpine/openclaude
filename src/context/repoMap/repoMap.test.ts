@@ -982,8 +982,17 @@ describe('cache', () => {
       expect(result.cacheHit).toBe(false)
       expect(result.map.split('\n')[0]).toBe('helpers.ts:')
 
-      // The refreshed cache is written at the current version.
-      expect(loadCache(tempDir).version).toBe(CACHE_VERSION)
+      // The refreshed cache is persisted at the current version. Checking the
+      // version alone would also pass on the empty fallback, so assert the
+      // upgraded contents: the re-extracted call reference and a rendered map.
+      const refreshed = loadCache(tempDir)
+      expect(refreshed.version).toBe(CACHE_VERSION)
+      expect(refreshed.entries['main.ts']?.tags).toContainEqual(
+        expect.objectContaining({ kind: 'ref', name: 'computeTotal' }),
+      )
+      expect(Object.keys(refreshed.renderedEntries).length).toBeGreaterThan(0)
+      // The version-2 rendered map was discarded rather than carried over.
+      expect(refreshed.renderedEntries.stale).toBeUndefined()
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
       invalidateCache(tempDir)
