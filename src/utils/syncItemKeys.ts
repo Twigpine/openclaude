@@ -10,13 +10,19 @@ export function syncItemKeys<M>(
   prevMessages: readonly M[],
   messages: readonly M[],
   itemKey: (m: M) => string,
-  opts: { itemKeyChanged: boolean; rekeyOnChange: boolean },
+  opts: {
+    itemKeyChanged: boolean
+    rekeyOnChange: boolean
+    /** rekeyOnChange on the previous render: the render that turns it off
+     *  replaces the rows too, so it must rebuild as well. */
+    wasRekeyOnChange?: boolean
+  },
 ): string[] {
   if (
     opts.itemKeyChanged ||
     messages.length < keys.length ||
     messages[0] !== prevMessages[0] ||
-    (opts.rekeyOnChange && messages !== prevMessages)
+    ((opts.rekeyOnChange || opts.wasRekeyOnChange) && messages !== prevMessages)
   ) {
     return messages.map(m => itemKey(m))
   }

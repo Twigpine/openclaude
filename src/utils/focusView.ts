@@ -13,6 +13,7 @@ import {
   SYNTHETIC_MESSAGES,
   UNKNOWN_SKILL_PREFIX,
 } from './messages.js'
+import { LOCAL_COMMAND_CAVEAT_TAG } from '../constants/xml.js'
 import { getGlobalConfig } from './config.js'
 import { isFullscreenEnvEnabled } from './fullscreen.js'
 import { deriveUUID } from './messages/normalize.js'
@@ -49,6 +50,7 @@ export type FocusMessage = {
   hookErrors?: unknown[]
   preventedContinuation?: boolean
   toolUseResult?: unknown
+  compactMetadata?: { trigger?: string }
   message?: { id?: string; content: string | FocusBlock[] }
   attachment?: {
     type: string
@@ -200,6 +202,20 @@ function hasVisibleText(m: FocusMessage): boolean {
   return blocksOf(m).some(b => b.type === 'text' && (b.text ?? '').trim() !== '')
 }
 
+/**
+ * Typed input has no origin. A channel message is a real question from a
+ * person, so it starts a turn too; coordinator and task-notification rows are
+ * written by the system and do not.
+ */
+function isPromptOrigin(origin: unknown): boolean {
+  return (
+    origin === undefined ||
+    (typeof origin === 'object' &&
+      origin !== null &&
+      (origin as { kind?: unknown }).kind === 'channel')
+  )
+}
+
 type CandidateKind = 'prompt' | 'command'
 
 /**
@@ -215,7 +231,7 @@ function candidateKind(
     return a?.type === 'queued_command' &&
       a.commandMode === 'prompt' &&
       !a.isMeta &&
-      a.origin === undefined
+      isPromptOrigin(a.origin)
       ? 'prompt'
       : undefined
   }
@@ -225,7 +241,7 @@ function candidateKind(
     m.isCompactSummary ||
     m.isLocalNotice ||
     legacyNotice ||
-    m.origin !== undefined
+    !isPromptOrigin(m.origin)
   ) {
     return undefined
   }
@@ -249,12 +265,14 @@ const UNKNOWN_SKILL_NOTICE = new RegExp(
 /**
  * Indices of rows that are local notices without the isLocalNotice flag, which
  * only rows written before the flag existed lack (a resumed transcript). The
- * input pipeline wrote exactly three shapes: a hook stop with no reason, an
- * unknown-skill notice whose name is a bare command token, and a hook stop
- * with a reason, which follows the prompt it stopped. The last one cannot be
- * told from typed text by content alone, so it counts only directly after a
- * prompt row of another submission, never after an assistant reply or an
- * interrupt. Text that merely starts like a notice stays a prompt.
+ * input pipeline wrote exactly three shapes: a hook stop with or without a
+ * reason, which follows the prompt it stopped, and an unknown-skill notice
+ * whose name is a bare command token, which follows the synthetic caveat row.
+ * The text alone cannot be told from typed text, so each shape counts only
+ * where the pipeline wrote it: a hook stop directly after a prompt row of
+ * another submission, never after an assistant reply or an interrupt, and an
+ * unknown-skill notice directly after the caveat row. Text that merely starts
+ * like a notice stays a prompt.
  */
 function legacyNoticeIndices(messages: readonly FocusMessage[]): Set<number> {
   const out = new Set<number>()
@@ -265,21 +283,22 @@ function legacyNoticeIndices(messages: readonly FocusMessage[]): Set<number> {
     if (blocksOf(m).some(b => b.type === 'tool_result')) return
     const text = firstText(m)
     if (text === undefined) return
-    if (text === HOOK_STOPPED_MESSAGE || UNKNOWN_SKILL_NOTICE.test(text)) {
-      out.add(i)
-      return
-    }
-    if (!text.startsWith(`${HOOK_STOPPED_MESSAGE}: `)) return
+    const isUnknownSkill = UNKNOWN_SKILL_NOTICE.test(text)
+    const isHookStop =
+      text === HOOK_STOPPED_MESSAGE || text.startsWith(`${HOOK_STOPPED_MESSAGE}: `)
+    if (!isUnknownSkill && !isHookStop) return
     let p = i - 1
     while (p >= 0 && messages[p]!.type === 'attachment') p--
     const prev = p >= 0 ? messages[p]! : undefined
-    if (
-      prev !== undefined &&
-      candidateKind(prev) !== undefined &&
-      sourceKey(prev) !== sourceKey(m)
-    ) {
-      out.add(i)
-    }
+    if (prev === undefined) return
+    // The unknown-skill notice is written right after the synthetic caveat
+    // row; a hook stop right after the prompt it stopped.
+    const afterWriterRow = isUnknownSkill
+      ? prev.type === 'user' &&
+        prev.isMeta === true &&
+        (firstText(prev) ?? '').startsWith(`<${LOCAL_COMMAND_CAVEAT_TAG}>`)
+      : candidateKind(prev) !== undefined && sourceKey(prev) !== sourceKey(m)
+    if (afterWriterRow) out.add(i)
   })
   return out
 }
@@ -403,7 +422,8 @@ function isFinalResponseText(
  * Compact boundaries that end a turn. A boundary the query emits while the
  * latest prompt is still unanswered (auto or reactive compaction) belongs to
  * that turn and is not a boundary here. A boundary with no earlier prompt
- * (restored history) or after a finished turn (idle or manual) is one.
+ * (restored history), a manual one, or one after a turn that ended in a final
+ * response (idle) is a boundary.
  */
 function turnEndingCompactions(
   messages: readonly FocusMessage[],
@@ -416,7 +436,9 @@ function turnEndingCompactions(
     let p = -1
     for (const i of prompts) if (i < c) p = i
     const prev = out.length > 0 ? out[out.length - 1]! : -1
-    if (p === -1 || p < prev) {
+    // A manual compaction is the user's own command, so it ends the turn with
+    // or without answer text (an interrupted or tool-only turn has none).
+    if (p === -1 || p < prev || m.compactMetadata?.trigger === 'manual') {
       out.push(c)
       return
     }
@@ -649,7 +671,18 @@ export function assembleFocusRows<T extends FocusMessage>(
       compacted,
     })
   }
-  out.push(rows[0]!)
+  // The boundary prompt may be split into several rows (text and image);
+  // the summary follows the last of them.
+  let promptEnd = 1
+  const key = sourceKey(boundary)
+  while (
+    key !== undefined &&
+    promptEnd < rows.length &&
+    sourceKey(rows[promptEnd]!) === key
+  ) {
+    promptEnd++
+  }
+  for (let i = 0; i < promptEnd; i++) out.push(rows[i]!)
   if (summary.toolCount > 0) {
     out.push({
       type: 'system',
@@ -659,7 +692,7 @@ export function assembleFocusRows<T extends FocusMessage>(
       summary,
     })
   }
-  for (let i = 1; i < rows.length; i++) out.push(rows[i]!)
+  for (let i = promptEnd; i < rows.length; i++) out.push(rows[i]!)
   return out
 }
 
@@ -698,6 +731,22 @@ export function countUnseenFocusTurns(
     }
   }
   return count
+}
+
+/**
+ * The unseen-messages divider for focus view: its count follows the turns that
+ * end in a final response, and a divider with none (a tool-only turn in
+ * flight) is dropped so the pill reads "Jump to bottom" instead of "1 new".
+ */
+export function focusUnseenDivider<D extends { count: number }>(
+  divider: D | undefined,
+  messages: readonly FocusMessage[],
+  dividerIndex: number | null,
+  isLoading: boolean,
+): D | undefined {
+  if (!divider) return undefined
+  const count = countUnseenFocusTurns(messages, dividerIndex ?? 0, { isLoading })
+  return count > 0 ? { ...divider, count } : undefined
 }
 
 /**

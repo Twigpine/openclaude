@@ -69,20 +69,48 @@ describe('/focus', () => {
   })
 
   for (const start of [false, true]) {
-    test(`outside fullscreen it points to /tui fullscreen and leaves focus ${start}`, async () => {
-      process.env.CLAUDE_CODE_NO_FLICKER = '0'
+    test(`with fullscreen off by setting it points to /tui fullscreen and leaves focus ${start}`, async () => {
+      delete process.env.CLAUDE_CODE_NO_FLICKER
+      saveGlobalConfig(current => ({ ...current, flickerFreeMode: false }))
       setFocus(start)
       const res = expectText(await call('', noopContext))
       expect(res.value).toContain('/tui fullscreen')
       expect(getGlobalConfig().focusView).toBe(start)
     })
+
+    test(`with CLAUDE_CODE_NO_FLICKER=0 it names the variable, not /tui, and leaves focus ${start}`, async () => {
+      process.env.CLAUDE_CODE_NO_FLICKER = '0'
+      setFocus(start)
+      const res = expectText(await call('', noopContext))
+      expect(res.value).toContain('CLAUDE_CODE_NO_FLICKER')
+      expect(res.value).not.toContain('/tui fullscreen')
+      expect(getGlobalConfig().focusView).toBe(start)
+    })
   }
 
-  test('outside fullscreen it leaves an unset setting unset', async () => {
-    process.env.CLAUDE_CODE_NO_FLICKER = '0'
+  test('under tmux -CC it names the override variable, not /tui', async () => {
+    delete process.env.CLAUDE_CODE_NO_FLICKER
+    process.env.TMUX = '/tmp/tmux-1/default,1,0'
+    process.env.TERM_PROGRAM = 'iTerm.app'
+    process.env.TERM = 'xterm-256color'
+    _resetTmuxControlModeProbeForTesting()
     const res = expectText(await call('', noopContext))
-    expect(res.value).toContain('/tui fullscreen')
+    expect(res.value).toContain('tmux -CC')
+    expect(res.value).toContain('CLAUDE_CODE_NO_FLICKER=1')
+    expect(res.value).not.toContain('/tui fullscreen')
     expect(getGlobalConfig().focusView).toBeUndefined()
+  })
+
+  test('with fullscreen forced off it leaves an unset setting unset', async () => {
+    process.env.CLAUDE_CODE_NO_FLICKER = '0'
+    expectText(await call('', noopContext))
+    expect(getGlobalConfig().focusView).toBeUndefined()
+  })
+
+  test('the confirmation lists what stays visible', async () => {
+    const res = expectText(await call('', noopContext))
+    expect(res.value).toContain('failures')
+    expect(res.value).not.toMatch(/\bonly\b/i)
   })
 
   test('toggles against the config the locked updater sees, not a stale cached read', async () => {

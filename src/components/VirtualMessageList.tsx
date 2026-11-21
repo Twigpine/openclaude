@@ -317,10 +317,13 @@ export function VirtualMessageList({
   const keysRef = useRef<string[]>([]);
   const prevMessagesRef = useRef<typeof messages>(messages);
   const prevItemKeyRef = useRef(itemKey);
+  const prevRekeyRef = useRef(rekeyOnChange ?? false);
   keysRef.current = syncItemKeys(keysRef.current, prevMessagesRef.current, messages, itemKey, {
     itemKeyChanged: prevItemKeyRef.current !== itemKey,
-    rekeyOnChange: rekeyOnChange ?? false
+    rekeyOnChange: rekeyOnChange ?? false,
+    wasRekeyOnChange: prevRekeyRef.current
   });
+  prevRekeyRef.current = rekeyOnChange ?? false;
   prevMessagesRef.current = messages;
   prevItemKeyRef.current = itemKey;
   const keys = keysRef.current;

@@ -39,4 +39,36 @@ describe('syncItemKeys', () => {
     const a = { k: 'a' }
     expect(syncItemKeys(['a', 'b'], [a, { k: 'b' }], [a], key, off)).toEqual(['a'])
   })
+
+  test('rebuilds on the render that turns rekeyOnChange off', () => {
+    const p = { k: 'p' }
+    const f = { k: 'final' }
+    const focused = [p, { k: 'summary' }, f]
+    const full = [p, { k: 'tool_use' }, { k: 'tool_result' }, f]
+    const focusedKeys = syncItemKeys([], [p], focused, key, {
+      itemKeyChanged: false,
+      rekeyOnChange: true,
+    })
+    expect(focusedKeys).toEqual(['p', 'summary', 'final'])
+    expect(
+      syncItemKeys(focusedKeys, focused, full, key, {
+        itemKeyChanged: false,
+        rekeyOnChange: false,
+        wasRekeyOnChange: true,
+      }),
+    ).toEqual(['p', 'tool_use', 'tool_result', 'final'])
+  })
+
+  test('appends again once the focus-off render has rebuilt', () => {
+    const p = { k: 'p' }
+    const a = { k: 'a' }
+    const b = { k: 'b' }
+    expect(
+      syncItemKeys(['p', 'a'], [p, a], [p, a, b], key, {
+        itemKeyChanged: false,
+        rekeyOnChange: false,
+        wasRekeyOnChange: false,
+      }),
+    ).toEqual(['p', 'a', 'b'])
+  })
 })

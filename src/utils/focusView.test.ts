@@ -21,6 +21,7 @@ import {
 import {
   assembleFocusRows,
   countUnseenFocusTurns,
+  focusUnseenDivider,
   isFocusViewActive,
   selectFocusView,
   type FocusMessage,
@@ -259,16 +260,39 @@ describe('selectFocusView turn boundaries', () => {
     expect(r.boundary?.uuid).toBe('p1')
   })
 
-  test('prompts and queued prompts with an origin are not boundaries and their answer is the final response', () => {
+  test('channel prompts and queued channel prompts are boundaries, so the question shows with its answer', () => {
     const r = select([
       prompt('p1', 'typed'),
       say('a1', 'answer'),
-      prompt('o1', 'from channel', { origin: { kind: 'channel' } }),
-      queued('o2', { origin: { kind: 'channel' } }),
+      prompt('o1', 'from channel', { origin: { kind: 'channel', server: 's' } }),
       say('a2', 'reply to channel'),
     ])
-    expect(r.boundary?.uuid).toBe('p1')
-    expect(ids(r.rows)).toEqual(['p1', 'a1', 'a2'])
+    expect(r.boundary?.uuid).toBe('o1')
+    expect(r.hiddenTurns).toBe(1)
+    expect(ids(r.rows)).toEqual(['o1', 'a2'])
+
+    const q = select([
+      prompt('p1', 'typed'),
+      say('a1', 'answer'),
+      queued('o2', { origin: { kind: 'channel', server: 's' } }),
+      say('a2', 'reply to channel'),
+    ])
+    expect(q.boundary?.uuid).toBe('o2')
+    expect(ids(q.rows)).toEqual(['o2', 'a2'])
+  })
+
+  test('coordinator and task-notification origins are still not boundaries', () => {
+    for (const kind of ['coordinator', 'task-notification']) {
+      const r = select([
+        prompt('p1', 'typed'),
+        say('a1', 'answer'),
+        prompt('o1', 'synthetic', { origin: { kind } }),
+        queued('o2', { origin: { kind } }),
+        say('a2', 'reply'),
+      ])
+      expect(r.boundary?.uuid).toBe('p1')
+      expect(ids(r.rows)).toEqual(['p1', 'a1', 'a2'])
+    }
   })
 
   test('an image-only prompt and an image plus text prompt are boundaries', () => {
@@ -782,6 +806,11 @@ const IMG = {
 } as never
 const txt = (t: string) => ({ type: 'text', text: t }) as never
 
+function blocksTypes(m: FocusMessage): string {
+  const c = m.message?.content
+  return typeof c === 'string' || c === undefined ? 'text' : c[0]!.type
+}
+
 function normalized(msgs: unknown[]): FocusMessage[] {
   return normalizeMessages(msgs as never) as unknown as FocusMessage[]
 }
@@ -867,6 +896,24 @@ describe('synthetic row ids', () => {
     expect(rows.some(r => r.type === 'system' && (r as { subtype?: string }).subtype === 'focus_marker')).toBe(true)
   })
 
+  test('the summary goes after every row of a text-then-image prompt', () => {
+    const msgs = normalized([
+      createUserMessage({ content: [txt('q'), IMG] }),
+      createAssistantMessage({ content: [{ type: 'tool_use', id: 't', name: 'Read', input: {} } as never] }),
+      createUserMessage({ content: [{ type: 'tool_result', tool_use_id: 't', content: 'ok' } as never] }),
+      createAssistantMessage({ content: 'end' }),
+    ])
+    const rows = assembleFocusRows(select(msgs))
+    const kinds = rows.map(r =>
+      r.type === 'system'
+        ? (r as { subtype?: string }).subtype
+        : r.type === 'user'
+          ? (blocksTypes(r as FocusMessage))
+          : r.type,
+    )
+    expect(kinds).toEqual(['text', 'image', 'focus_summary', 'assistant'])
+  })
+
   test('summary id stays distinct from a second block of the boundary prompt', () => {
     const msgs = normalized([
       createUserMessage({ content: [txt('q'), IMG] }),
@@ -908,6 +955,58 @@ describe('compaction inside a query', () => {
       say('a2', 'finished'),
     ]
     expect(countUnseenFocusTurns(msgs, 0)).toBe(1)
+  })
+})
+
+describe('focusUnseenDivider', () => {
+  const divider = { firstUnseenUuid: 'x' as never, count: 1 }
+
+  test('a tool-only turn in flight gives no divider, so no "1 new" pill', () => {
+    const msgs = [prompt('p1', 'go'), use('u1', 't1'), result('r1', 't1'), use('u2', 't2')]
+    expect(countUnseenFocusTurns(msgs, 0, { isLoading: true })).toBe(0)
+    expect(focusUnseenDivider(divider, msgs, 0, true)).toBeUndefined()
+  })
+
+  test('a turn with a final response replaces the count with the focus count', () => {
+    const msgs = [prompt('p1', 'go'), use('u1', 't1'), result('r1', 't1'), say('a1', 'done')]
+    expect(focusUnseenDivider({ ...divider, count: 3 }, msgs, 0, false)).toEqual({
+      ...divider,
+      count: 1,
+    })
+  })
+
+  test('no divider stays no divider', () => {
+    expect(focusUnseenDivider(undefined, [prompt('p1', 'go')], 0, false)).toBeUndefined()
+  })
+})
+
+describe('manual compaction after a turn with no answer text', () => {
+  const interrupted = (trigger: 'manual' | 'auto') => [
+    prompt('p1', 'big task'),
+    use('u1', 't1'),
+    result('r1', 't1', { isError: true, content: INTERRUPT_MESSAGE_FOR_TOOL_USE }),
+    label('i1', createUserInterruptionMessage({})),
+    label('cb', createCompactBoundaryMessage(trigger, 100)),
+  ]
+
+  test('a manual compaction after an interrupt ends the turn and shows the marker', () => {
+    const r = select(interrupted('manual'))
+    expect(r.boundary?.uuid).toBe('cb')
+    expect(r.compacted).toBe(true)
+    expect(r.summary.toolCount).toBe(0)
+    expect(countUnseenFocusTurns(interrupted('manual'), 0)).toBe(0)
+  })
+
+  test('a manual compaction after a tool-only stop ends the turn', () => {
+    const r = select([prompt('p1', 'go'), use('u1', 't1'), result('r1', 't1'), label('cb', createCompactBoundaryMessage('manual', 100))])
+    expect(r.boundary?.uuid).toBe('cb')
+    expect(r.compacted).toBe(true)
+  })
+
+  test('an auto compaction after the same interrupt keeps the prompt as the boundary', () => {
+    const r = select(interrupted('auto'))
+    expect(r.boundary?.uuid).toBe('p1')
+    expect(r.compacted).toBe(false)
   })
 })
 
@@ -1211,6 +1310,31 @@ describe('stop reasons and diagnostics from the input pipeline', () => {
     ]) {
       expect(after(text).boundary?.uuid).toBe('p2')
     }
+  })
+
+  test('exact-text typed prompts after an assistant reply stay prompts', () => {
+    for (const text of [`${UNKNOWN_SKILL_PREFIX}deploy`, HOOK_STOPPED_MESSAGE]) {
+      const r = select([
+        prompt('p1', 'one'),
+        say('a1', 'answer'),
+        prompt('p2', text),
+        say('a2', 'reply'),
+      ])
+      expect(r.boundary?.uuid).toBe('p2')
+      expect(r.hiddenTurns).toBe(1)
+      expect(ids(r.rows)).toEqual(['p2', 'a2'])
+    }
+  })
+
+  test('an exact-text unknown skill typed after a caveat-less row stays a prompt even after a local command', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      label('cmd', createCommandInputMessage('<command-name>/x</command-name>')),
+      prompt('p2', `${UNKNOWN_SKILL_PREFIX}deploy`),
+      say('a2', 'reply'),
+    ])
+    expect(r.boundary?.uuid).toBe('p2')
   })
 
   test('a local notice split by normalization keeps its provenance', () => {
