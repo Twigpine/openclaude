@@ -42,6 +42,28 @@ const realFs = await import('node:fs')
 const realLinkSync = realFs.linkSync
 const realRenameSync = realFs.renameSync
 const realWriteFileSync = realFs.writeFileSync
+const realOpenSync = realFs.openSync
+
+// One-shot fault at the copy-to-open boundary for the private staged
+// record, before its fsync descriptor is opened in either runtime.
+let stagedOpenInjection: ((path: string) => void) | undefined
+
+function injectStagedOpen(path: unknown): void {
+  if (typeof path !== 'string' || !basename(path).startsWith('staged.')) return
+  const inject = stagedOpenInjection
+  stagedOpenInjection = undefined
+  inject?.(path)
+}
+
+const mockedOpen: typeof realOpen = ((...args: Parameters<typeof realOpen>) => {
+  injectStagedOpen(args[0])
+  return realOpen(...args)
+}) as typeof realOpen
+
+const mockedOpenSync: typeof realOpenSync = ((...args: Parameters<typeof realOpenSync>) => {
+  injectStagedOpen(args[0])
+  return realOpenSync(...args)
+}) as typeof realOpenSync
 
 const TEST_PROCESS_MARKER = 'a'.repeat(64)
 
@@ -112,6 +134,15 @@ type CommitInjection = {
   fired: () => void
 }
 let commitInjection: CommitInjection | undefined
+// A one-shot interleaving immediately before installing the staged claim.
+let claimInstallInjection: ((from: string, to: string) => void) | undefined
+
+function injectClaimInstall(from: string, to: string): void {
+  if (!basename(from).startsWith('.publish-') || !to.endsWith('.commit')) return
+  const inject = claimInstallInjection
+  claimInstallInjection = undefined
+  inject?.(from, to)
+}
 
 // Commit-pause control for the writeNewSession race test. When armed,
 // every commit call for the given target waits on a gate the test
@@ -164,6 +195,7 @@ async function mockedRename(
   oldPath: string,
   newPath: string,
 ): Promise<void> {
+  injectClaimInstall(oldPath, newPath)
   if (commitInjection && newPath === commitInjection.target) {
     const injection = commitInjection
     commitInjection = undefined
@@ -193,6 +225,7 @@ function mockedLinkSync(oldPath: string, newPath: string): void {
 }
 
 function mockedRenameSync(oldPath: string, newPath: string): void {
+  injectClaimInstall(oldPath, newPath)
   if (commitInjection && newPath === commitInjection.target) {
     const injection = commitInjection
     commitInjection = undefined
@@ -226,12 +259,19 @@ describe('terminal-fact publish across withdrawn claims', () => {
   // (this file, filtered to the scenario, ISOLATED_CHILD=1) and fails
   // with the child's output when it does not exit 0.
   async function runStaleLockScenarioInChild(name: string): Promise<void> {
+    // Bun treats -t as a regex. Anchor the end so a longer scenario
+    // with this name as its prefix cannot share the lock-stealing child.
+    const pattern = `${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`
     const child = Bun.spawn(
-      [process.execPath, 'test', fileURLToPath(import.meta.url), '-t', name],
+      [process.execPath, 'test', fileURLToPath(import.meta.url), '-t', pattern],
       {
+        cwd: fileURLToPath(new URL('../../', import.meta.url)),
         env: { ...process.env, OPENCLAUDE_BG_CLAIM_RACE_ISOLATED: '1' },
+        stdin: 'ignore',
         stdout: 'pipe',
         stderr: 'pipe',
+        // Leave five seconds for reporting and cleanup inside the 30 s test.
+        timeout: 25_000,
       },
     )
     const [exitCode, stdout, stderr] = await Promise.all([
@@ -319,6 +359,34 @@ describe('terminal-fact publish across withdrawn claims', () => {
     })
     let calls = 0
     registry._setCommitPublishHookForTesting(async () => {
+      calls += 1
+      if (calls === 1) {
+        enteredResolve()
+        await gate
+      }
+    })
+    return { entered, release }
+  }
+
+  // Arms the owned-commit hook so only the first commit call pauses:
+  // the holder stalls after the final claim ownership check has passed
+  // and immediately before its rename publishes, and every later
+  // commit (the successor's) proceeds normally. `entered` resolves
+  // once the holder has reached the hook (issue #2556).
+  function armCommitOwnedHookPause(): {
+    entered: Promise<void>
+    release: () => void
+  } {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    let enteredResolve!: () => void
+    const entered = new Promise<void>(resolve => {
+      enteredResolve = resolve
+    })
+    let calls = 0
+    registry._setCommitPublishOwnedHookForTesting(async () => {
       calls += 1
       if (calls === 1) {
         enteredResolve()
@@ -449,6 +517,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     mock.module('node:fs/promises', () => ({
       ...realFsPromises,
       readFile: mockedReadFile,
+      open: mockedOpen,
       writeFile: mockedWriteFile,
       link: mockedLink,
       rename: mockedRename,
@@ -456,6 +525,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     mock.module('node:fs', () => ({
       ...realFs,
       linkSync: mockedLinkSync,
+      openSync: mockedOpenSync,
       renameSync: mockedRenameSync,
     }))
     registry = await import('./bgRegistry.js')
@@ -466,13 +536,17 @@ describe('terminal-fact publish across withdrawn claims', () => {
 
   afterEach(async () => {
     pausedClaimWrite = undefined
+    stagedOpenInjection = undefined
     onClaimRead = undefined
     commitInjection = undefined
+    claimInstallInjection = undefined
     commitPause = undefined
     linkUnsupported = false
     linkCallTargets.length = 0
     registry?._setCommitPublishHookForTesting(undefined)
     registry?._setCommitPublishHookForTestingSync(undefined)
+    registry?._setCommitPublishOwnedHookForTesting(undefined)
+    registry?._setCommitPublishOwnedHookForTestingSync(undefined)
     mock.restore()
     // See bgRegistry.noHardLinks.test.ts: mock.restore() does not undo a
     // mock.module registration, so re-register the real module explicitly
@@ -480,6 +554,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     mock.module('node:fs/promises', () => ({
       ...realFsPromises,
       readFile: realReadFile,
+      open: realOpen,
       writeFile: realWriteFile,
       link: realLink,
       rename: realRename,
@@ -487,6 +562,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     mock.module('node:fs', () => ({
       ...realFs,
       linkSync: realLinkSync,
+      openSync: realOpenSync,
       renameSync: realRenameSync,
     }))
     registry?._setBackgroundSessionsRootForTesting(undefined)
@@ -1345,11 +1421,193 @@ describe('terminal-fact publish across withdrawn claims', () => {
     }
       },
     },
+    {
+      name: 'keeps the successor metadata when a stalled holder is superseded after the final ownership check without hard links',
+      run: async () => {
+    // Regression test for issue #2556: with link() rejected (EPERM), a
+    // session create that stalls past the stale threshold AFTER the
+    // final commit-claim ownership check — between that check and its
+    // rename — is superseded by a second create that reclaims the claim
+    // and publishes first. The stalled holder's publish source must die
+    // with its superseded claim, so the resumed rename cannot overwrite
+    // the successor's row: the holder reports the duplicate instead.
+    // The successor (second create, pid 424242) wins.
+    const id = 'bg-commit-race-post-check-create-no-link'
+    const logDir = join(
+      configDir,
+      'bg-commit-race-post-check-create-no-link-logs',
+    )
+    await mkdir(logDir, { recursive: true })
+    const stdoutLogPath = join(logDir, 'stdout.log')
+    const stderrLogPath = join(logDir, 'stderr.log')
+    await writeFile(stdoutLogPath, '')
+    await writeFile(stderrLogPath, '')
+    linkUnsupported = true
+    const { entered, release } = armCommitOwnedHookPause()
+    const firstCreate = registry.createBackgroundSession({
+      id,
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-post-check-create-no-link',
+      logFilesPrecreated: true,
+      stdoutLogPath,
+      stderrLogPath,
+    })
+    firstCreate.catch(() => {})
+    const writers = [firstCreate]
+    try {
+      await awaitCommitHookEntered(entered)
+      // The first create holds the per-ID lock and has passed the final
+      // ownership check: age both past their stale thresholds so the
+      // second create reclaims the commit claim and publishes while the
+      // first is paused right before its rename.
+      await ageSessionLock(id)
+      await ageCommitClaim(metadataPath(id))
+      const secondCreate = registry.createBackgroundSession({
+        id,
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-commit-race-post-check-create-no-link-2',
+        logFilesPrecreated: true,
+        stdoutLogPath,
+        stderrLogPath,
+      })
+      const second = await secondCreate
+      expect(second.pid).toBe(424242)
+      // The superseded holder must not overwrite the successor's row.
+      release()
+      await expect(firstCreate).rejects.toThrow('already exists')
+      const stored = await registry.readBackgroundSessionForOwner(id)
+      expect(stored?.pid).toBe(424242)
+    } finally {
+      linkUnsupported = false
+      release()
+      await Promise.allSettled(writers)
+    }
+      },
+    },
+    {
+      name: 'keeps the successor fact when a stalled holder is superseded after the final ownership check without hard links',
+      run: async () => {
+    // Regression test for issue #2556: same post-ownership-check race
+    // as the metadata scenario above, but for an async terminal fact.
+    // The holder (exitCode 0) stalls after the final ownership check
+    // and before its rename; the successor (exitCode 3) reclaims the
+    // claim and publishes its own fact — the holder's terminal-fact
+    // claim is withdrawn first so the successor does not adopt the
+    // holder's tmp. The holder's resumed rename must not overwrite the
+    // successor's fact, and the holder must return it.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-commit-race-post-check-fact-no-link',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-post-check-fact-no-link',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    linkUnsupported = true
+    const { entered, release } = armCommitOwnedHookPause()
+    const firstTermination =
+      registry.recordBackgroundSessionNaturalTermination(
+        session.id,
+        { exitCode: 0 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+    firstTermination.catch(() => {})
+    try {
+      await awaitCommitHookEntered(entered)
+      // Withdraw the holder's terminal-fact claim and age its commit
+      // claim, so the successor claims the publish itself (with its own
+      // fact) instead of adopting the holder's tmp; age the per-ID lock
+      // so the successor can proceed while the holder is paused.
+      await rm(`${terminalFactPath(session.id, 'natural')}.claim`, {
+        force: true,
+        recursive: true,
+      })
+      await ageCommitClaim(terminalFactPath(session.id, 'natural'))
+      await ageSessionLock(session.id)
+      const secondTermination =
+        await registry.recordBackgroundSessionNaturalTermination(
+          session.id,
+          { exitCode: 3 },
+          { ownerPid: session.pid, expectedSession: session },
+        )
+      expect(secondTermination).toMatchObject({
+        status: 'failed',
+        exitCode: 3,
+      })
+      // The superseded holder must not overwrite the successor's fact.
+      release()
+      const first = await firstTermination
+      expect(first).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(await storedExitCode(session.id)).toBe(3)
+    } finally {
+      linkUnsupported = false
+      release()
+      await firstTermination.catch(() => {})
+    }
+      },
+    },
+    {
+      name: 'keeps the successor fact when a sync stalled holder is superseded after the final ownership check without hard links',
+      run: async () => {
+    // Same post-ownership-check race as the async fact scenario above,
+    // but through the synchronous exit fallback: the holder is a sync
+    // termination paused after the final ownership check, and the
+    // successor is a second sync termination run from inside the sync
+    // owned-commit hook (the holder's per-ID lock forces the ELOCKED
+    // fallback). The hook withdraws the holder's terminal-fact claim
+    // and ages its commit claim, then publishes the successor's fact
+    // inline; the resumed holder must return the successor's fact, not
+    // overwrite it.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-commit-race-post-check-fact-sync-no-link',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-post-check-fact-sync-no-link',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    linkUnsupported = true
+    let calls = 0
+    registry._setCommitPublishOwnedHookForTestingSync(() => {
+      calls += 1
+      if (calls !== 1) return
+      const target = terminalFactPath(session.id, 'natural')
+      realFs.rmSync(`${target}.claim`, { force: true, recursive: true })
+      const stale = new Date(Date.now() - 11_000)
+      realFs.utimesSync(`${target}.commit`, stale, stale)
+      // The holder's per-ID lock is held, so this sync termination
+      // takes the ELOCKED fallback and publishes without it.
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+    })
+    try {
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 0 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      expect(await storedExitCode(session.id)).toBe(3)
+      expect(
+        await registry.resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+    } finally {
+      linkUnsupported = false
+      registry._setCommitPublishOwnedHookForTestingSync(undefined)
+    }
+      },
+    },
   ]
 
   for (const scenario of staleLockScenarios) {
-    // A child `bun test` run takes ~1 s; allow 30 s so a slow runner
-    // cannot flake the wrapper on spawn or startup time.
+    // The child has a 25 s deadline; allow 30 s for spawn, assertions,
+    // and cleanup even on a slow runner.
     it(
       scenario.name,
       async () => {
@@ -1358,6 +1616,268 @@ describe('terminal-fact publish across withdrawn claims', () => {
           return
         }
         await scenario.run()
+      },
+      30_000,
+    )
+  }
+
+  for (const synchronous of [false, true]) {
+    it(`keeps the winner when a commit claim's inode is reused (${synchronous ? 'sync' : 'async'})`, async () => {
+      const session = await registry.createBackgroundSession({
+        id: 'bg-commit-claim-reused-inode',
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-commit-claim-reused-inode',
+        processMarker: TEST_PROCESS_MARKER,
+      })
+      const target = terminalFactPath(session.id, 'natural')
+      const claimDir = `${target}.commit`
+      const retired = `${claimDir}.retired`
+      const options = { ownerPid: session.pid, expectedSession: session }
+      let recycled = false
+      const reclaim = () => {
+        // Model immediate inode reuse without depending on the native
+        // allocator. Retire the original claim and discard its payload.
+        realRenameSync(claimDir, retired)
+        for (const name of realFs.readdirSync(retired)) {
+          realFs.unlinkSync(join(retired, name))
+        }
+        realFs.rmSync(`${target}.claim`, { recursive: true, force: true })
+        registry.recordBackgroundSessionNaturalTerminationSync(
+          session.id, { exitCode: 3 }, options,
+        )
+        expect(JSON.parse(realFs.readFileSync(target, 'utf8'))).toMatchObject({
+          exitCode: 3,
+        })
+        // A newly allocated claim gets the same (dev, ino), but it
+        // cannot contain the previous holder's unique staged source.
+        realRenameSync(retired, claimDir)
+        recycled = true
+      }
+      linkUnsupported = true
+      if (synchronous) {
+        registry._setCommitPublishHookForTestingSync(() => {
+          registry._setCommitPublishHookForTestingSync(undefined)
+          reclaim()
+        })
+        registry.recordBackgroundSessionNaturalTerminationSync(
+          session.id, { exitCode: 0 }, options,
+        )
+      } else {
+        registry._setCommitPublishHookForTesting(async () => reclaim())
+        const terminated = await registry.recordBackgroundSessionNaturalTermination(
+          session.id, { exitCode: 0 }, options,
+        )
+        expect(terminated).toMatchObject({ status: 'failed', exitCode: 3 })
+      }
+      expect(recycled).toBe(true)
+      expect(await storedExitCode(session.id)).toBe(3)
+    })
+  }
+
+  for (const synchronous of [false, true]) {
+    for (const outcome of ['collision', 'denied', 'reclaimed'] as const) {
+      it(`handles claim ${outcome} during ${synchronous ? 'sync' : 'async'} publication`, async () => {
+        const session = await registry.createBackgroundSession({
+          id: 'bg-claim-install-race',
+          pid: 424242,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: 'sess-claim-install-race',
+          processMarker: TEST_PROCESS_MARKER,
+        })
+        const target = terminalFactPath(session.id, 'natural')
+        const options = { ownerPid: session.pid, expectedSession: session }
+        let injected = false
+        linkUnsupported = true
+        if (outcome === 'reclaimed') {
+          const reclaim = () => {
+            if (injected) return
+            injected = true
+            realFs.rmSync(`${target}.commit`, { recursive: true })
+          }
+          registry._setCommitPublishOwnedHookForTesting(async () => reclaim())
+          registry._setCommitPublishOwnedHookForTestingSync(reclaim)
+        } else {
+          claimInstallInjection = (from, to) => {
+            injected = true
+            expect(to).toBe(`${target}.commit`)
+            if (outcome === 'denied') {
+              throw Object.assign(new Error('claim install denied'), { code: 'EACCES' })
+            }
+            // Another cooperating writer acquires the claim between the
+            // contender's stat and directory rename. Attempt the actual
+            // rename while the winner's complete staged source is live.
+            let collision: unknown
+            realFs.rmSync(`${target}.claim`, { recursive: true })
+            registry._setCommitPublishOwnedHookForTestingSync(() => {
+              try {
+                realRenameSync(from, to)
+              } catch (error) {
+                collision = error
+              }
+              expect(collision).toBeDefined()
+              expect(realFs.existsSync(target)).toBe(false)
+            })
+            registry.recordBackgroundSessionNaturalTerminationSync(
+              session.id, { exitCode: 3 }, options,
+            )
+            // Report the native error after the winner has cleaned up.
+            // Windows can use access denied for this collision.
+            throw collision
+          }
+        }
+        const exitCode = outcome === 'collision' ? 3 : 0
+        if (synchronous) {
+          const terminate = () => registry.recordBackgroundSessionNaturalTerminationSync(
+            session.id, { exitCode: 0 }, options,
+          )
+          if (outcome === 'denied') expect(terminate).toThrow('claim install denied')
+          else terminate()
+        } else {
+          const pending = registry.recordBackgroundSessionNaturalTermination(
+            session.id, { exitCode: 0 }, options,
+          )
+          if (outcome === 'denied') {
+            await expect(pending).rejects.toMatchObject({ code: 'EACCES' })
+          } else {
+            await expect(pending).resolves.toMatchObject({ exitCode })
+          }
+        }
+        expect(injected).toBe(true)
+        if (outcome === 'denied') {
+          expect(realFs.existsSync(target)).toBe(false)
+        } else {
+          expect(await storedExitCode(session.id)).toBe(exitCode)
+        }
+        expect(realFs.existsSync(`${target}.commit`)).toBe(false)
+        expect(realFs.readdirSync(dirname(target)).filter(name => name.startsWith('.publish-'))).toEqual([])
+      })
+    }
+  }
+
+  // Bounded staging-open matrix: async/sync x missing copy with/without
+  // a competing winner, and a permission failure. ENOENT recovers;
+  // EACCES must propagate rather than masquerading as a race.
+  for (const synchronous of [false, true]) {
+    for (const outcome of ['winner', 'retry', 'EACCES'] as const) {
+      it(`handles staged-open ${outcome} through the ${synchronous ? 'sync' : 'async'} fallback`, async () => {
+        const session = await registry.createBackgroundSession({
+          id: `bg-stage-open-${synchronous}-${outcome}`,
+          pid: 424242,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: 'sess-stage-open',
+          processMarker: TEST_PROCESS_MARKER,
+        })
+        const target = terminalFactPath(session.id, 'natural')
+        let injected = false
+        stagedOpenInjection = path => {
+          injected = true
+          if (outcome === 'EACCES') {
+            throw Object.assign(new Error('staged open denied'), { code: 'EACCES' })
+          }
+          realFs.rmSync(dirname(path), { recursive: true, force: true })
+          if (outcome === 'winner') {
+            realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+          }
+        }
+        linkUnsupported = true
+        const options = { ownerPid: session.pid, expectedSession: session }
+        const terminate = () => registry.recordBackgroundSessionNaturalTerminationSync(
+          session.id, { exitCode: 0 }, options,
+        )
+        if (synchronous) {
+          if (outcome === 'EACCES') expect(terminate).toThrow('staged open denied')
+          else terminate()
+        } else {
+          const terminated = registry.recordBackgroundSessionNaturalTermination(
+            session.id, { exitCode: 0 }, options,
+          )
+          if (outcome === 'EACCES') {
+            await expect(terminated).rejects.toMatchObject({ code: 'EACCES' })
+          } else {
+            await expect(terminated).resolves.toMatchObject({
+              exitCode: outcome === 'winner' ? 3 : 0,
+            })
+          }
+        }
+        expect(injected).toBe(true)
+        if (outcome === 'EACCES') {
+          await expect(readFile(target, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+        } else {
+          expect(await storedExitCode(session.id)).toBe(outcome === 'winner' ? 3 : 0)
+          expect(await registry.resolveBackgroundSessionForWait(session.id)).toMatchObject({
+            exitCode: outcome === 'winner' ? 3 : 0,
+          })
+        }
+        expect(realFs.existsSync(`${target}.commit`)).toBe(false)
+        expect(realFs.readdirSync(dirname(target)).filter(name => name.startsWith('.publish-'))).toEqual([])
+      })
+    }
+  }
+
+  for (const synchronous of [false, true]) {
+    it(
+      `reclaims a stale commit claim left with a staged record through the ${synchronous ? 'sync' : 'async'} fallback`,
+      async () => {
+        // Regression test for issue #2556 (recovery): a publisher that
+        // died mid-publication leaves its commit claim behind, holding
+        // the staged record it never renamed into place. A later
+        // publisher must reclaim the stale claim — staged file included —
+        // and publish, so an abandoned writer never blocks the target and
+        // readers see either an absent target or the successor's complete
+        // record.
+        const session = await registry.createBackgroundSession({
+          id: 'bg-commit-reclaim-staged-no-link',
+          pid: 424242,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: 'sess-commit-reclaim-staged-no-link',
+          processMarker: TEST_PROCESS_MARKER,
+        })
+        linkUnsupported = true
+        try {
+          const target = terminalFactPath(session.id, 'natural')
+          const claimDir = `${target}.commit`
+          await mkdir(claimDir)
+          await writeFile(join(claimDir, 'staged.1234.deadbeef'), '{}')
+          const stale = new Date(Date.now() - 11_000)
+          await utimes(claimDir, stale, stale)
+          let visibilityChecked = false
+          const checkVisibility = () => {
+            // Inspect the actual reader-visible pathname at the last
+            // pre-rename boundary, not just the eventual final result.
+            expect(realFs.existsSync(target)).toBe(false)
+            const staged = realFs.readdirSync(claimDir)
+            expect(staged).toHaveLength(1)
+            expect(JSON.parse(realFs.readFileSync(join(claimDir, staged[0]!), 'utf8'))).toMatchObject({
+              id: session.id, status: 'failed', exitCode: 5,
+            })
+            visibilityChecked = true
+          }
+          registry._setCommitPublishOwnedHookForTesting(async () => checkVisibility())
+          registry._setCommitPublishOwnedHookForTestingSync(checkVisibility)
+          const options = { ownerPid: session.pid, expectedSession: session }
+          if (synchronous) {
+            registry.recordBackgroundSessionNaturalTerminationSync(
+              session.id, { exitCode: 5 }, options,
+            )
+          } else {
+            const terminated = await registry.recordBackgroundSessionNaturalTermination(
+              session.id, { exitCode: 5 }, options,
+            )
+            expect(terminated).toMatchObject({ status: 'failed', exitCode: 5 })
+          }
+          expect(visibilityChecked).toBe(true)
+          expect(await storedExitCode(session.id)).toBe(5)
+          expect(
+            await registry.resolveBackgroundSessionForWait(session.id),
+          ).toMatchObject({ status: 'failed', exitCode: 5 })
+        } finally {
+          linkUnsupported = false
+        }
       },
       30_000,
     )
