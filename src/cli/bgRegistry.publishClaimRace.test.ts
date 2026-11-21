@@ -68,8 +68,8 @@ function injectStamp(path: string): void {
   inject?.(path)
 }
 
-// One-shot fault at the copy-to-open boundary for the private staged
-// record, before its fsync descriptor is opened in either runtime.
+// One-shot fault at the open of the private staged record, before it
+// can be synced in either runtime.
 let stagedOpenInjection: ((path: string) => void) | undefined
 
 function injectStagedOpen(path: unknown): void {
@@ -185,6 +185,7 @@ let commitPause: CommitPause | undefined
 // concurrent-create and delayed-commit regressions can run the
 // rename() fallback path (CodeRabbit #2497 review 5945720742).
 let linkUnsupported = false
+let beforeUnsupportedLink: ((path: string) => void) | undefined
 const linkUnsupportedError = Object.assign(
   new Error('Operation not permitted'),
   { code: 'EPERM' },
@@ -203,7 +204,10 @@ async function mockedLink(oldPath: string, newPath: string): Promise<void> {
     await realWriteFile(newPath, JSON.stringify(injection.successor))
     injection.fired()
   }
-  if (linkUnsupported) throw linkUnsupportedError
+  if (linkUnsupported) {
+    beforeUnsupportedLink?.(oldPath)
+    throw linkUnsupportedError
+  }
   if (commitPause && newPath === commitPause.target) {
     let release!: () => void
     const gate = new Promise<void>(resolve => {
@@ -244,7 +248,10 @@ function mockedLinkSync(oldPath: string, newPath: string): void {
     realWriteFileSync(newPath, JSON.stringify(injection.successor))
     injection.fired()
   }
-  if (linkUnsupported) throw linkUnsupportedError
+  if (linkUnsupported) {
+    beforeUnsupportedLink?.(oldPath)
+    throw linkUnsupportedError
+  }
   realLinkSync(oldPath, newPath)
 }
 
@@ -297,10 +304,10 @@ describe('terminal-fact publish across withdrawn claims', () => {
   const ISOLATED_CHILD =
     process.env.OPENCLAUDE_BG_CLAIM_RACE_ISOLATED === '1'
 
-  // Runs one stale-lock scenario in an isolated `bun test` child process
-  // (this file, filtered to the scenario, ISOLATED_CHILD=1) and fails
-  // with the child's output when it does not exit 0.
-  async function runStaleLockScenarioInChild(name: string): Promise<void> {
+  // Runs one scenario in an isolated `bun test` child process (this
+  // file, filtered to the scenario, ISOLATED_CHILD=1) and reports a
+  // nonzero exit with the child's output.
+  async function runIsolatedScenario(name: string): Promise<void> {
     // Bun treats -t as a regex. Anchor the end so a longer scenario
     // with this name as its prefix cannot share the lock-stealing child.
     const pattern = `${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`
@@ -323,7 +330,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     ])
     if (exitCode !== 0) {
       throw new Error(
-        `isolated stale-lock scenario "${name}" failed (exit ${exitCode}):\n${stdout}\n${stderr}`,
+        `isolated publish scenario "${name}" failed (exit ${exitCode}):\n${stdout}\n${stderr}`,
       )
     }
   }
@@ -614,6 +621,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     claimInstallInjection = undefined
     commitPause = undefined
     linkUnsupported = false
+    beforeUnsupportedLink = undefined
     linkCallTargets.length = 0
     registry?._setCommitPublishHookForTesting(undefined)
     registry?._setCommitPublishHookForTestingSync(undefined)
@@ -1704,7 +1712,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
       scenario.name,
       async () => {
         if (!ISOLATED_CHILD) {
-          await runStaleLockScenarioInChild(scenario.name)
+          await runIsolatedScenario(scenario.name)
           return
         }
         await scenario.run()
@@ -2182,6 +2190,82 @@ describe('terminal-fact publish across withdrawn claims', () => {
         realFs.rmdirSync(claimDir)
         expect(await storedExitCode(session.id)).toBe(3)
       })
+    }
+  }
+
+  // POSIX modes are meaningful here. The source is already synced, and
+  // a read-only record can be published by renaming it without ever
+  // reopening it for write. Staging must retain that property and mode.
+  for (const synchronous of [false, true]) {
+    for (const mode of [0o400, 0o600, 0o640]) {
+      const runtime = synchronous ? 'sync' : 'async'
+      it.skipIf(process.platform === 'win32')(
+        `preserves source mode ${mode.toString(8)} during ${runtime} fallback publication`,
+        async () => {
+          const { session, target, claimDir } = await createPublishFixture()
+          const setSourceMode = mock((path: string) => realFs.chmodSync(path, mode))
+          beforeUnsupportedLink = setSourceMode
+          // Simulate staging in a process whose umask is more restrictive
+          // than the source's mode (e.g. an adopter of a pending publish).
+          const previousUmask = process.umask(0o077)
+          try {
+            await publishForTest(synchronous, session)
+          } finally {
+            process.umask(previousUmask)
+          }
+
+          expect(setSourceMode).toHaveBeenCalledTimes(1)
+          expect((await realFsPromises.stat(target)).mode & 0o777).toBe(mode)
+          expect(await storedExitCode(session.id)).toBe(0)
+          expect(realFs.existsSync(claimDir)).toBe(false)
+        },
+      )
+    }
+  }
+
+  for (const synchronous of [false, true]) {
+    for (const kind of ['directory', 'FIFO'] as const) {
+      const runtime = synchronous ? 'sync' : 'async'
+      const name = `rejects a ${kind} in place of a regular staging source (${runtime})`
+      // These fixtures exercise POSIX file types. Run the FIFO test in
+      // a child: a blocking open regression could otherwise stall Bun's
+      // own test timeout. Leave five seconds after the child deadline.
+      it.skipIf(process.platform === 'win32')(
+        name,
+        async () => {
+          if (kind === 'FIFO' && !ISOLATED_CHILD) {
+            await runIsolatedScenario(name)
+            return
+          }
+          const { session, target, claimDir } = await createPublishFixture()
+          const replaceSource = mock((path: string) => {
+            realUnlinkSync(path)
+            if (kind === 'directory') {
+              realFs.mkdirSync(path)
+            } else {
+              const child = Bun.spawnSync(['mkfifo', path], {
+                cwd: configDir,
+                env: { ...process.env },
+                stdin: 'ignore',
+                stdout: 'pipe',
+                stderr: 'pipe',
+                timeout: 1000,
+              })
+              expect(child.exitCode).toBe(0)
+            }
+          })
+          beforeUnsupportedLink = replaceSource
+
+          await expect(publishForTest(synchronous, session))
+            .rejects.toThrow('Expected a regular publish source')
+          expect(replaceSource).toHaveBeenCalledTimes(1)
+          expect(realFs.existsSync(target)).toBe(false)
+          expect(realFs.existsSync(claimDir)).toBe(false)
+          expect((await readdir(dirname(target))).some(name => name.startsWith('.publish-')))
+            .toBe(false)
+        },
+        kind === 'FIFO' ? 30_000 : 5000,
+      )
     }
   }
 

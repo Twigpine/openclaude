@@ -1,5 +1,4 @@
 import {
-  copyFile,
   link,
   lstat,
   mkdir,
@@ -19,7 +18,7 @@ import {
 import {
   closeSync,
   constants as fsConstants,
-  copyFileSync,
+  fchmodSync,
   fstatSync,
   fsyncSync,
   linkSync,
@@ -1922,6 +1921,33 @@ function isTerminalFactClaimTempGoneSync(tmp: string): boolean {
 
 type PublishCommitOutcome = 'committed' | 'exists' | 'gone'
 
+// A terminal-fact claim can name a non-regular entry. As with wait's
+// strict readers, use a nonblocking open and check the descriptor's type
+// before reading, rather than blocking on a FIFO or opening by path twice.
+const PUBLISH_SOURCE_FLAGS = fsConstants.O_RDONLY | fsConstants.O_NONBLOCK
+
+async function readPublishSource(path: string) {
+  const handle = await open(path, PUBLISH_SOURCE_FLAGS)
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) throw new Error(`Expected a regular publish source at ${path}`)
+    return { bytes: await handle.readFile(), mode: info.mode & 0o777 }
+  } finally {
+    await handle.close()
+  }
+}
+
+function readPublishSourceSync(path: string) {
+  const fd = openSync(path, PUBLISH_SOURCE_FLAGS)
+  try {
+    const info = fstatSync(fd)
+    if (!info.isFile()) throw new Error(`Expected a regular publish source at ${path}`)
+    return { bytes: readFileSync(fd), mode: info.mode & 0o777 }
+  } finally {
+    closeSync(fd)
+  }
+}
+
 /**
  * Publishes a synced temp without replacing an existing record. Prefer
  * link(), which checks for an existing target atomically. If hard links
@@ -1994,9 +2020,16 @@ async function commitPublishFile(
     let sealed = false
     try {
       try {
-        await copyFile(tmp, pending)
-        const handle = await open(pending, 'r+')
+        // Create and sync through one writable descriptor. Reopening a
+        // completed copy for write would reject a readable, read-only temp.
+        const { bytes, mode } = await readPublishSource(tmp)
+        const handle = await open(pending, 'wx', mode)
         try {
+          await handle.writeFile(bytes)
+          // Adoption may run under a more restrictive umask than the owner.
+          if (((await handle.stat()).mode & 0o777) !== mode) {
+            await handle.chmod(mode)
+          }
           await handle.sync()
         } finally {
           await handle.close()
@@ -2134,9 +2167,12 @@ function commitPublishFileSync(
     let sealed = false
     try {
       try {
-        copyFileSync(tmp, pending)
-        const fd = openSync(pending, 'r+')
+        // Match the async staging path, including the original mode.
+        const { bytes, mode } = readPublishSourceSync(tmp)
+        const fd = openSync(pending, 'wx', mode)
         try {
+          writeFileSync(fd, bytes)
+          if ((fstatSync(fd).mode & 0o777) !== mode) fchmodSync(fd, mode)
           fsyncSync(fd)
         } finally {
           closeSync(fd)
