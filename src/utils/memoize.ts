@@ -23,6 +23,7 @@ type LRUMemoizedFunction<Args extends unknown[], Result> = {
     delete: (key: string) => boolean
     get: (key: string) => Result | undefined
     has: (key: string) => boolean
+    keys: () => string[]
   }
 }
 
@@ -263,6 +264,7 @@ export function memoizeWithLRU<
     // peek() avoids updating recency — we only want to observe, not promote
     get: (key: string) => cache.peek(key),
     has: (key: string) => cache.has(key),
+    keys: () => [...cache.keys()],
   }
 
   return memoized

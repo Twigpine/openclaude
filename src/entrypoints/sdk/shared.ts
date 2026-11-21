@@ -55,17 +55,35 @@ export function assertValidSessionId(sessionId: string): void {
 export interface MutexAcquireOptions {
   /** Maximum time to wait for mutex in milliseconds. Default: no timeout (wait forever). */
   timeoutMs?: number
+  /**
+   * Abort waiting for the mutex when this signal aborts. A cancelled waiter
+   * is removed from the queue, so it never acquires the mutex later and a
+   * later caller is not stuck behind it.
+   */
+  signal?: AbortSignal
+  /**
+   * Queue ahead of regular waiters: when the holder releases, a priority
+   * waiter is picked before any regular waiter that queued earlier. Only
+   * for a scope that must re-enter its namespace before a competitor that
+   * queued first — a surviving discovery scope, not a turn or a fresh
+   * sign-in. At most one priority waiter exists per discovery, and it
+   * releases once its work settles, so regular waiters cannot starve
+   * behind it.
+   */
+  priority?: boolean
 }
 
 export interface MutexAcquireResult {
   /** Whether the mutex was acquired successfully. */
   acquired: boolean
   /** Reason for failure if not acquired. */
-  reason?: 'timeout'
+  reason?: 'timeout' | 'aborted'
 }
 
 function createEnvMutexState() {
   const queue: Array<() => void> = []
+  /** Waiters that jump the regular queue when the holder releases. */
+  const priorityQueue: Array<() => void> = []
   let locked = false
 
   async function acquire(
@@ -76,54 +94,79 @@ function createEnvMutexState() {
       return { acquired: true }
     }
 
-    if (options?.timeoutMs === undefined) {
+    if (options?.signal?.aborted) {
+      return { acquired: false, reason: 'aborted' }
+    }
+
+    if (options?.timeoutMs === undefined && options?.signal === undefined) {
       // No timeout - wait forever (original behavior for backward compatibility)
       return new Promise(resolve => {
-        queue.push(() => resolve({ acquired: true }))
+        ;(options?.priority ? priorityQueue : queue).push(() => resolve({ acquired: true }))
       })
     }
 
-    // With timeout - race between queue and timeout
+    // With timeout and/or abort signal - race between queue, timeout and abort
     return new Promise(resolve => {
       let resolved = false
       let callback: () => void
 
-      const timeoutId = setTimeout(() => {
-        if (!resolved) {
-          resolved = true
-          // Remove ourselves from the queue to prevent orphaned callback
-          const index = queue.indexOf(callback)
-          if (index !== -1) {
-            queue.splice(index, 1)
+      const cleanup = () => {
+        if (timeoutId !== undefined) clearTimeout(timeoutId)
+        options?.signal?.removeEventListener('abort', onAbort)
+      }
+      const settle = (result: MutexAcquireResult) => {
+        if (resolved) return
+        resolved = true
+        cleanup()
+        // Remove ourselves from the queue so a later release does not wake
+        // a waiter that already left.
+        const index = queue.indexOf(callback)
+        if (index !== -1) {
+          queue.splice(index, 1)
+        } else {
+          const priorityIndex = priorityQueue.indexOf(callback)
+          if (priorityIndex !== -1) {
+            priorityQueue.splice(priorityIndex, 1)
           }
-          resolve({ acquired: false, reason: 'timeout' })
         }
-      }, options.timeoutMs)
+        resolve(result)
+      }
+
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
+      if (options?.timeoutMs !== undefined) {
+        timeoutId = setTimeout(
+          () => settle({ acquired: false, reason: 'timeout' }),
+          options.timeoutMs,
+        )
+      }
+
+      const onAbort = () => settle({ acquired: false, reason: 'aborted' })
+      options?.signal?.addEventListener('abort', onAbort, { once: true })
 
       callback = () => {
         if (!resolved) {
           resolved = true
-          clearTimeout(timeoutId)
+          cleanup()
           resolve({ acquired: true })
         }
       }
 
-      queue.push(callback)
+      ;(options?.priority ? priorityQueue : queue).push(callback)
     })
   }
 
   function release(): void {
-    if (queue.length > 0) {
-      const next = queue.shift()
-      if (next) {
-        try {
-          next()
-        } catch {
-          // If callback throws, ensure mutex is unlocked so next caller can acquire
-          // The error is intentionally not propagated - callback errors should not
-          // block the mutex system. Callers should handle their own errors.
-          locked = false
-        }
+    // A priority waiter is picked before any regular waiter that queued
+    // earlier; within each queue the order stays FIFO.
+    const next = priorityQueue.length > 0 ? priorityQueue.shift() : queue.shift()
+    if (next) {
+      try {
+        next()
+      } catch {
+        // If callback throws, ensure mutex is unlocked so next caller can acquire
+        // The error is intentionally not propagated - callback errors should not
+        // block the mutex system. Callers should handle their own errors.
+        locked = false
       }
     } else {
       locked = false
@@ -132,6 +175,7 @@ function createEnvMutexState() {
 
   function reset(): void {
     queue.length = 0
+    priorityQueue.length = 0
     locked = false
   }
 

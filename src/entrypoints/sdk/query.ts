@@ -57,6 +57,11 @@ import {
 } from '../../utils/fileHistory.js'
 import type { MCPServerConnection } from '../../services/mcp/types.js'
 import {
+  noteMcpClientInstalled,
+  releaseInstalledMcpClient,
+  releaseMcpClientSetupReservation,
+} from '../../services/mcp/client.js'
+import {
   acquireEnvMutex,
   releaseEnvMutex,
   type SDKMessage,
@@ -376,6 +381,8 @@ async function loadAndInjectSessionMessages(
 
 class QueryImpl implements Query {
   private _engine: QueryEngine | null = null
+  /** Set when close() runs: a connect still in flight must not install. */
+  private closed = false
   /** Track whether engine was injected at construction (test/mock) vs created fresh. */
   private _engineWasInjected: boolean
   private get engine(): QueryEngine {
@@ -649,13 +656,43 @@ class QueryImpl implements Query {
           // Connect MCP servers if provided
           if (self.mcpServers && Object.keys(self.mcpServers).length > 0) {
             try {
-              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, runInQueryEnv, self.abortController.signal)
-              self.sdkMcpTools = mcpTools
-              if (mcpClients.length > 0) {
-                self.engine.setMcpClients(mcpClients)
-              }
-              if (mcpTools.length > 0) {
-                self.engine.updateTools(assembleToolPool(self.permissionContext, mcpTools))
+              const { clients: mcpClients, tools: mcpTools } = await connectSdkMcpServers(self.mcpServers, () => runInQueryEnv, self.abortController.signal, self)
+              if (self.closed || self.abortController.signal.aborted) {
+                // Mirror v2.ts connectMcpServersOnce: the query closed
+                // — or the host aborted it — while this connect was in
+                // flight, so the clients it received will never be
+                // installed — their setup reservations go here, since
+                // close() only reaches installed clients (jatmn #2493
+                // review 5965105241, CodeRabbit #2493 review 5964014825).
+                // A host abort does not set closed (only close() does),
+                // so without the signal check the aborted query would
+                // install the clients and submit the string prompt below
+                // (CodeRabbit #2493 review 5967851717).
+                for (const client of mcpClients) {
+                  if (client.type === 'connected') {
+                    releaseMcpClientSetupReservation(client, self)
+                  }
+                }
+                // Stop here: on close() the engine is already cleared,
+                // so reaching submitMessage below would reject instead of
+                // ending the iteration; on a host abort the engine is
+                // still live, so reaching it would run the turn the host
+                // cancelled. The finally still restores the environment
+                // (CodeRabbit #2493 review 5966435933).
+                return
+              } else {
+                self.sdkMcpTools = mcpTools
+                if (mcpClients.length > 0) {
+                  self.engine.setMcpClients(mcpClients)
+                  for (const client of mcpClients) {
+                    if (client.type === 'connected') {
+                      noteMcpClientInstalled(client, self)
+                    }
+                  }
+                }
+                if (mcpTools.length > 0) {
+                  self.engine.updateTools(assembleToolPool(self.permissionContext, mcpTools))
+                }
               }
             } catch (err) {
               // MCP connection failed — continue without MCP tools
@@ -814,16 +851,27 @@ class QueryImpl implements Query {
   }
 
   close(): void {
+    this.closed = true
     this.clearHookCallbacks()
     const wrapperController = this.abortController
     this.interruptWithSource('sdk_close')
     requestSdkRootAbort(wrapperController, 'sdk_close', 'sdk_query')
-    // Disconnect MCP clients to prevent resource leaks
+    // Disconnect MCP clients to prevent resource leaks: one
+    // ownership-aware release per installed client — a client another
+    // session still has installed stays open, and the last owner's
+    // release evicts that generation before closing it, so a caller
+    // joining afterwards cannot receive a client that is closing
+    // (CodeRabbit #2493 review 5961865068).
     const mcpClients = this._engine?.getMcpClients?.() ?? []
     for (const client of mcpClients) {
-      if (client.type === 'connected' && client.cleanup) {
+      if (client.type === 'connected' && typeof client.cleanup === 'function') {
         // Fire-and-forget cleanup — close() is synchronous
-        void client.cleanup().catch(err => {
+        void releaseInstalledMcpClient(
+          client.name,
+          client.config,
+          client,
+          this,
+        ).catch(err => {
           console.warn('SDK: MCP client cleanup error:', err instanceof Error ? err.message : String(err))
         })
       }

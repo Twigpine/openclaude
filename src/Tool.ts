@@ -509,6 +509,13 @@ export type Tool<
   isOpenWorld?(input: z.infer<Input>): boolean
   requiresUserInteraction?(): boolean
   isMcp?: boolean
+  /**
+   * True only for the local OAuth recovery tool created by
+   * createMcpAuthTool. A remote server can expose its own tool named
+   * `authenticate` with the same qualified name and owner metadata, so
+   * name alone cannot tell them apart — this marker can.
+   */
+  isMcpAuthTool?: boolean
   isLsp?: boolean
   /**
    * When true, this tool is deferred (sent with defer_loading: true) and requires

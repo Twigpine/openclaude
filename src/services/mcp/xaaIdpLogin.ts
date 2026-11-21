@@ -434,7 +434,14 @@ export async function acquireIdpIdToken(
 ): Promise<string> {
   const { idpIssuer, idpClientId } = opts
 
-  const cached = getCachedIdpIdToken(idpIssuer)
+  // The cached id_token belongs to the namespace the flow began in, like
+  // the client secret read above: another turn may have applied its own
+  // environment while setup was pending, and a read outside the scope
+  // would look in that namespace instead. The read is quick — the browser
+  // wait below stays outside the scope.
+  const cached = await resumeIn(opts.credentialScope, async () =>
+    getCachedIdpIdToken(idpIssuer),
+  )
   if (cached) {
     logMCPDebug('xaa', `Using cached id_token for ${idpIssuer}`)
     return cached
