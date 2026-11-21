@@ -1761,6 +1761,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
         const target = terminalFactPath(session.id, 'natural')
         const options = { ownerPid: session.pid, expectedSession: session }
         let injected = false
+        let collision: unknown
         linkUnsupported = true
         if (outcome === 'reclaimed') {
           const reclaim = () => {
@@ -1777,7 +1778,6 @@ describe('terminal-fact publish across withdrawn claims', () => {
             // Another cooperating writer acquires the claim between the
             // contender's stat and directory rename. Attempt the actual
             // rename while the winner's complete staged source is live.
-            let collision: unknown
             realFs.rmSync(`${target}.claim`, { recursive: true })
             registry._setCommitPublishOwnedHookForTestingSync(() => {
               try {
@@ -1797,16 +1797,22 @@ describe('terminal-fact publish across withdrawn claims', () => {
           }
         }
         const exitCode = outcome === 'collision' ? 3 : 0
-        if (synchronous) {
-          const terminate = () => registry.recordBackgroundSessionNaturalTerminationSync(
-            session.id, { exitCode: 0 }, options,
-          )
-          terminate()
+        // The real rename can report a Windows denial instead of
+        // EEXIST/ENOTEMPTY. Only that denial is rethrown after the winner
+        // has published; in either case the winner's bytes must survive.
+        const result = await publishForTest(synchronous, session).then(
+          value => ({ value }),
+          (error: unknown) => ({ error }),
+        )
+        const collisionCode = (collision as NodeJS.ErrnoException | undefined)?.code
+        if (process.platform === 'win32' && (
+          collisionCode === 'EACCES' || collisionCode === 'EPERM'
+        )) {
+          expect(result).toHaveProperty('error', collision)
+        } else if (synchronous) {
+          expect(result).toEqual({ value: undefined })
         } else {
-          const pending = registry.recordBackgroundSessionNaturalTermination(
-            session.id, { exitCode: 0 }, options,
-          )
-          await expect(pending).resolves.toMatchObject({ exitCode })
+          expect(result).toMatchObject({ value: { exitCode } })
         }
         expect(injected).toBe(true)
         expect(await storedExitCode(session.id)).toBe(exitCode)
@@ -1819,17 +1825,17 @@ describe('terminal-fact publish across withdrawn claims', () => {
   async function publishForTest(
     synchronous: boolean,
     session: Awaited<ReturnType<typeof registry.createBackgroundSession>>,
-  ): Promise<void> {
+  ) {
     const options = { ownerPid: session.pid, expectedSession: session }
     if (synchronous) {
       registry.recordBackgroundSessionNaturalTerminationSync(
         session.id, { exitCode: 0 }, options,
       )
-    } else {
-      await registry.recordBackgroundSessionNaturalTermination(
-        session.id, { exitCode: 0 }, options,
-      )
+      return
     }
+    return registry.recordBackgroundSessionNaturalTermination(
+      session.id, { exitCode: 0 }, options,
+    )
   }
 
   async function createPublishFixture() {
@@ -1991,43 +1997,48 @@ describe('terminal-fact publish across withdrawn claims', () => {
     }
 
     for (const code of ['EACCES', 'EPERM']) {
-      for (const outcome of ['retry', 'winner', 'active', 'not-directory', 'persistent', 'non-Windows'] as const) {
+      for (const outcome of [
+        'retry', 'winner', 'active', 'both', 'not-directory', 'persistent', 'non-Windows',
+      ] as const) {
         it(`classifies ${code} at claim installation: ${outcome} (${runtime})`, async () => {
           const { session, target, claimDir } = await createPublishFixture()
           pinProcessPlatform(outcome === 'non-Windows' ? 'linux' : 'win32')
           registry._setCommitPublishClaimMaxPollsForTesting(2)
+          const denial = Object.assign(new Error('claim install denied'), { code })
           let attempts = 0
-          const deny = () => {
+          claimInstallInjection = function deny() {
             attempts++
-            if (outcome === 'active') {
+            if (outcome === 'active' || outcome === 'both') {
               realFs.mkdirSync(claimDir)
               realWriteFileSync(join(claimDir, liveStagedName), '{}')
             } else if (outcome === 'not-directory') {
               realWriteFileSync(claimDir, 'not a directory')
-            } else if (outcome === 'winner') {
-              realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
             } else if (outcome === 'persistent') {
               claimInstallInjection = deny
             }
-            throw Object.assign(new Error('claim install denied'), { code })
+            if (outcome === 'winner' || outcome === 'both') {
+              realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+            }
+            throw denial
           }
-          claimInstallInjection = deny
-          const publish = () => publishForTest(synchronous, session)
-          if (outcome === 'retry' || outcome === 'winner') {
-            await publish()
-            expect(await storedExitCode(session.id)).toBe(outcome === 'retry' ? 0 : 3)
+          const publication = publishForTest(synchronous, session)
+          if (outcome === 'retry') {
+            await publication
+            expect(await storedExitCode(session.id)).toBe(0)
             expect(realFs.existsSync(claimDir)).toBe(false)
           } else {
-            if (outcome === 'active') {
-              await expect(publish()).rejects.toThrow('Timed out waiting for a concurrent publish')
-              expect(realFs.existsSync(join(claimDir, liveStagedName))).toBe(true)
-            } else {
-              await expect(publish()).rejects.toMatchObject({ code })
+            await expect(publication).rejects.toBe(denial)
+            if (outcome === 'active' || outcome === 'both') {
+              expect(await readFile(join(claimDir, liveStagedName), 'utf8')).toBe('{}')
             }
             if (outcome === 'not-directory') {
               expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
             }
-            expect(realFs.existsSync(target)).toBe(false)
+            if (outcome === 'winner' || outcome === 'both') {
+              expect(await storedExitCode(session.id)).toBe(3)
+            } else {
+              expect(realFs.existsSync(target)).toBe(false)
+            }
           }
           expect(attempts).toBe(outcome === 'persistent' ? 2 : 1)
           expect((await readdir(dirname(target))).filter(name => name.startsWith('.publish-')))

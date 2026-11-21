@@ -2012,10 +2012,12 @@ async function commitPublishFile(
       } catch (error) {
         if (isErrno(error, 'EEXIST') || isErrno(error, 'ENOTEMPTY')) continue
         if (!isCommitPublishDirectoryCollisionOnWindows(error)) throw error
-        const collision = await commitPublishPathStat(claimDir)
-        if (collision?.isDirectory()) continue
-        if (await commitPublishPathStat(target)) return 'exists'
-        if (collision) throw error // A non-directory is not a competing claim.
+        if (
+          (await commitPublishPathStat(claimDir)) ||
+          (await commitPublishPathStat(target))
+        ) {
+          throw error
+        }
         // Both paths are absent: the collision may have cleared, or this
         // may be a real denial. Retry within the same poll budget.
         if (attempt + 1 < maxClaimPolls) {
@@ -2148,10 +2150,9 @@ function commitPublishFileSync(
       } catch (error) {
         if (isErrno(error, 'EEXIST') || isErrno(error, 'ENOTEMPTY')) continue
         if (!isCommitPublishDirectoryCollisionOnWindows(error)) throw error
-        const collision = commitPublishPathStatSync(claimDir)
-        if (collision?.isDirectory()) continue
-        if (commitPublishPathStatSync(target)) return 'exists'
-        if (collision) throw error // A non-directory is not a competing claim.
+        if (commitPublishPathStatSync(claimDir) || commitPublishPathStatSync(target)) {
+          throw error
+        }
         // Both paths are absent: the collision may have cleared, or this
         // may be a real denial. Retry within the same poll budget.
         if (attempt + 1 < maxClaimPolls) {
