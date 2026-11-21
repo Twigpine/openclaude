@@ -142,6 +142,7 @@ export const commands: SlashCommand[] = [
   { name: 'statusline', description: "Set up OpenClaude's status line UI", category: 'customization' },
   { name: 'terminal-setup', description: 'Install the Shift+Enter key binding for newlines', category: 'customization' },
   { name: 'scroll-speed', description: 'Set mouse wheel scroll speed', category: 'customization', args: '<1-20>' },
+  { name: 'focus', description: 'Toggle focus view, fullscreen only (see /tui fullscreen). Hides earlier turns; keeps the latest prompt, tool summary, failures and response', category: 'customization' },
   { name: 'tui', description: 'Switch display mode (fullscreen or inline)', category: 'customization', args: '<fullscreen|inline>' },
   { name: 'commit-message', description: 'Configure commit attribution text', category: 'customization', args: '[status|off|default|set "text"|co-author <name> <email>]' },
   { name: 'buddy', description: 'Hatch, pet, and manage your OpenClaude companion', category: 'customization', args: '[status|mute|unmute|dance|images <on|off>|set <form>|name <name>|help]' },

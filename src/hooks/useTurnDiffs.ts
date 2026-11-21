@@ -33,7 +33,7 @@ type TurnDiffCache = {
   lastTurnIndex: number
 }
 
-function isFileEditResult(result: unknown): result is FileEditResult {
+export function isFileEditResult(result: unknown): result is FileEditResult {
   if (!result || typeof result !== 'object') return false
   const r = result as Record<string, unknown>
   // FileEditTool: has structuredPatch with content
@@ -52,7 +52,7 @@ function isFileWriteOutput(result: FileEditResult): result is FileWriteOutput {
   )
 }
 
-function countHunkLines(hunks: StructuredPatchHunk[]): {
+export function countHunkLines(hunks: StructuredPatchHunk[]): {
   added: number
   removed: number
 } {

@@ -22,6 +22,8 @@ import { AssistantToolUseMessage } from './messages/AssistantToolUseMessage.js';
 import { AttachmentMessage } from './messages/AttachmentMessage.js';
 import { CollapsedReadSearchContent } from './messages/CollapsedReadSearchContent.js';
 import { CompactBoundaryMessage } from './messages/CompactBoundaryMessage.js';
+import { FocusMarkerMessage } from './messages/FocusMarkerMessage.js';
+import { FocusSummaryMessage } from './messages/FocusSummaryMessage.js';
 import { GroupedToolUseContent } from './messages/GroupedToolUseContent.js';
 import { SystemTextMessage } from './messages/SystemTextMessage.js';
 import { UserImageMessage } from './messages/UserImageMessage.js';
@@ -242,6 +244,12 @@ function MessageImpl(t0: Props) {
             t2 = $[64];
           }
           return t2;
+        }
+        if (message.subtype === "focus_marker") {
+          return <FocusMarkerMessage hiddenTurns={message.hiddenTurns} compacted={message.compacted} />;
+        }
+        if (message.subtype === "focus_summary") {
+          return <FocusSummaryMessage summary={message.summary} />;
         }
         if (message.subtype === "microcompact_boundary") {
           return null;

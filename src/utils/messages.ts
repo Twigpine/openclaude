@@ -209,6 +209,16 @@ export const SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX =
   'Permission for this tool use was denied. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). The user said:\n'
 export const PLAN_REJECTION_PREFIX =
   'The agent proposed a plan that was rejected by the user. The user chose to stay in plan mode rather than proceed with implementation.\n\nRejected plan:\n'
+// Shown when a UserPromptSubmit hook stops a submission, optionally followed
+// by ": <reason>".
+export const HOOK_STOPPED_MESSAGE = 'Operation stopped by hook'
+export const UNKNOWN_SKILL_PREFIX = 'Unknown skill: '
+// Written when a slash command has no parseable name.
+export const SLASH_FORM_NOTICE = 'Commands are in the form `/command [args]`'
+// Written when a user types a skill that only the model may invoke.
+export const MODEL_ONLY_SKILL_PREFIX =
+  'This skill can only be invoked by Claude, not directly by users. Ask Claude to use the "'
+export const MODEL_ONLY_SKILL_SUFFIX = '" skill for you.'
 
 /**
  * Shared guidance for permission denials, instructing the model on appropriate workarounds.

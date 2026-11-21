@@ -32,6 +32,7 @@ function createNormalizedUserBlockMessage({
     isVisibleInTranscriptOnly: source.isVisibleInTranscriptOnly,
     isVirtual: source.isVirtual,
     isCollapseSummary: source.isCollapseSummary,
+    isLocalNotice: source.isLocalNotice,
     uuid,
     timestamp: source.timestamp,
     toolUseResult: source.toolUseResult,

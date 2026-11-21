@@ -45,6 +45,8 @@ export function isNavigableMessage(msg: NavigableMessage): boolean {
         case 'agents_killed':
         case 'away_summary':
         case 'thinking':
+        case 'focus_marker':
+        case 'focus_summary':
           return false;
       }
       return true;
