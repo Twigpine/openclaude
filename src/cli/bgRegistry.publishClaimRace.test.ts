@@ -48,8 +48,18 @@ const realUnlink = realFsPromises.unlink
 const realUnlinkSync = realFs.unlinkSync
 const realUtimes = realFsPromises.utimes
 const realUtimesSync = realFs.utimesSync
+const realRm = realFsPromises.rm
+const realRmSync = realFs.rmSync
 let beforeReclaimUnlink: ((path: string) => void) | undefined
 let beforeInstallStamp: ((path: string) => void) | undefined
+let beforePendingCleanup: (() => void) | undefined
+
+function injectPendingCleanup(path: unknown): void {
+  if (typeof path !== 'string' || !basename(path).startsWith('.publish-')) return
+  const inject = beforePendingCleanup
+  beforePendingCleanup = undefined
+  inject?.()
+}
 
 function injectStamp(path: string): void {
   if (!basename(path).startsWith('installing.')) return
@@ -564,6 +574,10 @@ describe('terminal-fact publish across withdrawn claims', () => {
       writeFile: mockedWriteFile,
       link: mockedLink,
       rename: mockedRename,
+      rm: async (...args: Parameters<typeof realRm>) => {
+        injectPendingCleanup(args[0])
+        await realRm(...args)
+      },
     }))
     mock.module('node:fs', () => ({
       ...realFs,
@@ -578,6 +592,10 @@ describe('terminal-fact publish across withdrawn claims', () => {
         realUtimesSync(...args)
       },
       renameSync: mockedRenameSync,
+      rmSync: (...args: Parameters<typeof realRmSync>) => {
+        injectPendingCleanup(args[0])
+        realRmSync(...args)
+      },
     }))
     registry = await import('./bgRegistry.js')
     registry._setBackgroundSessionsRootForTesting(
@@ -590,6 +608,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     stagedOpenInjection = undefined
     beforeReclaimUnlink = undefined
     beforeInstallStamp = undefined
+    beforePendingCleanup = undefined
     onClaimRead = undefined
     commitInjection = undefined
     claimInstallInjection = undefined
@@ -619,6 +638,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
       writeFile: realWriteFile,
       link: realLink,
       rename: realRename,
+      rm: realRm,
     }))
     mock.module('node:fs', () => ({
       ...realFs,
@@ -627,6 +647,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
       unlinkSync: realUnlinkSync,
       utimesSync: realUtimesSync,
       renameSync: realRenameSync,
+      rmSync: realRmSync,
     }))
     registry?._setBackgroundSessionsRootForTesting(undefined)
     await rm(configDir, { force: true, recursive: true })
@@ -1891,6 +1912,20 @@ describe('terminal-fact publish across withdrawn claims', () => {
       expect(await storedExitCode(session.id)).toBe(0)
     })
 
+    it(`preserves a fresh sealed payload in a stale directory (${runtime})`, async () => {
+      const { session, target, claimDir } = await createPublishFixture()
+      await seedStaleClaim(claimDir)
+      const payload = join(claimDir, staleStagedName)
+      const now = new Date()
+      await realUtimes(payload, now, now)
+      registry._setCommitPublishClaimMaxPollsForTesting(2)
+
+      await expect(publishForTest(synchronous, session))
+        .rejects.toThrow(`Timed out waiting for a concurrent publish to ${target}`)
+      expect(await readFile(payload, 'utf8')).toBe('{}')
+      expect(realFs.existsSync(target)).toBe(false)
+    })
+
     for (const abandoned of [false, true]) {
       it(`handles an unsealed ${abandoned ? 'abandoned' : 'fresh'} claim (${runtime})`, async () => {
         const { session, target, claimDir } = await createPublishFixture()
@@ -1998,13 +2033,17 @@ describe('terminal-fact publish across withdrawn claims', () => {
 
     for (const code of ['EACCES', 'EPERM']) {
       for (const outcome of [
-        'retry', 'winner', 'active', 'both', 'not-directory', 'persistent', 'non-Windows',
+        'retry', 'winner', 'active', 'both', 'not-directory', 'persistent', 'late-winner', 'non-Windows',
       ] as const) {
         it(`classifies ${code} at claim installation: ${outcome} (${runtime})`, async () => {
           const { session, target, claimDir } = await createPublishFixture()
           pinProcessPlatform(outcome === 'non-Windows' ? 'linux' : 'win32')
           registry._setCommitPublishClaimMaxPollsForTesting(2)
           const denial = Object.assign(new Error('claim install denied'), { code })
+          const exhaustsBudget = outcome === 'persistent' || outcome === 'late-winner'
+          const publishWinner = () => {
+            realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+          }
           let attempts = 0
           claimInstallInjection = function deny() {
             attempts++
@@ -2013,18 +2052,23 @@ describe('terminal-fact publish across withdrawn claims', () => {
               realWriteFileSync(join(claimDir, liveStagedName), '{}')
             } else if (outcome === 'not-directory') {
               realWriteFileSync(claimDir, 'not a directory')
-            } else if (outcome === 'persistent') {
+            } else if (exhaustsBudget && attempts === 1) {
               claimInstallInjection = deny
             }
-            if (outcome === 'winner' || outcome === 'both') {
-              realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+            if (outcome === 'winner' || outcome === 'both') publishWinner()
+            if (outcome === 'late-winner' && attempts === 2) {
+              // Both paths are absent at classification. Another writer
+              // publishes while this attempt cleans up its private copy.
+              beforePendingCleanup = publishWinner
             }
             throw denial
           }
           const publication = publishForTest(synchronous, session)
-          if (outcome === 'retry') {
-            await publication
-            expect(await storedExitCode(session.id)).toBe(0)
+          if (outcome === 'retry' || outcome === 'late-winner') {
+            const exitCode = outcome === 'retry' ? 0 : 3
+            const result = await publication
+            if (!synchronous) expect(result).toMatchObject({ exitCode })
+            expect(await storedExitCode(session.id)).toBe(exitCode)
             expect(realFs.existsSync(claimDir)).toBe(false)
           } else {
             await expect(publication).rejects.toBe(denial)
@@ -2040,7 +2084,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
               expect(realFs.existsSync(target)).toBe(false)
             }
           }
-          expect(attempts).toBe(outcome === 'persistent' ? 2 : 1)
+          expect(attempts).toBe(exhaustsBudget ? 2 : 1)
           expect((await readdir(dirname(target))).filter(name => name.startsWith('.publish-')))
             .toEqual([])
         })

@@ -1953,6 +1953,7 @@ async function commitPublishFile(
   const maxClaimPolls =
     commitPublishClaimMaxPollsForTesting ?? COMMIT_PUBLISH_CLAIM_MAX_POLLS
   const claimIsStale = observeCommitPublishClaimAge()
+  let finalInstallDenial: unknown
   for (let attempt = 0; attempt < maxClaimPolls; attempt++) {
     if (await commitPublishPathStat(target)) return 'exists'
     const claim = await commitPublishPathStat(claimDir)
@@ -2024,9 +2025,9 @@ async function commitPublishFile(
           await new Promise(resolve => setTimeout(resolve, 10))
           continue
         }
-        // Preserve the denial on exhaustion, unless another writer won.
-        if (await commitPublishPathStat(target)) return 'exists'
-        throw error
+        // Run the common final target check after this attempt's cleanup.
+        finalInstallDenial = error
+        break
       }
       // Stamp a unique path, not the shared directory: a withdrawn
       // holder cannot change its successor's age. Publishing the sealed
@@ -2067,6 +2068,7 @@ async function commitPublishFile(
   // once before failing: callers expecting 'exists' must not see the
   // timeout when the record is already there.
   if (await commitPublishPathStat(target)) return 'exists'
+  if (finalInstallDenial !== undefined) throw finalInstallDenial
   throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
 }
 
@@ -2086,6 +2088,7 @@ function commitPublishFileSync(
   const maxClaimPolls =
     commitPublishClaimMaxPollsForTesting ?? COMMIT_PUBLISH_CLAIM_MAX_POLLS
   const claimIsStale = observeCommitPublishClaimAge()
+  let finalInstallDenial: unknown
   for (let attempt = 0; attempt < maxClaimPolls; attempt++) {
     if (commitPublishPathStatSync(target)) return 'exists'
     const claim = commitPublishPathStatSync(claimDir)
@@ -2159,9 +2162,9 @@ function commitPublishFileSync(
           sleepSync(10)
           continue
         }
-        // Preserve the denial on exhaustion, unless another writer won.
-        if (commitPublishPathStatSync(target)) return 'exists'
-        throw error
+        // Run the common final target check after this attempt's cleanup.
+        finalInstallDenial = error
+        break
       }
       // Stamp a unique path, not the shared directory: a withdrawn
       // holder cannot change its successor's age. Publishing the sealed
@@ -2205,6 +2208,7 @@ function commitPublishFileSync(
   // Same final recheck as the async path: a successor can publish
   // during the last poll iteration.
   if (commitPublishPathStatSync(target)) return 'exists'
+  if (finalInstallDenial !== undefined) throw finalInstallDenial
   throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
 }
 
