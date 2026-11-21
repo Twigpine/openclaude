@@ -213,6 +213,12 @@ export const PLAN_REJECTION_PREFIX =
 // by ": <reason>".
 export const HOOK_STOPPED_MESSAGE = 'Operation stopped by hook'
 export const UNKNOWN_SKILL_PREFIX = 'Unknown skill: '
+// Written when a slash command has no parseable name.
+export const SLASH_FORM_NOTICE = 'Commands are in the form `/command [args]`'
+// Written when a user types a skill that only the model may invoke.
+export const MODEL_ONLY_SKILL_PREFIX =
+  'This skill can only be invoked by Claude, not directly by users. Ask Claude to use the "'
+export const MODEL_ONLY_SKILL_SUFFIX = '" skill for you.'
 
 /**
  * Shared guidance for permission denials, instructing the model on appropriate workarounds.

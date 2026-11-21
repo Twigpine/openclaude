@@ -10,6 +10,9 @@ import {
   REJECT_MESSAGE_WITH_REASON_PREFIX,
   SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
   HOOK_STOPPED_MESSAGE,
+  MODEL_ONLY_SKILL_PREFIX,
+  MODEL_ONLY_SKILL_SUFFIX,
+  SLASH_FORM_NOTICE,
   SYNTHETIC_MESSAGES,
   UNKNOWN_SKILL_PREFIX,
 } from './messages.js'
@@ -265,13 +268,12 @@ const UNKNOWN_SKILL_NOTICE = new RegExp(
 /**
  * Indices of rows that are local notices without the isLocalNotice flag, which
  * only rows written before the flag existed lack (a resumed transcript). The
- * input pipeline wrote exactly three shapes: a hook stop with or without a
- * reason, which follows the prompt it stopped, and an unknown-skill notice
- * whose name is a bare command token, which follows the synthetic caveat row.
- * The text alone cannot be told from typed text, so each shape counts only
- * where the pipeline wrote it: a hook stop directly after a prompt row of
- * another submission, never after an assistant reply or an interrupt, and an
- * unknown-skill notice directly after the caveat row. Text that merely starts
+ * input pipeline wrote four shapes. A hook stop, with or without a reason,
+ * follows the prompt it stopped. A model-only skill notice follows the typed
+ * `/name` row it answers. An unknown-skill notice (a bare command token) and
+ * the slash-form notice follow the synthetic caveat row. The text alone cannot
+ * be told from typed text, so each shape counts only where the pipeline wrote
+ * it: never after an assistant reply or an interrupt. Text that merely starts
  * like a notice stays a prompt.
  */
 function legacyNoticeIndices(messages: readonly FocusMessage[]): Set<number> {
@@ -283,21 +285,32 @@ function legacyNoticeIndices(messages: readonly FocusMessage[]): Set<number> {
     if (blocksOf(m).some(b => b.type === 'tool_result')) return
     const text = firstText(m)
     if (text === undefined) return
-    const isUnknownSkill = UNKNOWN_SKILL_NOTICE.test(text)
+    const afterCaveat =
+      UNKNOWN_SKILL_NOTICE.test(text) || text === SLASH_FORM_NOTICE
     const isHookStop =
       text === HOOK_STOPPED_MESSAGE || text.startsWith(`${HOOK_STOPPED_MESSAGE}: `)
-    if (!isUnknownSkill && !isHookStop) return
+    const skillName =
+      text.startsWith(MODEL_ONLY_SKILL_PREFIX) && text.endsWith(MODEL_ONLY_SKILL_SUFFIX)
+        ? text.slice(MODEL_ONLY_SKILL_PREFIX.length, -MODEL_ONLY_SKILL_SUFFIX.length)
+        : undefined
+    const isModelOnly = skillName !== undefined && skillName !== ''
+    if (!afterCaveat && !isHookStop && !isModelOnly) return
     let p = i - 1
     while (p >= 0 && messages[p]!.type === 'attachment') p--
     const prev = p >= 0 ? messages[p]! : undefined
     if (prev === undefined) return
-    // The unknown-skill notice is written right after the synthetic caveat
-    // row; a hook stop right after the prompt it stopped.
-    const afterWriterRow = isUnknownSkill
+    // Caveat-led notices are written right after the synthetic caveat row; a
+    // hook stop right after the prompt it stopped; a model-only skill notice
+    // right after the typed `/name` row.
+    const afterWriterRow = afterCaveat
       ? prev.type === 'user' &&
         prev.isMeta === true &&
         (firstText(prev) ?? '').startsWith(`<${LOCAL_COMMAND_CAVEAT_TAG}>`)
-      : candidateKind(prev) !== undefined && sourceKey(prev) !== sourceKey(m)
+      : isModelOnly
+        ? candidateKind(prev) === 'prompt' &&
+          sourceKey(prev) !== sourceKey(m) &&
+          firstText(prev) === `/${skillName}`
+        : candidateKind(prev) !== undefined && sourceKey(prev) !== sourceKey(m)
     if (afterWriterRow) out.add(i)
   })
   return out

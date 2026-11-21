@@ -5,9 +5,12 @@ import {
   CANCEL_MESSAGE,
   HOOK_STOPPED_MESSAGE,
   INTERRUPT_MESSAGE_FOR_TOOL_USE,
+  MODEL_ONLY_SKILL_PREFIX,
+  MODEL_ONLY_SKILL_SUFFIX,
   PLAN_REJECTION_PREFIX,
   REJECT_MESSAGE,
   REJECT_MESSAGE_WITH_REASON_PREFIX,
+  SLASH_FORM_NOTICE,
   UNKNOWN_SKILL_PREFIX,
   createAssistantAPIErrorMessage,
   createAssistantMessage,
@@ -1290,6 +1293,81 @@ describe('stop reasons and diagnostics from the input pipeline', () => {
     ])
     expect(r.boundary?.uuid).toBe('p1')
     expect(ids(r.rows)).toEqual(['p1', 'a1', 'u', 'w'])
+  })
+
+  test('an unflagged slash-form notice right after the caveat row stays in the tail', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      label('cv', createSyntheticUserCaveatMessage()),
+      prompt('u', SLASH_FORM_NOTICE),
+    ])
+    expect(r.boundary?.uuid).toBe('p1')
+    expect(ids(r.rows)).toEqual(['p1', 'a1', 'u'])
+  })
+
+  test('an unflagged model-only skill notice right after the typed command is not a prompt', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      prompt('s', '/skilly'),
+      prompt('u', `${MODEL_ONLY_SKILL_PREFIX}skilly${MODEL_ONLY_SKILL_SUFFIX}`),
+    ])
+    expect(r.boundary?.uuid).toBe('s')
+    expect(r.hiddenTurns).toBe(1)
+    expect(ids(r.rows)).toEqual(['s', 'u'])
+  })
+
+  test('the two extra notice texts typed in other positions stay prompts', () => {
+    const modelOnly = `${MODEL_ONLY_SKILL_PREFIX}skilly${MODEL_ONLY_SKILL_SUFFIX}`
+    for (const text of [SLASH_FORM_NOTICE, modelOnly]) {
+      const r = select([
+        prompt('p1', 'one'),
+        say('a1', 'answer'),
+        prompt('p2', text),
+        say('a2', 'reply'),
+      ])
+      expect(r.boundary?.uuid).toBe('p2')
+    }
+    for (const text of [
+      `${SLASH_FORM_NOTICE} again`,
+      `${modelOnly} Thanks.`,
+      `${MODEL_ONLY_SKILL_PREFIX}${MODEL_ONLY_SKILL_SUFFIX}`,
+    ]) {
+      const r = select([
+        prompt('p1', 'one'),
+        say('a1', 'answer'),
+        label('cv', createSyntheticUserCaveatMessage()),
+        prompt('s', '/skilly'),
+        prompt('p2', text),
+        say('a2', 'reply'),
+      ])
+      expect(r.boundary?.uuid).toBe('p2')
+    }
+  })
+
+  test('a model-only skill notice naming another skill than the typed row stays a prompt', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      prompt('s', '/skilly'),
+      prompt('u', `${MODEL_ONLY_SKILL_PREFIX}other${MODEL_ONLY_SKILL_SUFFIX}`),
+      say('a2', 'reply'),
+    ])
+    expect(r.boundary?.uuid).toBe('u')
+  })
+
+  test('a caveat-led notice text after an ordinary prompt row stays a prompt', () => {
+    for (const text of [SLASH_FORM_NOTICE, `${UNKNOWN_SKILL_PREFIX}deploy`]) {
+      const r = select([
+        prompt('p1', 'one'),
+        say('a1', 'answer'),
+        prompt('p2', 'two'),
+        prompt('p3', text),
+        say('a2', 'reply'),
+      ])
+      expect(r.boundary?.uuid).toBe('p3')
+    }
   })
 
   test('unflagged typed text that only starts like a notice stays a prompt', () => {

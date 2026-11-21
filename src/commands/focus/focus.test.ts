@@ -24,15 +24,19 @@ function setFocus(value: boolean | undefined): void {
 }
 
 describe('/focus', () => {
+  let savedFlickerFreeMode: boolean | undefined
+
   beforeEach(() => {
     for (const k of ENV_KEYS) delete process.env[k]
     process.env.CLAUDE_CODE_NO_FLICKER = '1'
     _resetTmuxControlModeProbeForTesting()
+    savedFlickerFreeMode = getGlobalConfig().flickerFreeMode
     setFocus(undefined)
   })
 
   afterEach(() => {
     setFocus(undefined)
+    saveGlobalConfig(current => ({ ...current, flickerFreeMode: savedFlickerFreeMode }))
     for (const k of ENV_KEYS) {
       const v = savedEnv.get(k)
       if (v === undefined) delete process.env[k]
