@@ -215,3 +215,41 @@ test('reports Gemini cachedContentTokenCount as cache_read_input_tokens', async 
     },
   })
 })
+
+test.each(['SAFETY', 'RECITATION'])(
+  'reports %s as a blocked reply instead of max_tokens',
+  async finishReason => {
+    const events = await collectEvents(responseFor({
+      candidates: [{
+        content: { parts: [{ text: 'Partial answer' }] },
+        finishReason,
+      }],
+    }))
+
+    const texts = events
+      .filter(event => event.type === 'content_block_delta')
+      .map(event => (event.delta as { text: string }).text)
+    expect(texts).toEqual([
+      'Partial answer',
+      '\n\n[Content blocked by provider safety filter]',
+    ])
+    expect(events.at(-2)).toMatchObject({
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn' },
+    })
+  },
+)
+
+test('reports SAFETY with no content as a blocked reply', async () => {
+  const events = await collectEvents(responseFor({
+    candidates: [{ finishReason: 'SAFETY' }],
+  }))
+
+  expect(events.find(event => event.type === 'content_block_delta')).toMatchObject({
+    delta: { text: '\n\n[Content blocked by provider safety filter]' },
+  })
+  expect(events.at(-2)).toMatchObject({
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn' },
+  })
+})
