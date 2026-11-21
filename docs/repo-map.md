@@ -17,6 +17,24 @@ Results are cached to disk (`~/.openclaude/repomap-cache/`) keyed by file path, 
 - TypeScript (`.ts`, `.tsx`)
 - JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`)
 - Python (`.py`)
+- Go (`.go`)
+- Rust (`.rs`)
+- Java (`.java`)
+
+Go, Rust, and Java files are parsed with their bundled tree-sitter grammars from
+`tree-sitter-wasms`, so no extra install step is needed. The Go query captures
+package-level functions, methods, type declarations (including aliases), and
+call references. The Rust query captures functions and methods (including those
+inside `impl` blocks and bodyless trait signatures such as `fn handle(&self);`),
+structs, enums, traits, modules, `impl` type references (including generic
+`impl<T> Store<T>`), and call references (including explicit type arguments such
+as `helper::<u8>()` and `Store::<u8>::count()`). The Java query captures classes,
+records, interfaces, annotation types, enums, methods, constructors (including
+compact record constructors), and annotation elements, plus calls
+(`obj.method()`, `Type.static()`, chained calls), method references
+(`this::handle`, `helper::reset`, where only the referenced method name is
+captured), and type positions (`extends`/`implements`, field, parameter, return,
+and generic argument types).
 
 Additional language grammars will be added in future releases.
 
@@ -45,11 +63,23 @@ The `/repomap` command is always available regardless of the feature flag. It le
 ```text
 /repomap                          # Show the map with default settings (2048 tokens)
 /repomap --tokens 4096            # Increase the token budget for a larger map
+/repomap --tokens=4096            # Same, using the --flag=value form
 /repomap --focus src/tools/       # Boost specific paths in the ranking
 /repomap --focus src/context.ts   # Can use multiple --focus flags
 /repomap --focus-symbols buildTool # Boost files that define specific symbols
 /repomap --stats                  # Show cache statistics
 /repomap --invalidate             # Clear cache and rebuild from scratch
+```
+
+Arguments are validated before anything is built. `--tokens` takes a whole
+number between 256 and 16384, `--focus` and `--focus-symbols` need a value, and
+unrecognised arguments are reported instead of ignored:
+
+```text
+/repomap --tokens 100
+--tokens expects a whole number between 256 and 16384 (got "100")
+
+Usage: /repomap [--tokens <256-16384>] [--focus <path>]... [--focus-symbols <name>]... [--stats] [--invalidate]
 ```
 
 ## The RepoMap tool
@@ -63,6 +93,6 @@ The model can also call the `RepoMap` tool on demand during a session. This is u
 
 - **Signatures only** — The map shows function/class/type declarations, not implementations. The model still needs `Read` to see function bodies.
 - **Cold build time** — First build on large repos (2000+ files) can take 20-30 seconds due to WASM-based parsing. Subsequent builds use the disk cache and complete in under 100ms.
-- **Language coverage** — Only TypeScript, JavaScript, and Python are supported. Files in other languages are skipped.
-- **TypeScript references** — The TypeScript tree-sitter query captures type annotations and `new` expressions as references, but not plain function calls. This means the ranking slightly favors type-heavy hub files.
+- **Language coverage** — Only TypeScript, JavaScript, Python, Go, Rust, and Java are supported. Files in other languages are skipped.
+- **TypeScript references** — The TypeScript query captures type annotations, constructor (`new`) expressions, and plain function calls, so the ranking follows call edges as well as type edges. Member calls (`object.method()`) are not captured: method names such as `.log()`, `.get()` or `.map()` collide across unrelated classes and would add mostly-noise edges. `require(...)` is excluded to match the JavaScript query, and common callee names stay heavily down-weighted by the graph's IDF penalty.
 - **Git dependency** — File enumeration uses `git ls-files --cached --others --exclude-standard` by default, so untracked files that are not ignored can appear in the map. Non-git repos fall back to a directory walk with hardcoded exclusions.

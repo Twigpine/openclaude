@@ -19,6 +19,7 @@ import {
   extractTagsWithCache,
 } from './index.js'
 import {
+  CACHE_VERSION,
   getCachedTags,
   loadCache,
   saveCache,
@@ -32,7 +33,7 @@ import { rankFiles } from './pagerank.js'
 import { initParser, resolveProjectRoot } from './parser.js'
 import { renderMap } from './renderer.js'
 import { countTokens } from './tokenize.js'
-import type { FileTags } from './types.js'
+import type { CacheData, FileTags } from './types.js'
 
 const FIXTURE_ROOT = join(import.meta.dir, '__fixtures__', 'mini-repo')
 const FIXTURE_FILES = ['fileA.ts', 'fileB.ts', 'fileC.ts', 'fileD.ts', 'fileE.ts']
@@ -159,6 +160,105 @@ describe('symbol extraction', () => {
     }
   })
 
+  test('extracts call references from TypeScript files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-ts-calls-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'calls.ts'),
+        [
+          "import { computeTotal } from './helpers'",
+          '',
+          'export function run(items: number[]) {',
+          '  const total = computeTotal(items)',
+          '  const loaded = store.load(total)',
+          "  require('legacy')",
+          '  return new Widget(loaded)',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('calls.ts', tempDir)
+      expect(result).not.toBeNull()
+
+      const refs = result!.tags.filter(tag => tag.kind === 'ref')
+      const refNames = refs.map(tag => tag.name)
+
+      // Plain calls were previously missing entirely.
+      expect(refNames).toContain('computeTotal')
+      // Constructor references still resolve, as before.
+      expect(refNames).toContain('Widget')
+      // `require` is module loading, not a symbol reference (matches the
+      // JavaScript query).
+      expect(refNames).not.toContain('require')
+      // Member calls are intentionally excluded: `.load()` could belong to any
+      // class, so they would add mostly-noise edges to the graph.
+      expect(refNames).not.toContain('load')
+
+      const callRefs = refs.filter(tag => tag.subKind === 'call')
+      expect(callRefs.map(tag => tag.name)).toEqual(['computeTotal'])
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('ranks a file that is only reached through calls', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-ts-call-rank-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'helpers.ts'),
+        [
+          'export function computeTotal(items: number[]) {',
+          '  return items.length',
+          '}',
+          '',
+          'export function parseAmount(raw: string) {',
+          '  return Number(raw)',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      // Calls both helpers without referencing them in any type position.
+      writeFileSync(
+        join(tempDir, 'main.ts'),
+        [
+          'export function run(raw: string) {',
+          '  return computeTotal([parseAmount(raw)])',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(
+        join(tempDir, 'unrelated.ts'),
+        [
+          'export function standalone() {',
+          '  return 1',
+          '}',
+          '',
+          'export function another() {',
+          '  return 2',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const files = ['main.ts', 'helpers.ts', 'unrelated.ts']
+      const tags = await Promise.all(files.map(file => extractTags(file, tempDir)))
+      const graph = buildGraph(
+        tags.filter((entry): entry is FileTags => entry !== null),
+      )
+      expect(graph.hasEdge('main.ts', 'helpers.ts')).toBe(true)
+      expect(graph.getEdgeAttribute('main.ts', 'helpers.ts', 'weight')).toBeGreaterThan(0)
+
+      const result = await buildRepoMap({ root: tempDir, files, maxTokens: 1024 })
+      expect(result.map.split('\n')[0]).toBe('helpers.ts:')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
   test('extracts definitions and references from JavaScript files', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'repomap-js-'))
     try {
@@ -191,6 +291,476 @@ describe('symbol extraction', () => {
       expect(defs).toContain('fromCommonJs')
       expect(refs).toContain('Widget')
       expect(refs).toContain('helper')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('extracts definitions and references from Go files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-go-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'server.go'),
+        [
+          'package main',
+          '',
+          'type Server struct {',
+          '\tName string',
+          '}',
+          '',
+          'type Alias = Server',
+          '',
+          'func NewServer(name string) *Server {',
+          '\treturn &Server{Name: name}',
+          '}',
+          '',
+          'func (s *Server) Start() error {',
+          '\treturn nil',
+          '}',
+          '',
+          'func main() {',
+          '\ts := NewServer("x")',
+          '\t_ = s.Start()',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('server.go', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags
+        .filter(tag => tag.kind === 'def')
+        .map(tag => tag.name)
+      const refs = result!.tags
+        .filter(tag => tag.kind === 'ref')
+        .map(tag => tag.name)
+
+      // Type declarations (including aliases), functions, and methods.
+      expect(defs).toContain('Server')
+      expect(defs).toContain('Alias')
+      expect(defs).toContain('NewServer')
+      expect(defs).toContain('Start')
+      expect(defs).toContain('main')
+
+      const methods = result!.tags.filter(
+        tag => tag.kind === 'def' && tag.subKind === 'method',
+      )
+      expect(methods.map(tag => tag.name)).toEqual(['Start'])
+
+      // Package-qualified and selector calls resolve to their callee name.
+      expect(refs).toContain('NewServer')
+      expect(refs).toContain('Start')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('extracts definitions and references from Rust files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-rust-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'lib.rs'),
+        [
+          'mod util;',
+          '',
+          'pub struct Server {',
+          '    name: String,',
+          '}',
+          '',
+          'pub enum Mode {',
+          '    Fast,',
+          '}',
+          '',
+          'pub trait Starter {',
+          '    fn start(&self);',
+          '}',
+          '',
+          'impl Server {',
+          '    pub fn new(name: &str) -> Server {',
+          '        Server { name: name.to_string() }',
+          '    }',
+          '',
+          '    pub fn start(&self) {',
+          '        helper();',
+          '    }',
+          '}',
+          '',
+          'fn helper() {}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('lib.rs', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      const defNames = defs.map(tag => tag.name)
+      const refs = result!.tags
+        .filter(tag => tag.kind === 'ref')
+        .map(tag => tag.name)
+
+      expect(defNames).toContain('util')
+      expect(defNames).toContain('Server')
+      expect(defNames).toContain('Mode')
+      expect(defNames).toContain('Starter')
+      // `impl Server` methods are definitions owned by their type.
+      expect(defNames).toContain('new')
+      expect(defNames).toContain('start')
+      expect(defNames).toContain('helper')
+
+      const serverDef = defs.find(tag => tag.name === 'Server')
+      expect(serverDef?.subKind).toBe('class')
+      const modeDef = defs.find(tag => tag.name === 'Mode')
+      expect(modeDef?.subKind).toBe('enum')
+      const traitDef = defs.find(tag => tag.name === 'Starter')
+      expect(traitDef?.subKind).toBe('interface')
+
+      // `impl Server` references the type; `helper()` is a bare call.
+      expect(refs).toContain('Server')
+      expect(refs).toContain('helper')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('captures bodyless trait methods, generic impls, and turbofish calls in Rust', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-rust-generics-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'service.rs'),
+        [
+          'trait Service {',
+          '    fn validate(&self, id: u32) -> bool;',
+          '}',
+          '',
+          'struct Store<T> {',
+          '    value: T,',
+          '}',
+          '',
+          'impl<T> Store<T> {',
+          '    fn get(&self) -> &T {',
+          '        &self.value',
+          '    }',
+          '}',
+          '',
+          'fn helper<T>(v: T) -> T {',
+          '    v',
+          '}',
+          '',
+          'fn run(service: &Service, store: &Store<u32>, id: u32) {',
+          '    let _ = helper::<u32>(id);',
+          '    let _ = service.validate(id);',
+          '    let _ = store.get::<u32>();',
+          '    let _ = Store::<u32>::count(id);',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('service.rs', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      const refs = result!.tags
+        .filter(tag => tag.kind === 'ref')
+        .map(tag => tag.name)
+
+      // `fn validate(&self, id: u32) -> bool;` has no body, so it parses as
+      // function_signature_item. The name is unique to the trait, so an impl
+      // method cannot mask it.
+      const traitMethod = defs.find(tag => tag.name === 'validate')
+      expect(traitMethod?.subKind).toBe('method')
+
+      // `impl<T> Store<T>` carries a generic_type node, not a bare type.
+      expect(refs).toContain('Store')
+
+      // Explicit type arguments wrap the callee in generic_function.
+      expect(refs).toContain('helper')
+      expect(refs).toContain('validate')
+      expect(refs).toContain('get')
+      expect(refs).toContain('count')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('extracts definitions and references from Java files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-java-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'Store.java'),
+        [
+          'package com.example;',
+          '',
+          'public class Store extends Base implements Closeable {',
+          '    private final Widget widget;',
+          '',
+          '    public Store(Widget widget) {',
+          '        this.widget = widget;',
+          '    }',
+          '',
+          '    @Override',
+          '    public String render(String input) {',
+          '        return widget.render(input.trim());',
+          '    }',
+          '',
+          '    interface Sink {',
+          '        void accept(String value);',
+          '    }',
+          '',
+          '    enum Mode {',
+          '        FAST, SLOW;',
+          '    }',
+          '',
+          '    record Point(int x, int y) {',
+          '    }',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('Store.java', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      const defNames = defs.map(tag => tag.name)
+      const refs = result!.tags
+        .filter(tag => tag.kind === 'ref')
+        .map(tag => tag.name)
+
+      // Classes, nested types, methods, and the constructor.
+      expect(defNames).toContain('Store')
+      expect(defNames).toContain('render')
+      expect(defNames).toContain('Sink')
+      expect(defNames).toContain('accept')
+      expect(defNames).toContain('Mode')
+      expect(defNames).toContain('Point')
+
+      expect(defs.find(tag => tag.name === 'Sink')?.subKind).toBe('interface')
+      expect(defs.find(tag => tag.name === 'Mode')?.subKind).toBe('enum')
+      // A record is a class-shaped declaration.
+      expect(defs.find(tag => tag.name === 'Point')?.subKind).toBe('class')
+      // The constructor shares the class name but is a method-shaped def on its
+      // own line, so both definitions are present.
+      const storeDefs = defs.filter(tag => tag.name === 'Store')
+      expect(storeDefs.map(tag => tag.subKind).sort()).toEqual([
+        'class',
+        'method',
+      ])
+
+      // extends / implements / field / parameter / return types.
+      expect(refs).toContain('Base')
+      expect(refs).toContain('Closeable')
+      expect(refs).toContain('Widget')
+      expect(refs).toContain('String')
+
+      // Instance calls (widget.render(...), input.trim()) resolve to the callee.
+      expect(refs).toContain('render')
+      expect(refs).toContain('trim')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('captures Java method references, annotation elements, and records', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-java-refs-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'Worker.java'),
+        [
+          'package com.example;',
+          '',
+          'class Worker {',
+          '    private final Helper helper;',
+          '',
+          '    Worker(Helper helper) {',
+          '        this.helper = helper;',
+          '    }',
+          '',
+          '    void run(java.util.List<String> inputs) {',
+          '        inputs.forEach(this::handle);',
+          '        Runnable reset = helper::reset;',
+          '        String joined = String.join(",", inputs);',
+          '        reset.run();',
+          '    }',
+          '',
+          '    private void handle(String input) {',
+          '        helper.reset();',
+          '    }',
+          '}',
+          '',
+          '@interface Marker {',
+          '    String value();',
+          '}',
+          '',
+          'enum Kind {',
+          '    A, B',
+          '}',
+          '',
+          'record Pair(int left, int right) {',
+          '    public Pair {',
+          '        if (left > right) {',
+          '            throw new IllegalArgumentException("left");',
+          '        }',
+          '    }',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await extractTags('Worker.java', tempDir)
+      expect(result).not.toBeNull()
+
+      const defs = result!.tags.filter(tag => tag.kind === 'def')
+      const refTags = result!.tags.filter(tag => tag.kind === 'ref')
+      const refs = refTags.map(tag => tag.name)
+
+      // `String value();` inside an @interface is an annotation element, which
+      // method_declaration does not match.
+      expect(defs.find(tag => tag.name === 'Marker')?.subKind).toBe('interface')
+      expect(defs.find(tag => tag.name === 'value')?.subKind).toBe('method')
+
+      expect(defs.find(tag => tag.name === 'Kind')?.subKind).toBe('enum')
+
+      // A record is a class-shaped def, and its compact canonical constructor
+      // (public Pair { ... }) is a method-shaped def of the same name.
+      expect(defs.find(tag => tag.name === 'Pair')?.subKind).toBe('class')
+      expect(
+        defs
+          .filter(tag => tag.name === 'Pair')
+          .map(tag => tag.subKind)
+          .sort(),
+      ).toEqual(['class', 'method'])
+
+      // `this::handle` and `helper::reset` are method references, which carry no
+      // argument list and no name field.
+      expect(refs).toContain('handle')
+      expect(refs).toContain('reset')
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'handle' &&
+            tag.signature.trim() === 'inputs.forEach(this::handle);',
+        ),
+      ).toBeDefined()
+      expect(
+        refTags.find(
+          tag =>
+            tag.name === 'reset' &&
+            tag.signature.trim() === 'Runnable reset = helper::reset;',
+        ),
+      ).toBeDefined()
+      // The receiver of helper::reset is an identifier as well, but only the
+      // referenced method name is a call.
+      expect(refs).not.toContain('helper')
+      // Plain calls still resolve through the invocation name.
+      expect(refs).toContain('join')
+      expect(refs).toContain('run')
+      // Fully qualified generic types contribute their base type.
+      expect(refs).toContain('List')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('builds a map for a Java repo and ranks the referenced file first', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-java-map-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'Widget.java'),
+        [
+          'package com.example;',
+          '',
+          'public class Widget {',
+          '    public String render(String input) {',
+          '        return input;',
+          '    }',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(
+        join(tempDir, 'App.java'),
+        [
+          'package com.example;',
+          '',
+          'public class App {',
+          '    private final Widget widget = new Widget();',
+          '',
+          '    public String start(String input) {',
+          '        return widget.render(input);',
+          '    }',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await buildRepoMap({
+        root: tempDir,
+        files: ['App.java', 'Widget.java'],
+        maxTokens: 1024,
+      })
+
+      expect(result.map).toContain('Widget.java:')
+      expect(result.map).toContain('public String render(String input) {')
+      // Both files must survive, so a regression that drops the calling file is
+      // visible here.
+      expect(result.map).toContain('App.java:')
+      expect(result.fileCount).toBe(2)
+      // App.java references Widget, so Widget.java ranks first.
+      expect(result.map.split('\n')[0]).toBe('Widget.java:')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  })
+
+  test('builds a map for a Go repo and ranks the referenced file first', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-go-map-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'store.go'),
+        [
+          'package store',
+          '',
+          'type Store struct{}',
+          '',
+          'func NewStore() *Store {',
+          '\treturn &Store{}',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(
+        join(tempDir, 'main.go'),
+        [
+          'package main',
+          '',
+          'func main() {',
+          '\ts := store.NewStore()',
+          '\t_ = s',
+          '}',
+          '',
+        ].join('\n'),
+      )
+
+      const result = await buildRepoMap({
+        root: tempDir,
+        files: ['main.go', 'store.go'],
+        maxTokens: 1024,
+      })
+
+      expect(result.map).toContain('store.go:')
+      expect(result.map).toContain('func NewStore() *Store {')
+      // store.go is referenced by main.go, so it ranks first.
+      expect(result.map.split('\n')[0]).toBe('store.go:')
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
       invalidateCache(tempDir)
@@ -354,7 +924,7 @@ describe('tag cache extraction', () => {
       }
 
       const fileStats = new Map(files.map(file => [file, statFile(tempDir, file)]))
-      const cache = { version: 2, entries: {}, renderedEntries: {} }
+      const cache = { version: CACHE_VERSION, entries: {}, renderedEntries: {} }
       const cachedTags = await extractTags('b.ts', tempDir)
       expect(cachedTags).not.toBeNull()
       setCachedTags(
@@ -575,7 +1145,7 @@ describe('cache', () => {
   test('saveCache does not throw when persistence is unavailable', () => {
     expect(() => {
       saveCache('\0invalid-root', {
-        version: 2,
+        version: CACHE_VERSION,
         entries: {
           bad: {
             tags: [{ value: BigInt(1) }],
@@ -587,6 +1157,80 @@ describe('cache', () => {
       } as never)
     }).not.toThrow()
   })
+
+  test('a cache from before call references is discarded and re-extracted', async () => withWritableConfigHome(async () => {
+    // Extraction semantics changed (plain calls are now references), so a cache
+    // written by the previous version must not be served for unchanged files.
+    const tempDir = mkdtempSync(join(tmpdir(), 'repomap-cache-upgrade-'))
+    try {
+      writeFileSync(
+        join(tempDir, 'helpers.ts'),
+        'export function computeTotal(items: number[]) {\n  return items.length\n}\n',
+      )
+      writeFileSync(
+        join(tempDir, 'main.ts'),
+        'export function run() {\n  return computeTotal([1])\n}\n',
+      )
+
+      const staleEntry = (file: string, name: string, signature: string) => {
+        const stat = statFile(tempDir, file)!
+        return {
+          tags: [
+            { kind: 'def' as const, name, line: 1, signature, subKind: 'function' },
+          ],
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+        }
+      }
+
+      // Old version, fingerprints matching the unchanged files, and tags that
+      // carry no call reference from main.ts to helpers.ts. Pinned to the real
+      // historical version, not CACHE_VERSION - 1: if the bump were removed,
+      // the fixture would otherwise become version 1 and this test could pass
+      // while version-2 caches still serve stale tags.
+      const stale: CacheData = {
+        version: 2,
+        entries: {
+          'helpers.ts': staleEntry(
+            'helpers.ts',
+            'computeTotal',
+            'export function computeTotal(items: number[]) {',
+          ),
+          'main.ts': staleEntry('main.ts', 'run', 'export function run() {'),
+        },
+        renderedEntries: {
+          stale: { map: 'stale map', fileCount: 1, tokenCount: 2, createdAt: 0 },
+        },
+      }
+      saveCache(tempDir, stale)
+
+      const result = await buildRepoMap({
+        root: tempDir,
+        files: ['main.ts', 'helpers.ts'],
+        maxTokens: 1024,
+      })
+
+      // Re-extracted rather than served from the stale cache, so the call from
+      // main.ts ranks helpers.ts first.
+      expect(result.cacheHit).toBe(false)
+      expect(result.map.split('\n')[0]).toBe('helpers.ts:')
+
+      // The refreshed cache is persisted at the current version. Checking the
+      // version alone would also pass on the empty fallback, so assert the
+      // upgraded contents: the re-extracted call reference and a rendered map.
+      const refreshed = loadCache(tempDir)
+      expect(refreshed.version).toBe(CACHE_VERSION)
+      expect(refreshed.entries['main.ts']?.tags).toContainEqual(
+        expect.objectContaining({ kind: 'ref', name: 'computeTotal' }),
+      )
+      expect(Object.keys(refreshed.renderedEntries).length).toBeGreaterThan(0)
+      // The version-2 rendered map was discarded rather than carried over.
+      expect(refreshed.renderedEntries.stale).toBeUndefined()
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+      invalidateCache(tempDir)
+    }
+  }))
 
   test('stores repo map cache under OPENCLAUDE_CONFIG_DIR when configured', async () => {
     const configDir = mkdtempSync(join(tmpdir(), 'repomap-config-home-'))

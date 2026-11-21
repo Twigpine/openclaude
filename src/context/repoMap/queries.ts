@@ -64,6 +64,20 @@ const TYPESCRIPT_TAGS = `; Source: https://github.com/Aider-AI/aider/blob/main/a
 
 (enum_declaration
   name: (identifier) @name.definition.enum) @definition.enum
+
+; Call references. The repo map ranks a file by references to symbols it
+; defines, and plain function calls are its strongest structural signal:
+; without these the TypeScript query only captured type annotations and
+; constructor calls, which skewed the ranking toward type-heavy hub files.
+; require(...) is excluded to match the JavaScript query, and member calls
+; (object.method()) are deliberately not captured — method names such as
+; .log(), .get() or .map() collide across unrelated classes and would add
+; mostly-noise edges.
+(
+  (call_expression
+    function: (identifier) @name.reference.call) @reference.call
+  (#not-match? @name.reference.call "^(require)$")
+)
 `
 
 const JAVASCRIPT_TAGS = `; Source: https://github.com/Aider-AI/aider/blob/main/aider/queries/tree-sitter-languages/javascript-tags.scm
@@ -174,11 +188,154 @@ const PYTHON_TAGS = `; Source: https://github.com/Aider-AI/aider/blob/main/aider
   ]) @reference.call
 `
 
+const GO_TAGS = `; Adapted from Aider's tree-sitter language queries.
+; Source: https://github.com/Aider-AI/aider/blob/main/aider/queries/tree-sitter-languages/go-tags.scm
+; License: MIT (Apache-2.0 dual) — see https://github.com/Aider-AI/aider/blob/main/LICENSE
+; Definitions and references only: the repo map renders signature lines, so the
+; leading-comment captures Aider uses for documentation are omitted here.
+
+(function_declaration
+  name: (identifier) @name.definition.function) @definition.function
+
+(method_declaration
+  name: (field_identifier) @name.definition.method) @definition.method
+
+(type_declaration
+  [
+    (type_spec
+      name: (type_identifier) @name.definition.type)
+    (type_alias
+      name: (type_identifier) @name.definition.type)
+  ]) @definition.type
+
+(call_expression
+  function: [
+    (identifier) @name.reference.call
+    (selector_expression
+      field: (field_identifier) @name.reference.call)
+  ]) @reference.call
+`
+
+const RUST_TAGS = `; Adapted from Aider's tree-sitter language queries.
+; Source: https://github.com/Aider-AI/aider/blob/main/aider/queries/tree-sitter-languages/rust-tags.scm
+; License: MIT (Apache-2.0 dual) — see https://github.com/Aider-AI/aider/blob/main/LICENSE
+; Definitions and references only: the repo map renders signature lines, so the
+; leading-comment captures Aider uses for documentation are omitted here.
+
+(function_item
+  name: (identifier) @name.definition.function) @definition.function
+
+; Bodyless trait methods, e.g. fn handle(&self); in a trait, parse as
+; function_signature_item rather than function_item, so they need their own
+; definition capture.
+(function_signature_item
+  name: (identifier) @name.definition.method) @definition.method
+
+(struct_item
+  name: (type_identifier) @name.definition.class) @definition.class
+
+(enum_item
+  name: (type_identifier) @name.definition.enum) @definition.enum
+
+(trait_item
+  name: (type_identifier) @name.definition.interface) @definition.interface
+
+(mod_item
+  name: (identifier) @name.definition.module) @definition.module
+
+; A generic impl such as impl<T> Store<T> carries a generic_type node instead of
+; a bare type_identifier, so the base type name is captured from both shapes.
+(impl_item
+  type: [
+    (type_identifier) @name.reference.class
+    (generic_type
+      type: (type_identifier) @name.reference.class)
+  ]) @reference.class
+
+; Calls with explicit type arguments (helper::<u8>(), value.get::<u8>(),
+; Type::<u8>::new()) wrap the callee in generic_function, which none of the plain
+; alternatives match.
+(call_expression
+  function: [
+    (identifier) @name.reference.call
+    (field_expression
+      field: (field_identifier) @name.reference.call)
+    (scoped_identifier
+      name: (identifier) @name.reference.call)
+    (generic_function
+      function: [
+        (identifier) @name.reference.call
+        (field_expression
+          field: (field_identifier) @name.reference.call)
+        (scoped_identifier
+          name: (identifier) @name.reference.call)
+      ])
+  ]) @reference.call
+`
+
+const JAVA_TAGS = `; Adapted from Aider's tree-sitter language queries.
+; Source: https://github.com/Aider-AI/aider/blob/main/aider/queries/tree-sitter-languages/java-tags.scm
+; License: MIT (Apache-2.0 dual) — see https://github.com/Aider-AI/aider/blob/main/LICENSE
+; Definitions and references only: the repo map renders signature lines, so the
+; leading-comment captures Aider uses for documentation are omitted here.
+
+(class_declaration
+  name: (identifier) @name.definition.class) @definition.class
+
+(record_declaration
+  name: (identifier) @name.definition.class) @definition.class
+
+(interface_declaration
+  name: (identifier) @name.definition.interface) @definition.interface
+
+(annotation_type_declaration
+  name: (identifier) @name.definition.interface) @definition.interface
+
+(enum_declaration
+  name: (identifier) @name.definition.enum) @definition.enum
+
+(method_declaration
+  name: (identifier) @name.definition.method) @definition.method
+
+(constructor_declaration
+  name: (identifier) @name.definition.method) @definition.method
+
+; A record's compact canonical constructor (public Pair { ... }) parses as
+; compact_constructor_declaration rather than constructor_declaration.
+(compact_constructor_declaration
+  name: (identifier) @name.definition.method) @definition.method
+
+; Annotation elements (String value(); inside an @interface) are method-shaped
+; declarations that method_declaration does not match.
+(annotation_type_element_declaration
+  name: (identifier) @name.definition.method) @definition.method
+
+; Every dotted call (obj.method(), Type.static(), a.b().c()) names its callee in
+; the invocation's name field, so one pattern covers instance and static calls.
+(method_invocation
+  name: (identifier) @name.reference.call) @reference.call
+
+; Method references (this::normalize, Type::of) carry no name field, and a
+; receiver such as helper::reset is an identifier too, so the pattern anchors on
+; the "::" token to capture only the referenced method name.
+(method_reference
+  "::"
+  (identifier) @name.reference.call) @reference.call
+
+; Type positions — field, parameter, return, extends/implements, generic
+; arguments and constructor calls — are all type_identifier nodes, so a single
+; pattern covers them without emitting duplicate captures for new expressions.
+(type_identifier) @name.reference.type
+`
+
 const QUERIES: Record<SupportedLanguage, string> = {
   typescript: TYPESCRIPT_TAGS,
   tsx: TYPESCRIPT_TAGS,
   javascript: JAVASCRIPT_TAGS,
   python: PYTHON_TAGS,
+  go: GO_TAGS,
+  rust: RUST_TAGS,
+  java: JAVA_TAGS,
 }
 
 export function getBundledQuery(language: SupportedLanguage): string | null {

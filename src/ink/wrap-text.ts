@@ -5,11 +5,10 @@ import { wrapAnsi } from './wrapAnsi.js'
 
 const ELLIPSIS = '…'
 
-// sliceAnsi may include a boundary-spanning wide char (e.g. CJK at position
-// end-1 with width 2 overshoots by 1). Retry with a tighter bound once.
+// Truncation must respect the column budget exactly: `fitEnd` drops a wide
+// glyph that would straddle the boundary instead of overshooting by a cell.
 function sliceFit(text: string, start: number, end: number): string {
-  const s = sliceAnsi(text, start, end)
-  return stringWidth(s) > end - start ? sliceAnsi(text, start, end - 1) : s
+  return sliceAnsi(text, start, end, { fitEnd: true })
 }
 
 function truncate(
