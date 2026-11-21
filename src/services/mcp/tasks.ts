@@ -150,12 +150,46 @@ type TrackedMcpServerTask = {
 }
 
 const trackedByLocalId = new Map<string, TrackedMcpServerTask>()
-// Remote task ids are unique per server, not across servers, so the lookup
-// is keyed by both.
+// Remote task ids are unique per server, not across servers or
+// generations, so the lookup is keyed by server, task id, and SDK client.
 const localIdByMcpTaskId = new Map<string, string>()
 
-function mcpTaskKey(serverName: string, mcpTaskId: string): string {
-  return JSON.stringify([serverName, mcpTaskId])
+// SDK clients are distinct objects per connection generation, so give each
+// one a stable id: two generations of one server may report the same remote
+// task id, and the index must keep their mappings apart.
+let nextMcpClientId = 1
+const mcpClientIds = new WeakMap<Client, number>()
+
+function mcpClientId(client: Client): number {
+  let id = mcpClientIds.get(client)
+  if (id === undefined) {
+    id = nextMcpClientId++
+    mcpClientIds.set(client, id)
+  }
+  return id
+}
+
+function mcpTaskKey(
+  serverName: string,
+  mcpTaskId: string,
+  client: Client,
+): string {
+  return JSON.stringify([serverName, mcpTaskId, mcpClientId(client)])
+}
+
+/**
+ * Drop the index entry for a tracked task, but only when the mapping still
+ * points at this entry: a later registration may have taken the key over,
+ * and removing it would cut the newer task's notification routing.
+ */
+function removeMcpTaskIndex(
+  entry: TrackedMcpServerTask,
+  localTaskId: string,
+): void {
+  const key = mcpTaskKey(entry.serverName, entry.mcpTaskId, entry.client)
+  if (localIdByMcpTaskId.get(key) === localTaskId) {
+    localIdByMcpTaskId.delete(key)
+  }
 }
 
 /**
@@ -201,7 +235,10 @@ export function trackMcpServerTask(opts: {
     lastUpdatedAtMs: parseTimeMs(task.lastUpdatedAt) ?? 0,
   }
   trackedByLocalId.set(localTaskId, entry)
-  localIdByMcpTaskId.set(mcpTaskKey(connection.name, task.taskId), localTaskId)
+  localIdByMcpTaskId.set(
+    mcpTaskKey(connection.name, task.taskId, connection.client),
+    localTaskId,
+  )
 
   logForDebugging(
     `[MCP] tracking server task ${task.taskId} as local task ${localTaskId} (tool ${toolName} on ${connection.name})`,
@@ -352,7 +389,7 @@ async function finalizeMcpServerTask(
   entry.finalized = true
   entry.abort.abort()
   trackedByLocalId.delete(localTaskId)
-  localIdByMcpTaskId.delete(mcpTaskKey(entry.serverName, entry.mcpTaskId))
+  removeMcpTaskIndex(entry, localTaskId)
 
   if (status === 'completed') {
     try {
@@ -450,14 +487,18 @@ async function finalizeMcpServerTask(
 /**
  * Eager update from a notifications/tasks/status message. The poll loop
  * stays the reliable path; this just shortens the latency when the server
- * pushes updates.
+ * pushes updates. The notification arrives on one connection's transport,
+ * so the caller passes that connection's SDK client: two generations of
+ * one server may report the same task id, and only the client tells their
+ * pushes apart.
  */
 export function handleMcpTaskStatusNotification(
   serverName: string,
   params: TaskStatusNotificationParams,
+  client: Client,
 ): void {
   const localTaskId = localIdByMcpTaskId.get(
-    mcpTaskKey(serverName, params.taskId),
+    mcpTaskKey(serverName, params.taskId, client),
   )
   if (!localTaskId) return
   const entry = trackedByLocalId.get(localTaskId)
@@ -506,7 +547,7 @@ async function cancelMcpServerTask(
       entry.finalized = true
       entry.abort.abort()
       trackedByLocalId.delete(localTaskId)
-      localIdByMcpTaskId.delete(mcpTaskKey(entry.serverName, entry.mcpTaskId))
+      removeMcpTaskIndex(entry, localTaskId)
       markMcpServerTaskTerminal(localTaskId, entry.setAppState, 'failed', {
         statusMessage: `Cancel request failed (tasks/cancel): ${e instanceof Error ? e.message : String(e)}; the server may still be running the task`,
       })
@@ -534,13 +575,23 @@ async function cancelMcpServerTask(
 export function failMcpServerTasksForServer(
   serverName: string,
   reason: string,
+  /**
+   * When set, only tasks run on this SDK client fail. A generation's
+   * close must not stop another generation's live tasks: reconnect
+   * leaves a retired generation open while its replacement takes over
+   * the cache, so the closing generation fails only its own tasks
+   * (CodeRabbit #2493 review 5968087303). Callers that omit it keep
+   * the name-keyed behaviour, as before.
+   */
+  client?: Client,
 ): void {
   for (const [localTaskId, entry] of [...trackedByLocalId]) {
     if (entry.serverName !== serverName || entry.finalized) continue
+    if (client !== undefined && entry.client !== client) continue
     entry.finalized = true
     entry.abort.abort()
     trackedByLocalId.delete(localTaskId)
-    localIdByMcpTaskId.delete(mcpTaskKey(entry.serverName, entry.mcpTaskId))
+    removeMcpTaskIndex(entry, localTaskId)
     appendTaskOutput(localTaskId, reason)
     // Flush before the terminal mark so the notification's output-file is
     // readable by the time the model can consume it.

@@ -2436,7 +2436,10 @@ test('an XAA sign-in finishing after its turn caches the id_token and stores the
   expect((await originalFetch(callback)).status).toBe(200)
   await flow
 
-  expect(scopeEntries).toBe(2)
+  // Five scope entries: the XAA enablement check, the initial reads, the
+  // cache read, the id_token cached by the IdP login, then the AS tokens
+  // stored by the exchange.
+  expect(scopeEntries).toBe(5)
   expect(ambient.updateCalls).toBe(0)
   expect(ambient.readCalls).toBe(0)
   const serverKey = getServerKey('enterprise', config)
@@ -2530,7 +2533,11 @@ test.each(['stored', 'rejected'] as const)(
       expect((await originalFetch(callback)).status).toBe(200)
       const error = await settlesSoon(settled)
 
-      expect(scopeEntries).toBe(2)
+      // Five scope entries: the XAA enablement check, the initial reads
+      // (which peek at the id_token), the acquisition's cache read, the
+      // id_token cached by the IdP login, then the AS tokens stored by the
+      // exchange (or the id_token dropped).
+      expect(scopeEntries).toBe(5)
       expect(ambient.updateCalls).toBe(0)
       expect(ambient.readCalls).toBe(0)
       expect(ambient.getData()).toEqual(ambientData)
@@ -2556,12 +2563,16 @@ test.each(['stored', 'rejected'] as const)(
 )
 
 test.each(['before the flow peeks', 'between the peek and acquisition'] as const)(
-  'a silent XAA sign-in never enters its credential scope: id_token cached %s',
+  'a silent XAA sign-in stores its tokens through its credential scope without a browser step: id_token cached %s',
   async cached => {
     // No one went to the browser, so the caller is still waiting on the flow —
-    // in the SDK, a tool call inside a turn that may hold the env mutex the
-    // scope takes. Entering it then would wait on that same turn. The peek is
-    // no guide: another sign-in to the IdP can cache an id_token after it.
+    // in the SDK, a tool call inside a turn. The token save still enters the
+    // scope: the exchange awaits network I/O, during which another session's
+    // turn may apply its own environment, and the write must land where the
+    // flow began. Entering is safe here because the scope lends the turn that
+    // started the flow — it does not wait on the mutex that turn holds; the
+    // flow never yields to a browser wait, so that turn is still live at the
+    // write. The scope below lends the origin store the same way.
     const { config, initialData } = makeXaaFixture()
     const idpCache = initialData.mcpXaaIdp
     if (cached === 'between the peek and acquisition') {
@@ -2584,19 +2595,88 @@ test.each(['before the flow peeks', 'between the peek and acquisition'] as const
       undefined,
       {
         skipBrowserOpen: true,
-        credentialScope: async () => {
+        credentialScope: async work => {
           scopeEntries++
-          throw new Error('entered the credential scope of a silent sign-in')
+          return work()
         },
       },
     )
 
     expect(loginUrls).toBe(0)
-    expect(scopeEntries).toBe(0)
+    // Four scope entries on the silent path: the XAA enablement check,
+    // the initial reads, the cache read that finds the id_token, then the
+    // token save. The cached id_token needs no login, so nothing caches one.
+    expect(scopeEntries).toBe(4)
     const serverKey = getServerKey('enterprise', config)
     expect(activeStorage.getData().mcpOAuth?.[serverKey]?.accessToken).toBe('winner-access-secret')
   },
 )
+
+/**
+ * The silent exchange awaits network I/O, during which another session's
+ * turn may apply its own environment — here, the ambient store goes live
+ * when the token endpoint answers. The token save still enters the scope
+ * the flow began in, so the token lands in the originating store and the
+ * ambient store is never read or written: a save that read the ambient
+ * store would write the token there instead.
+ */
+test('a silent XAA exchange stores its token in the originating store when another store goes live mid-exchange', async () => {
+  const { config, initialData } = makeXaaFixture()
+  const origin = createSharedStorage(initialData, [])
+  const ambientData: SecureStorageData = {
+    mcpXaaIdp: {
+      [`${IDP_ISSUER}/`]: { idToken: 'ambient-id-token', expiresAt: Date.now() + 3_600_000 },
+    },
+  }
+  const ambient = createSharedStorage(ambientData, [])
+  activeStorage = origin
+  installSuccessfulXaaFetch()
+  const xaaFetch = globalThis.fetch
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    if (input.toString() === `${AS_ISSUER}/token` && init?.method === 'POST') {
+      // Another session's turn applies its environment while the exchange
+      // is in flight: the ambient store is live when the token arrives.
+      activeStorage = ambient
+    }
+    return xaaFetch(input, init)
+  }) as typeof globalThis.fetch
+  let loginUrls = 0
+  let scopeEntries = 0
+
+  await performMCPOAuthFlow(
+    'enterprise',
+    config,
+    () => {
+      loginUrls++
+    },
+    undefined,
+    {
+      skipBrowserOpen: true,
+      credentialScope: async work => {
+        scopeEntries++
+        const was = activeStorage
+        activeStorage = origin
+        try {
+          return await work()
+        } finally {
+          activeStorage = was
+        }
+      },
+    },
+  )
+
+  expect(loginUrls).toBe(0)
+  // Four scope entries on the silent path: the XAA enablement check, the
+  // initial reads, the cache read that finds the id_token, then the token
+  // save.
+  expect(scopeEntries).toBe(4)
+  expect(ambient.updateCalls).toBe(0)
+  expect(ambient.readCalls).toBe(0)
+  expect(ambient.getData()).toEqual(ambientData)
+  const serverKey = getServerKey('enterprise', config)
+  expect(origin.getData().mcpOAuth?.[serverKey]?.accessToken).toBe('winner-access-secret')
+  expect(activeStorage).toBe(ambient)
+})
 
 test.each([
   ['idp-cache', false], ['idp-cache', true],
@@ -2626,7 +2706,12 @@ test.each([
 
   let loginUrl: URL | undefined
   let scopeEntries = 0
-  const queuedEntry = stage === 'idp-cache' ? 1 : 2
+  // The flow enters the scope five times: the XAA enablement check (1),
+  // the initial reads (2), the cache read (3), the id_token cached by the
+  // IdP login (4), then the AS tokens stored by the exchange or the
+  // id_token dropped on failure (5). Queue the scope at the write the
+  // stage under test owns.
+  const queuedEntry = stage === 'idp-cache' ? 4 : 5
   const resume = deferred()
   const session = new AbortController()
   const flow = performMCPOAuthFlow('enterprise', config, url => {

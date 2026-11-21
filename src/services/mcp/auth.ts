@@ -731,72 +731,76 @@ async function performMCPXaaAuth(
     throw new Error('XAA: oauth.xaa must be set') // guarded by caller
   }
 
-  // IdP config comes from user-level settings, not per-server.
-  const idp = getXaaIdpSettings()
-  if (!idp) {
-    throw new Error(
-      "XAA: no IdP connection configured. Run 'claude mcp xaa setup --issuer <url> --client-id <id> --client-secret' to configure.",
-    )
-  }
+  // The initial credential reads belong to the namespace the flow began
+  // in, like the exchange and the token save below: another turn may have
+  // applied its own environment while setup was pending, and reads outside
+  // the scope would look the client secret up in that namespace instead
+  // of this flow's. The browser wait stays outside the scope — only these
+  // reads enter it.
+  const { idp, clientId, clientSecret, idpClientSecret, idTokenCacheHit } =
+    await resumeIn(credentialScope, async () => {
+      // IdP config comes from user-level settings, not per-server.
+      const settings = getXaaIdpSettings()
+      if (!settings) {
+        throw new Error(
+          "XAA: no IdP connection configured. Run 'claude mcp xaa setup --issuer <url> --client-id <id> --client-secret' to configure.",
+        )
+      }
 
-  const clientId = serverConfig.oauth?.clientId
-  if (!clientId) {
-    throw new Error(
-      `XAA: server '${serverName}' needs an AS client_id. Re-add with --client-id.`,
-    )
-  }
+      const configuredClientId = serverConfig.oauth?.clientId
+      if (!configuredClientId) {
+        throw new Error(
+          `XAA: server '${serverName}' needs an AS client_id. Re-add with --client-id.`,
+        )
+      }
 
-  const clientConfig = getMcpClientConfig(serverName, serverConfig)
-  const clientSecret = clientConfig?.clientSecret
-  if (!clientSecret) {
-    // Diagnostic context for serverKey mismatch debugging. Only computed
-    // on the error path so there's no perf cost on success.
-    const wantedKey = getServerKey(serverName, serverConfig)
-    const haveKeys = Object.keys(
-      getSecureStorage().read()?.mcpOAuthClientConfig ?? {},
-    )
-    const headersForLogging = JSON.parse(
-      JSON.stringify(serverConfig.headers ?? {}, jsonRedactor),
-    )
-    logMCPDebug(
-      serverName,
-      `XAA: secret lookup miss. wanted=${wantedKey} have=[${haveKeys.join(', ')}] configHeaders=${jsonStringify(headersForLogging)}`,
-    )
-    throw new Error(
-      `XAA: AS client secret not found for '${serverName}'. Re-add with --client-secret.`,
-    )
-  }
+      const clientConfig = getMcpClientConfig(serverName, serverConfig)
+      const secret = clientConfig?.clientSecret
+      if (!secret) {
+        // Diagnostic context for serverKey mismatch debugging. Only computed
+        // on the error path so there's no perf cost on success.
+        const wantedKey = getServerKey(serverName, serverConfig)
+        const haveKeys = Object.keys(
+          getSecureStorage().read()?.mcpOAuthClientConfig ?? {},
+        )
+        const headersForLogging = JSON.parse(
+          JSON.stringify(serverConfig.headers ?? {}, jsonRedactor),
+        )
+        logMCPDebug(
+          serverName,
+          `XAA: secret lookup miss. wanted=${wantedKey} have=[${haveKeys.join(', ')}] configHeaders=${jsonStringify(headersForLogging)}`,
+        )
+        throw new Error(
+          `XAA: AS client secret not found for '${serverName}'. Re-add with --client-secret.`,
+        )
+      }
+
+      // IdP client secret lives in a separate keychain slot (keyed by IdP issuer),
+      // NOT the AS secret — different trust domain. Optional: if absent, PKCE-only.
+      // Peek the cache first so we can report idTokenCacheHit in analytics before
+      // acquireIdpIdToken potentially writes a fresh one.
+      return {
+        idp: settings,
+        clientId: configuredClientId,
+        clientSecret: secret,
+        idpClientSecret: getIdpClientSecret(settings.issuer),
+        idTokenCacheHit: getCachedIdpIdToken(settings.issuer) !== undefined,
+      }
+    })
 
   logMCPDebug(serverName, 'XAA: starting cross-app access flow')
-
-  // IdP client secret lives in a separate keychain slot (keyed by IdP issuer),
-  // NOT the AS secret — different trust domain. Optional: if absent, PKCE-only.
-  const idpClientSecret = getIdpClientSecret(idp.issuer)
-
-  // Acquire id_token (cached or via one OIDC browser pop at the IdP).
-  // Peek the cache first so we can report idTokenCacheHit in analytics before
-  // acquireIdpIdToken potentially writes a fresh one.
-  const idTokenCacheHit = getCachedIdpIdToken(idp.issuer) !== undefined
-
-  // Whether acquisition handed out its login URL, which it does only when it
-  // sends the user to the IdP. The peek above cannot say: it is a separate
-  // read, and a cached id_token can cross its expiry buffer before
-  // acquisition reads it again.
-  let sentToBrowser = false
 
   let failureStage: XaaFailureStage = 'idp_login'
   try {
     let idToken
     try {
+      // Acquire id_token (cached or via one OIDC browser pop at the IdP).
       idToken = await acquireIdpIdToken({
         idpIssuer: idp.issuer,
         idpClientId: idp.clientId,
         idpClientSecret,
         callbackPort: idp.callbackPort,
-        onAuthorizationUrl: url => {
-          sentToBrowser = true
-          onAuthorizationUrl(url)
-        },
+        onAuthorizationUrl,
         skipBrowserOpen,
         abortSignal,
         credentialScope,
@@ -807,11 +811,14 @@ async function performMCPXaaAuth(
     }
 
     // A login in the browser hands its caller the URL and leaves it, and the
-    // turn that started the flow may have ended while the user was there:
-    // what is written from here on is written where the flow began (see
-    // CredentialScope). A silent acquisition is still awaited by whoever
-    // started it, so it writes as it is.
-    const resumeScope = sentToBrowser ? credentialScope : undefined
+    // turn that started the flow may have ended while the user was there.
+    // What is written from here on is written where the flow began (see
+    // CredentialScope) — including the silent case: a cached id_token still
+    // awaits network I/O, during which another session's turn may apply its
+    // own environment, so its writes belong to the captured scope too, not
+    // to whatever the process has by then. The browser wait itself stays
+    // outside the scope: the mutex is held only for these operations.
+    const resumeScope = credentialScope
 
     // Discover the IdP's token endpoint for the RFC 8693 exchange. Under the
     // flow's signal, like the login's discovery and the exchange: a cancel
@@ -969,7 +976,15 @@ export async function performMCPOAuthFlow(
   // Servers with `oauth.xaa` but CLAUDE_CODE_ENABLE_XAA unset hard-fail with
   // actionable copy rather than silently degrade to consent.
   if (serverConfig.oauth?.xaa) {
-    if (!isXaaEnabled()) {
+    // The enablement flag is part of the captured namespace, not the
+    // ambient environment: another session's turn may have applied its
+    // own flag while this flow waited (on init, or in the browser), so
+    // read it inside the scope the flow's reads and writes already use.
+    // A caller with no scope (print mode / CLI) reads it as it stands.
+    const xaaEnabled = options?.credentialScope
+      ? await resumeIn(options.credentialScope, async () => isXaaEnabled())
+      : isXaaEnabled()
+    if (!xaaEnabled) {
       throw new Error(
         `XAA is not enabled (set CLAUDE_CODE_ENABLE_XAA=1). Remove 'oauth.xaa' from server '${serverName}' to use the standard consent flow.`,
       )
@@ -1001,25 +1016,42 @@ export async function performMCPOAuthFlow(
     return
   }
 
-  // Check for cached step-up scope and resource metadata URL before clearing
-  // tokens. The transport-attached auth provider persists scope when it receives
-  // a step-up 401, so we can use it here instead of making an extra probe request.
-  const storage = getSecureStorage()
-  const serverKey = getServerKey(serverName, serverConfig)
-  const cachedEntry = storage.read()?.mcpOAuth?.[serverKey]
-  const cachedStepUpScope = cachedEntry?.stepUpScope
-  const cachedResourceMetadataUrl =
-    cachedEntry?.discoveryState?.resourceMetadataUrl
-
   // A flow cancelled before it starts writes nothing, like one cancelled
   // later (see ClaudeAuthProvider): clearing below would discard a sign-in
   // that is still good for an attempt that will never replace it.
   if (abortSignal?.aborted) throw new AuthenticationCancelledError()
 
-  // Clear any existing stored credentials to ensure fresh client registration.
-  // Note: this deletes the entire entry (including discoveryState/stepUpScope),
-  // but we already read the cached values above.
-  clearServerTokensFromSecureStorage(serverName, serverConfig)
+  // Check for cached step-up scope and resource metadata URL before clearing
+  // tokens. The transport-attached auth provider persists scope when it receives
+  // a step-up 401, so we can use it here instead of making an extra probe request.
+  //
+  // Read and clear in the namespace the flow began in: the caller may have
+  // started this flow in one session's environment and another session's
+  // turn may have applied its own by now — a clear in that namespace would
+  // delete that session's saved credentials for this server, and the
+  // registration below would land there too. The browser wait is outside
+  // this scope: the mutex is held only for these operations.
+  const { cachedStepUpScope, cachedResourceMetadataUrl } = await resumeIn(
+    options?.credentialScope,
+    async () => {
+      // Acquiring the credential scope may have waited behind another
+      // turn. A cancel that landed while waiting must not clear the
+      // stored entry — it may be a newer flow's by now.
+      if (abortSignal?.aborted) throw new AuthenticationCancelledError()
+      const storage = getSecureStorage()
+      const serverKey = getServerKey(serverName, serverConfig)
+      const cachedEntry = storage.read()?.mcpOAuth?.[serverKey]
+      // Clear any existing stored credentials to ensure fresh client
+      // registration. Note: this deletes the entire entry (including
+      // discoveryState/stepUpScope), but we already read the cached values
+      // above.
+      clearServerTokensFromSecureStorage(serverName, serverConfig)
+      return {
+        cachedStepUpScope: cachedEntry?.stepUpScope,
+        cachedResourceMetadataUrl: cachedEntry?.discoveryState?.resourceMetadataUrl,
+      }
+    },
+  )
 
   // Use cached step-up scope and resource metadata URL if available.
   // The transport-attached auth provider caches these when it receives a
@@ -1283,12 +1315,17 @@ export async function performMCPOAuthFlow(
 
           // First call to start the auth flow - should redirect
           // Pass the scope and resource_metadata from WWW-Authenticate header if available
-          const result = await sdkAuth(provider, {
-            serverUrl: serverConfig.url,
-            scope: wwwAuthParams.scope,
-            resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
-            fetchFn: authFetch,
-          })
+          // Discovery and dynamic client registration read and write the
+          // stored client in the namespace the flow began in, as the clear
+          // above does; the browser wait that follows is outside the scope.
+          const result = await resumeIn(options?.credentialScope, async () =>
+            sdkAuth(provider, {
+              serverUrl: serverConfig.url,
+              scope: wwwAuthParams.scope,
+              resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
+              fetchFn: authFetch,
+            }),
+          )
           logMCPDebug(serverName, `Initial auth result: ${result}`)
 
           if (result !== 'REDIRECT') {

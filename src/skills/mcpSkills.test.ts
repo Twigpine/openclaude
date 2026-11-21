@@ -112,6 +112,137 @@ describe('fetchMcpSkillsForClient privilege stripping', () => {
     expect(command.allowedTools).toEqual([])
   })
 
+  test('a stalled skill read ends when the caller aborts', async () => {
+    // The read only ends because the signal reaches the request: a server
+    // that stalls on resources/read must not hold the caller until its own
+    // timeout. Without the signal, the read never answers and this test
+    // times out instead of settling.
+    const controller = new AbortController()
+    let readStarted = false
+    const client = {
+      type: 'connected',
+      name: 'aborted-skill-read-server',
+      capabilities: { resources: {} },
+      client: {
+        request: async (
+          request: { method: string },
+          _resultSchema: { parse: (value: unknown) => unknown },
+          options?: { signal?: AbortSignal },
+        ) => {
+          if (request.method === 'resources/list') {
+            return { resources: [{ uri: 'skill://held', name: 'held' }] }
+          }
+          if (request.method === 'resources/read') {
+            // Without a signal the read answers at once, so a retry after
+            // the aborted fetch can discover the skill instead of reusing
+            // the aborted empty result.
+            if (!options?.signal) {
+              return {
+                contents: [
+                  {
+                    uri: 'skill://held',
+                    mimeType: 'text/markdown',
+                    text: '---\nname: held\ndescription: Held skill\n---\n# Held\n',
+                  },
+                ],
+              }
+            }
+            if (options?.signal?.aborted) {
+              throw new DOMException('aborted', 'AbortError')
+            }
+            readStarted = true
+            await new Promise<void>((_, reject) => {
+              options?.signal?.addEventListener(
+                'abort',
+                () => reject(new DOMException('aborted', 'AbortError')),
+                { once: true },
+              )
+            })
+            throw new Error('unreachable: the held read only ends on abort')
+          }
+          throw new Error(`unexpected method ${request.method}`)
+        },
+      },
+    } as unknown as MCPServerConnection
+
+    const commands = fetchMcpSkillsForClient(client, {
+      signal: controller.signal,
+    })
+    const deadline = Date.now() + 5_000
+    while (!readStarted) {
+      if (Date.now() > deadline) throw new Error('skill read never started')
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    controller.abort()
+    await expect(commands).resolves.toEqual([])
+    // A cancelled fetch must not poison the cache: the next fetch for this
+    // server re-lists instead of reusing the aborted empty result — so a
+    // second unsignalled fetch discovers the skill the first one could not
+    // read.
+    const retried = await fetchMcpSkillsForClient(client)
+    expect(retried).toHaveLength(1)
+    expect(retried[0]?.name).toBe('mcp__aborted-skill-read-server__held')
+  }, 10_000)
+
+  test('a replacement transport lists its own skills, not the old transport\u2019s', async () => {
+    // The skills cache is keyed by transport generation, not by server
+    // name+config: after a reconnect, the replacement must list its own
+    // skills instead of reading the entry the transport it replaces
+    // wrote — a name-keyed entry would hand back the old skill set
+    // (CodeRabbit #2493 review 5961865068).
+    const skillMarkdown = (skill: string) =>
+      [
+        '---',
+        `name: ${skill}`,
+        `description: ${skill} skill`,
+        '---',
+        `# ${skill}`,
+      ].join('\n')
+    function mockClientServingSkill(
+      skill: string,
+      config: MCPServerConnection['config'],
+    ): MCPServerConnection {
+      return {
+        type: 'connected',
+        name: 'skills-reconnect-server',
+        config,
+        capabilities: { resources: {} },
+        client: {
+          request: async (req: { method: string; params?: { uri?: string } }) => {
+            if (req.method === 'resources/list') {
+              return { resources: [{ uri: `skill://${skill}`, name: skill }] }
+            }
+            if (req.method === 'resources/read') {
+              return {
+                contents: [
+                  {
+                    uri: `skill://${skill}`,
+                    mimeType: 'text/markdown',
+                    text: skillMarkdown(skill),
+                  },
+                ],
+              }
+            }
+            throw new Error(`unexpected method ${req.method}`)
+          },
+        },
+      } as unknown as MCPServerConnection
+    }
+    const config = { type: 'sdk', scope: 'local' } as unknown as MCPServerConnection['config']
+    const oldClient = mockClientServingSkill('old-skill', config)
+    const replacement = mockClientServingSkill('new-skill', config)
+    expect(
+      (await fetchMcpSkillsForClient(oldClient)).map(c => c.name),
+    ).toEqual(['mcp__skills-reconnect-server__old-skill'])
+    expect(
+      (await fetchMcpSkillsForClient(replacement)).map(c => c.name),
+    ).toEqual(['mcp__skills-reconnect-server__new-skill'])
+    // And the old transport's entry still answers for the old client.
+    expect(
+      (await fetchMcpSkillsForClient(oldClient)).map(c => c.name),
+    ).toEqual(['mcp__skills-reconnect-server__old-skill'])
+  })
+
   test('discovers and reads a skill resource that appears only on page two', async () => {
     const listRequests: Array<{
       method: string

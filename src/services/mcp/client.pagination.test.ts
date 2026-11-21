@@ -10,6 +10,7 @@ import {
   fetchCommandsForClient,
   fetchResourcesForClient,
   fetchToolsForClient,
+  getDiscoveryCacheKey,
 } from './client.js'
 
 type ListMethod = 'tools/list' | 'resources/list' | 'prompts/list'
@@ -659,6 +660,46 @@ describe('MCP list cursor pagination', () => {
     ])
   })
 
+  test('a cancelled tools/list backoff issues no further request', async () => {
+    vi.useFakeTimers()
+    const requests: ListRequest[] = []
+    const connection = {
+      type: 'connected',
+      name: 'cancelled-tools-backoff',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { tools: {} },
+      client: {
+        request: async (
+          request: ListRequest,
+          resultSchema: { parse: (value: unknown) => unknown },
+          options?: { signal?: AbortSignal },
+        ) => {
+          requests.push(request)
+          // A request with an aborted signal fails at once, as the MCP SDK
+          // does — so a second request after the abort would be visible here.
+          if (options?.signal?.aborted) {
+            throw new DOMException('aborted', 'AbortError')
+          }
+          throw new Error('transient tools/list failure')
+        },
+      },
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+
+    const controller = new AbortController()
+    const toolsPromise = fetchToolsForClient(connection, {
+      signal: controller.signal,
+    })
+    // The first attempt fails and the 1s backoff starts; no timer advances.
+    await flushMicrotasks()
+    controller.abort()
+    await flushMicrotasks()
+    // The abort ends the backoff at once: the fetch settles with no tools,
+    // and no second request is issued.
+    await expect(toolsPromise).resolves.toEqual([])
+    expect(requests).toHaveLength(1)
+  })
+
   test('reconnect cache invalidation starts a complete fresh traversal', async () => {
     let generation = 1
     const requests: ListRequest[] = []
@@ -713,9 +754,9 @@ describe('MCP list cursor pagination', () => {
       fetchCommandsForClient(connection),
     ])
     generation = 2
-    fetchToolsForClient.cache.delete(connection.name)
-    fetchResourcesForClient.cache.delete(connection.name)
-    fetchCommandsForClient.cache.delete(connection.name)
+    fetchToolsForClient.cache.delete(getDiscoveryCacheKey(connection))
+    fetchResourcesForClient.cache.delete(getDiscoveryCacheKey(connection))
+    fetchCommandsForClient.cache.delete(getDiscoveryCacheKey(connection))
     requests.length = 0
 
     const [tools, resources, prompts] = await Promise.all([
@@ -946,5 +987,558 @@ describe('MCP list cursor pagination', () => {
         }
       }
     }
+  })
+
+  test('isMcpClientRetired distinguishes the cached generation from a replacement', async () => {
+    const { connectToServer, getServerCacheKey, isMcpClientRetired } =
+      await import('./client.js')
+    const name = 'retired-check'
+    const config = { type: 'sdk', scope: 'local' } as never
+    const key = getServerCacheKey(name, config)
+    const current = {
+      type: 'connected',
+      name,
+      config,
+    } as unknown as ConnectedMCPServer
+    const replacement = {
+      type: 'connected',
+      name,
+      config,
+    } as unknown as ConnectedMCPServer
+    try {
+      // No entry: an in-process client with no connect-cache involvement
+      // is not retired.
+      expect(await isMcpClientRetired(name, config, current)).toBe(false)
+      // The cached generation is current.
+      connectToServer.cache.set(key, Promise.resolve(current))
+      expect(await isMcpClientRetired(name, config, current)).toBe(false)
+      // A pending replacement in flight retires it.
+      let resolveReplacement!: (value: ConnectedMCPServer) => void
+      const pending = new Promise<ConnectedMCPServer>(resolve => {
+        resolveReplacement = resolve
+      })
+      connectToServer.cache.set(key, pending)
+      expect(await isMcpClientRetired(name, config, current)).toBe(true)
+      resolveReplacement(replacement)
+      await pending
+      // A settled replacement retires it too.
+      expect(await isMcpClientRetired(name, config, current)).toBe(true)
+      expect(await isMcpClientRetired(name, config, replacement)).toBe(false)
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+  })
+
+  test('a list-changed update from a retired transport does not apply', async () => {
+    const { connectToServer, getServerCacheKey, isMcpClientRetired } =
+      await import('./client.js')
+    const { registerMcpListChangedHandlers } = await import(
+      './useManageMCPConnections.js'
+    )
+    const { getCurrentProjectConfig, saveCurrentProjectConfig } =
+      await import('../../utils/config.js')
+    const handlers = new Map<string, () => Promise<void>>()
+    const client = {
+      request: async (
+        request: ListRequest,
+        resultSchema: { parse: (value: unknown) => unknown },
+      ) => {
+        if (request.method !== 'tools/list') {
+          throw new Error(`unexpected ${request.method}`)
+        }
+        return resultSchema.parse({
+          tools: [{ name: 'retired-tool', inputSchema: { type: 'object' } }],
+        })
+      },
+      setNotificationHandler: (
+        schema: unknown,
+        handler: () => Promise<void>,
+      ) => {
+        if (schema === ToolListChangedNotificationSchema) {
+          handlers.set('tools/list', handler)
+        }
+      },
+    }
+    const connection = {
+      type: 'connected',
+      name: 'retired-list-changed',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { tools: { listChanged: true } },
+      client,
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+
+    type ListChangedUpdate = Parameters<
+      Parameters<typeof registerMcpListChangedHandlers>[1]
+    >[0]
+    const updates: ListChangedUpdate[] = []
+    registerMcpListChangedHandlers(connection, update => updates.push(update))
+    const toolsHandler = handlers.get('tools/list')
+    expect(toolsHandler).toBeDefined()
+
+    // Control: the current generation's notification applies.
+    await toolsHandler!()
+    expect(updates).toHaveLength(1)
+    expect(updates[0]?.tools?.map(tool => tool.mcpInfo?.toolName)).toEqual([
+      'retired-tool',
+    ])
+
+    // A replacement takes over the cache entry: the retired transport's
+    // next notification must not apply — the UI would otherwise restore
+    // tools for a server the reconnect already replaced (CodeRabbit
+    // #2493 review 5957362782).
+    const replacement = {
+      type: 'connected',
+      name: 'retired-list-changed',
+      config: { type: 'sdk', scope: 'local' },
+      capabilities: { tools: { listChanged: true } },
+      client,
+      cleanup: async () => {},
+    } as unknown as ConnectedMCPServer
+    const key = getServerCacheKey('retired-list-changed', connection.config)
+    connectToServer.cache.set(key, Promise.resolve(replacement))
+    expect(
+      await isMcpClientRetired(
+        'retired-list-changed',
+        connection.config,
+        connection,
+      ),
+    ).toBe(true)
+    try {
+      updates.length = 0
+      await toolsHandler!()
+      expect(updates).toHaveLength(0)
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+
+    // A disabled server's notification must not apply either, even while
+    // its transport is still the cached generation.
+    expect(
+      await isMcpClientRetired(
+        'retired-list-changed',
+        connection.config,
+        connection,
+      ),
+    ).toBe(false)
+    const savedDisabled = getCurrentProjectConfig().disabledMcpServers
+    saveCurrentProjectConfig(c => ({
+      ...c,
+      disabledMcpServers: ['retired-list-changed'],
+    }))
+    try {
+      updates.length = 0
+      await toolsHandler!()
+      expect(updates).toHaveLength(0)
+    } finally {
+      saveCurrentProjectConfig(c => ({
+        ...c,
+        disabledMcpServers: savedDisabled,
+      }))
+    }
+  })
+
+  test('releasing an installed client keeps it open while another session still owns it', async () => {
+    const { connectToServer, getServerCacheKey, noteMcpClientInstalled, releaseInstalledMcpClient } =
+      await import('./client.js')
+    const name = 'installed-release'
+    const config = { type: 'sdk', scope: 'local' } as never
+    const key = getServerCacheKey(name, config)
+    let cleanups = 0
+    let cachedDuringCleanup: unknown = 'unset'
+    const client = {
+      type: 'connected',
+      name,
+      config,
+      cleanup: async () => {
+        cleanups++
+        cachedDuringCleanup = connectToServer.cache.get(key)
+      },
+    } as unknown as ConnectedMCPServer
+    const ownerA = {}
+    const ownerB = {}
+    try {
+      connectToServer.cache.set(key, Promise.resolve(client))
+      noteMcpClientInstalled(client, ownerA)
+      noteMcpClientInstalled(client, ownerB)
+      // One owner leaving leaves the transport open for the other.
+      await releaseInstalledMcpClient(name, config, client, ownerA)
+      expect(cleanups).toBe(0)
+      expect(connectToServer.cache.get(key)).toBeDefined()
+      // The last owner leaving closes it — and the generation was
+      // evicted before cleanup ran, so a caller joining during cleanup
+      // could not receive the closing client.
+      await releaseInstalledMcpClient(name, config, client, ownerB)
+      expect(cleanups).toBe(1)
+      expect(cachedDuringCleanup).toBeUndefined()
+      expect(connectToServer.cache.get(key)).toBeUndefined()
+      // A second close is a no-op: cleanup never runs twice.
+      await releaseInstalledMcpClient(name, config, client, ownerB)
+      expect(cleanups).toBe(1)
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+  })
+
+  test('a setup reservation keeps a received client alive until it installs or is released', async () => {
+    const {
+      connectToServer,
+      getMcpClientSetupReservationCountForTesting,
+      getServerCacheKey,
+      noteMcpClientInstalled,
+      releaseUnownedMcpClient,
+      reserveMcpClientForSetup,
+    } = await import('./client.js')
+    const name = 'setup-reservation'
+    const config = { type: 'sdk', scope: 'local' } as never
+    const key = getServerCacheKey(name, config)
+    let cleanups = 0
+    const client = {
+      type: 'connected',
+      name,
+      config,
+      cleanup: async () => {
+        cleanups++
+      },
+    } as unknown as ConnectedMCPServer
+    const owner = {}
+    try {
+      connectToServer.cache.set(key, Promise.resolve(client))
+      reserveMcpClientForSetup(client, owner)
+      expect(getMcpClientSetupReservationCountForTesting(client)).toBe(1)
+      // A release that runs while setup is still in flight is declined.
+      await releaseUnownedMcpClient(name, config, client)
+      expect(cleanups).toBe(0)
+      // Installing converts the reservation into ownership — and the
+      // install record keeps it alive too.
+      noteMcpClientInstalled(client, owner)
+      expect(getMcpClientSetupReservationCountForTesting(client)).toBe(0)
+      await releaseUnownedMcpClient(name, config, client)
+      expect(cleanups).toBe(0)
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+  })
+
+  test('setup abandonment withdraws the adoption claim so a blocked release re-runs', async () => {
+    const {
+      connectToServer,
+      getMcpClientAdoptionClaimCountForTesting,
+      getServerCacheKey,
+      releaseMcpClientSetupReservation,
+      releaseUnownedMcpClient,
+      reserveMcpClientForSetup,
+    } = await import('./client.js')
+    const name = 'setup-abandonment'
+    const config = { type: 'sdk', scope: 'local' } as never
+    const key = getServerCacheKey(name, config)
+    let cleanups = 0
+    const client = {
+      type: 'connected',
+      name,
+      config,
+      cleanup: async () => {
+        cleanups++
+      },
+    } as unknown as ConnectedMCPServer
+    const owner = {}
+    try {
+      // Joining the cached connect adopts the client, as a second
+      // session's setup join does; the claim consolidates into the
+      // owner's token a few ticks out.
+      connectToServer.cache.set(key, Promise.resolve(client))
+      expect(await connectToServer(name, config, undefined, undefined, owner)).toBe(client)
+      // The provisional claim consolidates into the owner's token a
+      // few ticks out, and the count is 1 either way — sleep past the
+      // consolidation before asserting, or the abandonment below would
+      // withdraw a claim that is not in the set yet.
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(getMcpClientAdoptionClaimCountForTesting(client)).toBe(1)
+      reserveMcpClientForSetup(client, owner)
+      // Another session's cancel declines on the adoption claim.
+      await releaseUnownedMcpClient(name, config, client)
+      expect(cleanups).toBe(0)
+      // Setup abandoned without installing: releasing the reservation
+      // must withdraw the abandoning caller's adoption claim too, or
+      // the retry declines on it again and the transport stays open
+      // with no owner.
+      releaseMcpClientSetupReservation(client, owner)
+      const releaseDeadline = Date.now() + 1_000
+      while (cleanups === 0) {
+        if (Date.now() > releaseDeadline) {
+          throw new Error('blocked release never re-ran after abandonment')
+        }
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+      expect(cleanups).toBe(1)
+      expect(getMcpClientAdoptionClaimCountForTesting(client)).toBe(0)
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+  })
+
+  test('one owner abandoning setup does not strip another owner\'s adoption claim', async () => {
+    const {
+      connectToServer,
+      getMcpClientAdoptionClaimCountForTesting,
+      getServerCacheKey,
+      isMcpClientAdopted,
+      releaseMcpClientSetupReservation,
+      releaseUnownedMcpClient,
+      reserveMcpClientForSetup,
+    } = await import('./client.js')
+    const name = 'setup-abandonment-other-owner'
+    const config = { type: 'sdk', scope: 'local' } as never
+    const key = getServerCacheKey(name, config)
+    let cleanups = 0
+    const client = {
+      type: 'connected',
+      name,
+      config,
+      cleanup: async () => {
+        cleanups++
+      },
+    } as unknown as ConnectedMCPServer
+    const abandoning = {}
+    const surviving = {}
+    try {
+      // Two sessions join the cached connect; each adopts under its own
+      // owner token, so the claim count is 2, not the consolidated 1.
+      connectToServer.cache.set(key, Promise.resolve(client))
+      expect(await connectToServer(name, config, undefined, undefined, abandoning)).toBe(client)
+      expect(await connectToServer(name, config, undefined, undefined, surviving)).toBe(client)
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(getMcpClientAdoptionClaimCountForTesting(client)).toBe(2)
+      reserveMcpClientForSetup(client, abandoning)
+      reserveMcpClientForSetup(client, surviving)
+      // A cancel from elsewhere declines on the adoption claims.
+      await releaseUnownedMcpClient(name, config, client)
+      expect(cleanups).toBe(0)
+      // The abandoning session's release must withdraw only its own
+      // claim: the surviving session still holds the client, so no
+      // release re-runs and the transport stays open.
+      releaseMcpClientSetupReservation(client, abandoning)
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(cleanups).toBe(0)
+      expect(getMcpClientAdoptionClaimCountForTesting(client)).toBe(1)
+      expect(isMcpClientAdopted(client)).toBe(true)
+      await releaseUnownedMcpClient(name, config, client)
+      expect(cleanups).toBe(0)
+      // The surviving session abandoning too withdraws the last claim,
+      // so the blocked release re-runs and the transport closes.
+      releaseMcpClientSetupReservation(client, surviving)
+      const releaseDeadline = Date.now() + 1_000
+      while (cleanups === 0) {
+        if (Date.now() > releaseDeadline) {
+          throw new Error('blocked release never re-ran after last abandonment')
+        }
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+      expect(cleanups).toBe(1)
+      expect(getMcpClientAdoptionClaimCountForTesting(client)).toBe(0)
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+  })
+
+  test('clearing a server cache keeps an installed client its creator never adopted', async () => {
+    const {
+      clearServerCache,
+      connectToServer,
+      getServerCacheKey,
+      isMcpClientInstalled,
+      noteMcpClientInstalled,
+      releaseInstalledMcpClient,
+    } = await import('./client.js')
+    const name = 'installed-no-adoption'
+    const config = { type: 'http', url: 'http://localhost:1', scope: 'local' } as never
+    const key = getServerCacheKey(name, config)
+    let cleanups = 0
+    const client = {
+      type: 'connected',
+      name,
+      config,
+      cleanup: async () => {
+        cleanups++
+      },
+    } as unknown as ConnectedMCPServer
+    const owner = {}
+    try {
+      // A fresh connect's creator never adopts its own client, but it
+      // installs it: installed with zero adoption claims and zero
+      // reservations is the normal creator case.
+      connectToServer.cache.set(key, Promise.resolve(client))
+      noteMcpClientInstalled(client, owner)
+      expect(isMcpClientInstalled(client)).toBe(true)
+      // A reconnect's clear must detach the cache entry without
+      // closing the installed transport.
+      await clearServerCache(name, config, undefined, { keepAdoptedClient: true })
+      expect(cleanups).toBe(0)
+      expect(connectToServer.cache.get(key)).toBeUndefined()
+      expect(isMcpClientInstalled(client)).toBe(true)
+      // The last installer's release still closes it.
+      await releaseInstalledMcpClient(name, config, client, owner)
+      expect(cleanups).toBe(1)
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+  })
+
+  test('releasing the last setup reservation re-runs a release it had blocked', async () => {
+    const {
+      connectToServer,
+      getServerCacheKey,
+      releaseMcpClientSetupReservation,
+      releaseUnownedMcpClient,
+      reserveMcpClientForSetup,
+    } = await import('./client.js')
+    const name = 'setup-reservation-release'
+    const config = { type: 'sdk', scope: 'local' } as never
+    const key = getServerCacheKey(name, config)
+    let cleanups = 0
+    const client = {
+      type: 'connected',
+      name,
+      config,
+      cleanup: async () => {
+        cleanups++
+      },
+    } as unknown as ConnectedMCPServer
+    const owner = {}
+    try {
+      connectToServer.cache.set(key, Promise.resolve(client))
+      reserveMcpClientForSetup(client, owner)
+      await releaseUnownedMcpClient(name, config, client)
+      expect(cleanups).toBe(0)
+      // Setup failed: releasing the reservation re-runs the release,
+      // or the transport stays open with no owner.
+      releaseMcpClientSetupReservation(client, owner)
+      const deadline = Date.now() + 1_000
+      while (cleanups === 0) {
+        if (Date.now() > deadline) {
+          throw new Error('blocked release never re-ran')
+        }
+        await new Promise(resolve => setTimeout(resolve, 5))
+      }
+      expect(cleanups).toBe(1)
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+  })
+
+  test('clearing a server cache clears only the generation the caller failed on', async () => {
+    const { clearServerCache, connectToServer, getServerCacheKey } =
+      await import('./client.js')
+    const name = 'generation-clear'
+    const config = { type: 'http', url: 'http://localhost:1', scope: 'local' } as never
+    const key = getServerCacheKey(name, config)
+    let oldCleanups = 0
+    let replacementCleanups = 0
+    const oldClient = {
+      type: 'connected',
+      name,
+      config,
+      cleanup: async () => {
+        oldCleanups++
+      },
+    } as unknown as ConnectedMCPServer
+    const replacement = {
+      type: 'connected',
+      name,
+      config,
+      cleanup: async () => {
+        replacementCleanups++
+      },
+    } as unknown as ConnectedMCPServer
+    try {
+      // A reauthentication already swapped in a replacement: a late
+      // session-expiry error from the old transport must not close it.
+      const replacementEntry = Promise.resolve(replacement)
+      connectToServer.cache.set(key, replacementEntry)
+      await clearServerCache(name, config, undefined, {
+        expectedClient: oldClient,
+      })
+      expect(replacementCleanups).toBe(0)
+      expect(oldCleanups).toBe(0)
+      expect(connectToServer.cache.get(key)).toBe(replacementEntry)
+      // Clearing the generation that is actually cached closes it.
+      await clearServerCache(name, config, undefined, {
+        expectedClient: replacement,
+      })
+      expect(replacementCleanups).toBe(1)
+      expect(connectToServer.cache.get(key)).toBeUndefined()
+      // A pending replacement in flight is left alone, promptly.
+      let resolvePending!: (value: ConnectedMCPServer) => void
+      const pending = new Promise<ConnectedMCPServer>(resolve => {
+        resolvePending = resolve
+      })
+      connectToServer.cache.set(key, pending)
+      await clearServerCache(name, config, undefined, {
+        expectedClient: oldClient,
+      })
+      expect(connectToServer.cache.get(key)).toBe(pending)
+      resolvePending(replacement)
+      await pending
+    } finally {
+      connectToServer.cache.delete(key)
+    }
+  })
+
+  test('isCurrentMcpListUpdateOrigin rejects a refresh from a replaced transport', async () => {
+    const { isCurrentMcpListUpdateOrigin } = await import(
+      './useManageMCPConnections.js'
+    )
+    const sdkClientA = {}
+    const sdkClientB = {}
+    const config = { type: 'http', url: 'http://localhost:1', scope: 'local' }
+    const origin = {
+      type: 'connected',
+      name: 'origin-check',
+      config,
+      client: sdkClientA,
+    } as unknown as ConnectedMCPServer
+    const currentSame = {
+      type: 'connected',
+      name: 'origin-check',
+      config,
+      client: sdkClientA,
+    } as unknown as ConnectedMCPServer
+    const currentReplaced = {
+      type: 'connected',
+      name: 'origin-check',
+      config,
+      client: sdkClientB,
+    } as unknown as ConnectedMCPServer
+    const currentReconfigured = {
+      type: 'connected',
+      name: 'origin-check',
+      config: { type: 'http', url: 'http://localhost:2', scope: 'local' },
+      client: sdkClientA,
+    } as unknown as ConnectedMCPServer
+    const failed = {
+      type: 'failed',
+      name: 'origin-check',
+      config,
+    } as unknown as ConnectedMCPServer
+    // A pending/failed record built by spreading the closed client keeps
+    // its `.client` and config, so the transport comparison alone cannot
+    // tell it apart from the live record — only the type gate can.
+    const pendingSpread = {
+      ...origin,
+      type: 'pending',
+      reconnectAttempt: 1,
+      maxReconnectAttempts: 5,
+    } as unknown as ConnectedMCPServer
+    const failedSpread = {
+      ...origin,
+      type: 'failed',
+    } as unknown as ConnectedMCPServer
+    expect(isCurrentMcpListUpdateOrigin(origin, currentSame)).toBe(true)
+    expect(isCurrentMcpListUpdateOrigin(origin, currentReplaced)).toBe(false)
+    expect(isCurrentMcpListUpdateOrigin(origin, currentReconfigured)).toBe(false)
+    expect(isCurrentMcpListUpdateOrigin(origin, undefined)).toBe(false)
+    expect(isCurrentMcpListUpdateOrigin(origin, failed)).toBe(false)
+    expect(isCurrentMcpListUpdateOrigin(origin, pendingSpread)).toBe(false)
+    expect(isCurrentMcpListUpdateOrigin(origin, failedSpread)).toBe(false)
   })
 })

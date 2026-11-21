@@ -9,6 +9,7 @@ import {
   callMCPToolWithUrlElicitationRetry,
   connectToServer,
   fetchToolsForClient,
+  getDiscoveryCacheKey,
   getServerCacheKey,
 } from './client.js'
 import {
@@ -219,7 +220,8 @@ describe('MCP server tasks', () => {
     // task-support map and the tools cache, leaving a fresh connection
     // whose metadata has not been fetched yet.
     _resetMcpServerTasksForTest()
-    fetchToolsForClient.cache.delete('task-server')
+    // Discovery memos are keyed by connection, not by display name.
+    fetchToolsForClient.cache.delete(getDiscoveryCacheKey(connection))
 
     await callMCPToolWithUrlElicitationRetry({
       client: connection,
@@ -233,6 +235,9 @@ describe('MCP server tasks', () => {
     expect(request).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({ method: 'tools/list' }),
+      expect.anything(),
+      // tools/list carries the abort signal as a third argument (the PR's
+      // discovery fetches are signal-aware); only the method matters here.
       expect.anything(),
     )
     expect(callTool).not.toHaveBeenCalled()
@@ -259,7 +264,8 @@ describe('MCP server tasks', () => {
     // First connection: discovery succeeds and records support.
     await fetchToolsForClient(connection)
     // Reconnect: caches are cleared (onclose), discovery now fails.
-    fetchToolsForClient.cache.delete('task-server')
+    // Discovery memos are keyed by connection, not by display name.
+    fetchToolsForClient.cache.delete(getDiscoveryCacheKey(connection))
     listWorks = false
 
     await callMCPToolWithUrlElicitationRetry({
@@ -372,7 +378,8 @@ describe('MCP server tasks', () => {
     // Old connection starts discovery, then disconnects (onclose clears the
     // memo entry) while its tools/list is still retrying.
     const oldDiscovery = fetchToolsForClient(oldConnection)
-    fetchToolsForClient.cache.delete('task-server')
+    // Discovery memos are keyed by connection, not by display name.
+    fetchToolsForClient.cache.delete(getDiscoveryCacheKey(oldConnection))
 
     // The reconnected connection finishes discovery first.
     await fetchToolsForClient(newConnection)
@@ -599,18 +606,22 @@ describe('MCP server tasks', () => {
     const callTool = vi.fn(async () => {
       throw new Error('Not connected')
     })
+    const cleanup = vi.fn(async () => {})
     const connection = {
       ...makeConnection({ request, callTool }),
+      cleanup,
       config: { type: 'http', url: 'http://localhost:1/mcp' } as ConnectedMCPServer['config'],
     }
     // The session-expiry path calls clearServerCache, which asks the
     // connection cache for the old connection. Own that entry so no real
-    // connection to the URL above is attempted.
-    const cleanup = vi.fn(async () => {})
+    // connection to the URL above is attempted. The planted entry must
+    // resolve to this connection itself: clearServerCache only clears the
+    // entry holding the client that actually failed (expectedClient guard),
+    // so a stand-in object would be left untouched.
     const cacheKey = getServerCacheKey(connection.name, connection.config)
     ;(connectToServer.cache as unknown as Map<string, unknown>).set(
       cacheKey,
-      Promise.resolve({ type: 'connected', cleanup }),
+      Promise.resolve(connection),
     )
 
     await expect(

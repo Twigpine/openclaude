@@ -26,10 +26,17 @@ import {
 import { createMcpAuthTool } from '../../tools/McpAuthTool/McpAuthTool.js'
 import { MCPTool } from '../../tools/MCPTool/MCPTool.js'
 import type { MCPServerConnection, ScopedMcpServerConfig } from '../../services/mcp/types.js'
-import { connectToServer, fetchToolsForClient, getServerCacheKey } from '../../services/mcp/client.js'
-import { ClaudeAuthProvider } from '../../services/mcp/auth.js'
+import {
+  connectToServer,
+  fetchToolsForClient,
+  getServerCacheKey,
+  releaseMcpClientSetupReservation,
+  reserveMcpClientForSetup,
+} from '../../services/mcp/client.js'
+import { AuthenticationCancelledError, ClaudeAuthProvider } from '../../services/mcp/auth.js'
 import { logError } from '../../utils/log.js'
 import type { ActiveCredentialScope, CredentialScope } from '../../services/mcp/credentialScope.js'
+import { raceAbort } from '../../utils/boundedAsync.js'
 import { clearKeychainCache } from '../../utils/secureStorage/macOsKeychainHelpers.js'
 import {
   acquireEnvMutex,
@@ -579,9 +586,67 @@ export function createExternalCanUseTool(
  * namespace, so it is dropped on the way in and out, as a reconnect drops it
  * before reading fresh credentials.
  */
-function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): CredentialScope {
+export function captureCredentialScope(
+  getOriginScope?: () => ActiveCredentialScope | undefined,
+  options?: {
+    signal?: AbortSignal
+    /**
+     * Environment to freeze alongside the process environment: a call
+     * made before the first turn has no turn to lend it the session's
+     * `env` overrides, so the caller passes them here and the frozen
+     * namespace is the session's established environment, not ambient.
+     * A call inside a turn already runs with those overrides applied,
+     * so the caller passes none.
+     */
+    env?: Record<string, string | undefined>
+    /**
+     * Queue ahead of regular waiters when the scope re-enters the
+     * environment mutex: a discovery that survives its caller must get
+     * the mutex before a session that queued earlier, or the remaining
+     * pages read that session's environment. Only the surviving
+     * discovery scope sets this.
+     */
+    priority?: boolean
+  },
+): CredentialScope {
   // Captured inside the turn's tool call, where its variables are applied.
   const turnEnv = new Map(Object.entries(process.env))
+  if (options?.env) {
+    for (const [key, value] of Object.entries(options.env)) {
+      if (value === undefined) {
+        // On Windows process.env is case-insensitive, so an override that
+        // deletes `openclaude_config_dir` must also remove an inherited
+        // `OPENCLAUDE_CONFIG_DIR` — otherwise the pre-turn scope keeps the
+        // ambient config home. Other platforms keep exact-key matching.
+        if (process.platform === 'win32') {
+          for (const existing of [...turnEnv.keys()]) {
+            if (existing.toUpperCase() === key.toUpperCase()) turnEnv.delete(existing)
+          }
+        }
+        turnEnv.delete(key)
+      } else {
+        // Same case-insensitivity for a defined override: keeping both
+        // spellings would let replay restore the stale inherited value
+        // last when the ambient key was recreated in lowercase, so the
+        // override keeps exactly one entry per case-insensitive key
+        // (CodeRabbit #2493 review 5955577457).
+        if (process.platform === 'win32') {
+          for (const existing of [...turnEnv.keys()]) {
+            if (existing !== key && existing.toUpperCase() === key.toUpperCase()) {
+              turnEnv.delete(existing)
+            }
+          }
+        }
+        turnEnv.set(key, value)
+      }
+    }
+  }
+  // The turn the call starts in lends its environment; freeze that scope
+  // now, instead of reading the live turn at resume time — by the time the
+  // user is back from the browser, another turn may hold the field, and the
+  // exchange would then run in that turn's namespace. A turn that already
+  // ended lends nothing, and the scope falls back to the mutex below.
+  const originScope = getOriginScope?.()
   // Initial discovery/registration writes happen before any continuation.
   clearKeychainCache()
   const set = (key: string, value: string | undefined) => {
@@ -594,13 +659,23 @@ function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): Credent
   return async work => {
     // The query keeps this environment until the borrowed work settles.
     // Do not queue behind the same query's still-open input stream.
-    const owned = runInOriginEnv?.(async () => {
+    const owned = originScope?.(async () => {
       clearKeychainCache()
       try { return await work() }
       finally { clearKeychainCache() }
     })
     if (owned) return owned
-    await acquireEnvMutex()
+    const { acquired, reason } = await acquireEnvMutex(
+      options?.signal || options?.priority
+        ? { signal: options.signal, priority: options.priority }
+        : undefined,
+    )
+    if (!acquired) {
+      if (reason === 'aborted' || options?.signal?.aborted) {
+        throw new AuthenticationCancelledError()
+      }
+      throw new Error('Failed to acquire environment mutex')
+    }
     // What each changed variable was, to put back; recorded before it changes.
     const displaced = new Map<string, string | undefined>()
     try {
@@ -634,8 +709,16 @@ function captureCredentialScope(runInOriginEnv?: ActiveCredentialScope): Credent
  */
 export async function connectSdkMcpServers(
   mcpServers: Record<string, unknown> | undefined,
-  runInOriginEnv?: ActiveCredentialScope,
+  getOriginScope?: () => ActiveCredentialScope | undefined,
   sessionSignal?: AbortSignal,
+  /**
+   * The session installing these clients: a received client is reserved
+   * for it from receipt through installation, so another session's
+   * reauthentication cannot withdraw the adoption claim and close the
+   * transport while this session is still setting up. The callers pass
+   * their session instance; without one no reservation is tracked.
+   */
+  owner?: object,
 ): Promise<{ clients: MCPServerConnection[]; tools: Tool[] }> {
   if (!mcpServers || Object.keys(mcpServers).length === 0) {
     return { clients: [], tools: [] }
@@ -721,39 +804,130 @@ export async function connectSdkMcpServers(
         }
       }
 
+      // A client this session received but has not installed yet: its
+      // setup reservation holds the transport while fetchTools runs
+      // and until the caller installs it, so another session's
+      // reauthentication cannot close it mid-setup. Released in the
+      // catch below on any failure, converted into the install record
+      // by noteMcpClientInstalled on success (CodeRabbit #2493 review
+      // 5961865068). Declared outside the try: the catch below must see
+      // it.
+      let reservedClient: MCPServerConnection | undefined
       try {
         // Equivalent configs can have different memo keys while sharing
         // credentials. Retry disconnected results when this environment has
         // tokens, without changing the global key or touching connected clients.
         const serverConfig = scopedConfig as unknown as ScopedMcpServerConfig
+        // A cached connect is joined once and its connected result used
+        // directly: joining again below would adopt the replacement under
+        // the same owner if a reconnect detached this generation in
+        // between, and the first client's claim would never be reserved,
+        // installed, or released — its release stays blocked by an owner
+        // that never uses it (CodeRabbit #2493 review 5966435933).
+        let client: MCPServerConnection | undefined
         if (serverConfig.type === 'http' || serverConfig.type === 'sse') {
           const key = getServerCacheKey(name, serverConfig)
           const cached = connectToServer.cache.get(key)
-          if (cached && (await cached).type !== 'connected') {
-            clearKeychainCache()
-            if (
-              await new ClaudeAuthProvider(name, serverConfig).tokens() &&
-              connectToServer.cache.get(key) === cached
-            ) {
-              connectToServer.cache.delete(key)
+          if (cached) {
+            // Register as a waiter before awaiting the shared pending
+            // connect: awaiting the cached promise directly would leave
+            // this caller uncounted, and a creator abort would close a
+            // transport this session still needs.
+            const joined = await connectToServer(
+              name,
+              serverConfig,
+              undefined,
+              sessionSignal,
+              owner,
+            )
+            if (joined.type !== 'connected') {
+              clearKeychainCache()
+              if (
+                await new ClaudeAuthProvider(name, serverConfig).tokens() &&
+                connectToServer.cache.get(key) === cached
+              ) {
+                connectToServer.cache.delete(key)
+              }
+            } else {
+              client = joined
             }
           }
         }
         // Connect to the server
         // Note: SDK 'session' scope is not part of internal ConfigScope,
         // but connectToServer accepts any object with scope field
-        const client = await connectToServer(name, scopedConfig as unknown as ScopedMcpServerConfig, {
-          totalServers: Object.keys(mcpServers).length,
-          stdioCount: 0,
-          sseCount: 0,
-          httpCount: 0,
-          sseIdeCount: 0,
-          wsIdeCount: 0,
-        })
+        if (client === undefined) {
+          client = await connectToServer(
+            name,
+            scopedConfig as unknown as ScopedMcpServerConfig,
+            {
+              totalServers: Object.keys(mcpServers).length,
+              stdioCount: 0,
+              sseCount: 0,
+              httpCount: 0,
+              sseIdeCount: 0,
+              wsIdeCount: 0,
+            },
+            // The session's signal is passed only when joining a connect
+            // another caller started: closing the session then releases the
+            // waiter it registered, so a later cancellation can close the
+            // transport instead of waiting out the connection timeout. A
+            // fresh connect is owned by the cache, not the session — passing
+            // the signal would attach the connect's abort listener to it,
+            // and closing the session would close a transport the next
+            // session reuses.
+            connectToServer.cache.get(
+              getServerCacheKey(name, scopedConfig as unknown as ScopedMcpServerConfig),
+            ) !== undefined
+              ? sessionSignal
+              : undefined,
+            // A join through this connect adopts the client under the
+            // session's owner token (see connectToServer), so a setup
+            // abandonment can withdraw only this session's claim.
+            owner,
+          )
+        }
 
         // If connected, fetch tools
         if (client.type === 'connected') {
-          const serverTools = await fetchToolsForClient(client)
+          if (owner !== undefined) {
+            reserveMcpClientForSetup(client, owner)
+            reservedClient = client
+          }
+          // fetchToolsForClient memoizes by connection: the fetch one
+          // session starts is the fetch every session joining that client
+          // awaits, so this session's signal must not drive the shared
+          // fetch — closing this session would cancel discovery another
+          // live session still awaits, and the shared promise would
+          // resolve to [] for both. The fetch runs without a signal and
+          // raceAbort ends only this caller's wait, the same split the
+          // reconnect path uses (client.ts, reconnectMcpServerImpl); the
+          // shared fetch keeps running for the joiner (CodeRabbit #2493
+          // review 5966435933).
+          const serverTools = await raceAbort(
+            fetchToolsForClient(client),
+            sessionSignal,
+          )
+          if (sessionSignal?.aborted) {
+            // The tools arrived as the abort landed, so the race above
+            // resolved instead of throwing: release the reservation
+            // explicitly, and report the server as failed so the caller
+            // does not install a client from a dead session (jatmn #2493
+            // review 5965105241). An abort that wins the race throws
+            // instead and the catch below releases the reservation.
+            if (reservedClient !== undefined && owner !== undefined) {
+              releaseMcpClientSetupReservation(reservedClient, owner)
+            }
+            return {
+              client: {
+                type: 'failed' as const,
+                name,
+                config: scopedConfig,
+                error: 'MCP tool discovery aborted',
+              },
+              tools: [],
+            }
+          }
           return { client, tools: serverTools }
         }
 
@@ -774,7 +948,11 @@ export async function connectSdkMcpServers(
             tools: [
               createMcpAuthTool(name, scopedConfig as unknown as ScopedMcpServerConfig, {
                 realToolsInCurrentContext: false,
-                captureCredentialScope: () => captureCredentialScope(runInOriginEnv),
+                captureCredentialScope: signal =>
+                  captureCredentialScope(
+                    getOriginScope,
+                    signal ? { signal } : undefined,
+                  ),
                 sessionSignal,
               }),
             ],
@@ -784,6 +962,13 @@ export async function connectSdkMcpServers(
         // Return failed/pending client with no tools
         return { client, tools: [] }
       } catch (error) {
+        // Setup failed or was cancelled after receipt: this session will
+        // never install the client, so its reservation goes — otherwise
+        // the transport stays open with no owner, and nobody ever
+        // releases it.
+        if (reservedClient !== undefined && owner !== undefined) {
+          releaseMcpClientSetupReservation(reservedClient, owner)
+        }
         // Connection failed, return failed client with error message
         const errorMessage = error instanceof Error
           ? error.message
