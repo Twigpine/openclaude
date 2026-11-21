@@ -2269,11 +2269,10 @@ describe('terminal-fact publish across withdrawn claims', () => {
     }
   }
 
-  // Bounded staging-open matrix: async/sync x missing copy with/without
-  // a competing winner, and a permission failure. ENOENT recovers;
-  // EACCES must propagate rather than masquerading as a race.
+  // ENOENT recovers; permission failures and a pre-existing private
+  // staging path must propagate without publishing any bytes.
   for (const synchronous of [false, true]) {
-    for (const outcome of ['winner', 'retry', 'EACCES'] as const) {
+    for (const outcome of ['winner', 'retry', 'EACCES', 'EEXIST'] as const) {
       it(`handles staged-open ${outcome} through the ${synchronous ? 'sync' : 'async'} fallback`, async () => {
         const session = await registry.createBackgroundSession({
           id: `bg-stage-open-${synchronous}-${outcome}`,
@@ -2285,10 +2284,21 @@ describe('terminal-fact publish across withdrawn claims', () => {
         })
         const target = terminalFactPath(session.id, 'natural')
         let injected = false
+        const sentinel = 'already present'
+        let stagedContentsBeforeCleanup: string | undefined
         stagedOpenInjection = path => {
           injected = true
           if (outcome === 'EACCES') {
             throw Object.assign(new Error('staged open denied'), { code: 'EACCES' })
+          }
+          if (outcome === 'EEXIST') {
+            // Use a real open collision: a nonexclusive open would
+            // truncate this entry and could publish over it.
+            realWriteFileSync(path, sentinel, { flag: 'wx' })
+            beforePendingCleanup = () => {
+              stagedContentsBeforeCleanup = realFs.readFileSync(path, 'utf8')
+            }
+            return
           }
           realFs.rmSync(dirname(path), { recursive: true, force: true })
           if (outcome === 'winner') {
@@ -2296,34 +2306,21 @@ describe('terminal-fact publish across withdrawn claims', () => {
           }
         }
         linkUnsupported = true
-        const options = { ownerPid: session.pid, expectedSession: session }
-        const terminate = () => registry.recordBackgroundSessionNaturalTerminationSync(
-          session.id, { exitCode: 0 }, options,
-        )
-        if (synchronous) {
-          if (outcome === 'EACCES') expect(terminate).toThrow('staged open denied')
-          else terminate()
-        } else {
-          const terminated = registry.recordBackgroundSessionNaturalTermination(
-            session.id, { exitCode: 0 }, options,
-          )
-          if (outcome === 'EACCES') {
-            await expect(terminated).rejects.toMatchObject({ code: 'EACCES' })
-          } else {
-            await expect(terminated).resolves.toMatchObject({
-              exitCode: outcome === 'winner' ? 3 : 0,
-            })
-          }
-        }
-        expect(injected).toBe(true)
-        if (outcome === 'EACCES') {
+        const publication = publishForTest(synchronous, session)
+        if (outcome === 'EACCES' || outcome === 'EEXIST') {
+          await expect(publication).rejects.toMatchObject({ code: outcome })
           await expect(readFile(target, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
         } else {
-          expect(await storedExitCode(session.id)).toBe(outcome === 'winner' ? 3 : 0)
+          const exitCode = outcome === 'winner' ? 3 : 0
+          const result = await publication
+          if (!synchronous) expect(result).toMatchObject({ exitCode })
+          expect(await storedExitCode(session.id)).toBe(exitCode)
           expect(await registry.resolveBackgroundSessionForWait(session.id)).toMatchObject({
-            exitCode: outcome === 'winner' ? 3 : 0,
+            exitCode,
           })
         }
+        expect(injected).toBe(true)
+        if (outcome === 'EEXIST') expect(stagedContentsBeforeCleanup).toBe(sentinel)
         expect(realFs.existsSync(`${target}.commit`)).toBe(false)
         expect(realFs.readdirSync(dirname(target)).filter(name => name.startsWith('.publish-'))).toEqual([])
       })
