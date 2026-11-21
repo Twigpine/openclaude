@@ -295,8 +295,18 @@ function legacyNoticeIndices(messages: readonly FocusMessage[]): Set<number> {
         : undefined
     const isModelOnly = skillName !== undefined && skillName !== ''
     if (!afterCaveat && !isHookStop && !isModelOnly) return
+    // A caveat-led notice can arrive as [image, text] in one submission (array
+    // input), which normalization splits into rows. Look for the caveat before
+    // the submission's first row and mark every row of it.
+    const key = afterCaveat ? sourceKey(m) : undefined
     let p = i - 1
-    while (p >= 0 && messages[p]!.type === 'attachment') p--
+    const submission = [i]
+    while (p >= 0) {
+      const row = messages[p]!
+      if (row.type === 'attachment') p--
+      else if (key !== undefined && sourceKey(row) === key) submission.push(p--)
+      else break
+    }
     const prev = p >= 0 ? messages[p]! : undefined
     if (prev === undefined) return
     // Caveat-led notices are written right after the synthetic caveat row; a
@@ -311,7 +321,7 @@ function legacyNoticeIndices(messages: readonly FocusMessage[]): Set<number> {
           sourceKey(prev) !== sourceKey(m) &&
           firstText(prev) === `/${skillName}`
         : candidateKind(prev) !== undefined && sourceKey(prev) !== sourceKey(m)
-    if (afterWriterRow) out.add(i)
+    if (afterWriterRow) for (const j of submission) out.add(j)
   })
   return out
 }
@@ -469,14 +479,16 @@ function turnEndingCompactions(
 function addEditLines(result: unknown, into: FocusSummary): void {
   if (!isFileEditResult(result)) return
   const isCreate = 'type' in result && result.type === 'create'
-  if (isCreate && result.structuredPatch.length === 0 && 'content' in result) {
+  // A create result from another producer, or a restored payload, can lack it.
+  const patch = Array.isArray(result.structuredPatch) ? result.structuredPatch : []
+  if (isCreate && patch.length === 0 && 'content' in result) {
     // Same convention as the diff path: a trailing newline ends the last line
     // instead of starting another, and empty content adds nothing.
     const c = result.content
     into.linesAdded += c === '' ? 0 : c.split('\n').length - (c.endsWith('\n') ? 1 : 0)
     return
   }
-  const { added, removed } = countHunkLines(result.structuredPatch)
+  const { added, removed } = countHunkLines(patch)
   into.linesAdded += added
   into.linesRemoved += removed
 }

@@ -1510,3 +1510,43 @@ describe('stop reasons and diagnostics from the input pipeline', () => {
     expect(countUnseenFocusTurns(advisorTurn(true), 0)).toBe(1)
   })
 })
+
+describe('review round: image-led legacy notice and patchless create', () => {
+  const texts = (rows: FocusMessage[]) => JSON.stringify(rows.map(r => r.message?.content))
+
+  test('an unflagged unknown-skill notice with a leading image block stays in the tail', () => {
+    const msgs = normalized([
+      createUserMessage({ content: 'one' }),
+      createAssistantMessage({ content: 'answer' }),
+      createSyntheticUserCaveatMessage(),
+      createUserMessage({ content: [IMG, txt(`${UNKNOWN_SKILL_PREFIX}nope`)] }),
+    ])
+    const r = select(msgs)
+    expect(r.hiddenTurns).toBe(0)
+    expect(texts(r.rows)).toContain('one')
+    expect(texts(r.rows)).toContain('answer')
+  })
+
+  test('the same image plus text typed after an answer is still a prompt', () => {
+    const msgs = normalized([
+      createUserMessage({ content: 'one' }),
+      createAssistantMessage({ content: 'answer' }),
+      createUserMessage({ content: [IMG, txt(`${UNKNOWN_SKILL_PREFIX}nope`)] }),
+      createAssistantMessage({ content: 'reply' }),
+    ])
+    const r = select(msgs)
+    expect(r.hiddenTurns).toBe(1)
+  })
+
+  test('a create result without structuredPatch does not throw and counts its content', () => {
+    const r = select([
+      prompt('p', 'write it'),
+      use('u', 't', 'Write'),
+      result('r', 't', {
+        toolUseResult: { type: 'create', filePath: '/x', content: 'a\nb\n' },
+      }),
+      say('a', 'done'),
+    ])
+    expect(r.summary.linesAdded).toBe(2)
+  })
+})
