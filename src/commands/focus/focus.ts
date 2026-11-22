@@ -3,7 +3,7 @@ import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
 import { isEnvDefinedFalsy } from '../../utils/envUtils.js'
 import { isFullscreenEnvEnabled, isTmuxControlMode } from '../../utils/fullscreen.js'
 
-export const call: LocalCommandCall = async () => {
+export const call: LocalCommandCall = async (_args, context) => {
   if (!isFullscreenEnvEnabled()) {
     // /tui fullscreen only saves a setting, and the environment overrides it,
     // so name the override that is actually in force.
@@ -35,7 +35,9 @@ export const call: LocalCommandCall = async () => {
   return {
     type: 'text',
     value: next
-      ? 'Focus view is on. Earlier turns are hidden; the latest prompt, a tool summary, failures, interrupts, local command output and the response show.'
+      ? context.getAppState().isBriefOnly
+        ? 'Focus view is on, but Brief mode owns the display. It takes effect once Brief mode is off.'
+        : 'Focus view is on. Earlier turns are hidden; the latest prompt, a tool summary, failures, interrupts, local command output and the response show.'
       : 'Focus view is off.',
   }
 }

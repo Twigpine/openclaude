@@ -5,7 +5,9 @@ import { getGlobalConfig, saveGlobalConfig } from '../../utils/config.js'
 import { _resetTmuxControlModeProbeForTesting } from '../../utils/fullscreen.js'
 import { call } from './focus.js'
 
-const noopContext = {} as Parameters<typeof call>[1]
+const noopContext = {
+  getAppState: () => ({ isBriefOnly: false }),
+} as Parameters<typeof call>[1]
 
 function expectText(
   res: LocalCommandResult,
@@ -109,6 +111,20 @@ describe('/focus', () => {
     process.env.CLAUDE_CODE_NO_FLICKER = '0'
     expectText(await call('', noopContext))
     expect(getGlobalConfig().focusView).toBeUndefined()
+  })
+
+  test('with Brief-only on it still saves the setting but says Brief owns the display', async () => {
+    const brief = {
+      getAppState: () => ({ isBriefOnly: true }),
+    } as Parameters<typeof call>[1]
+    const res = expectText(await call('', brief))
+    expect(getGlobalConfig().focusView).toBe(true)
+    expect(res.value).toBe(
+      'Focus view is on, but Brief mode owns the display. It takes effect once Brief mode is off.',
+    )
+    const off = expectText(await call('', brief))
+    expect(getGlobalConfig().focusView).toBe(false)
+    expect(off.value).toContain('Focus view is off')
   })
 
   test('the confirmation lists what stays visible', async () => {

@@ -444,7 +444,7 @@ async function processUserInputBase(
         const msg = `/${getCommandName(cmd)} isn't available over Remote Control.`
         return {
           messages: [
-            createUserMessage({ content: inputString, uuid }),
+            createUserMessage({ content: inputString, uuid, isLocalNotice: true }),
             createCommandInputMessage(
               `<local-command-stdout>${msg}</local-command-stdout>`,
             ),

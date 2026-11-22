@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { AUTO_MODE_DESCRIPTION } from '../components/AutoModeOptInDialog.js'
 import { getGlobalConfig, saveGlobalConfig } from './config.js'
 import { _resetTmuxControlModeProbeForTesting } from './fullscreen.js'
 import {
@@ -27,6 +28,7 @@ import {
   focusUnseenDivider,
   isFocusViewActive,
   selectFocusView,
+  unseenDividerIndex,
   type FocusMessage,
 } from './focusView.js'
 
@@ -585,7 +587,11 @@ describe('selectFocusView failures and rejections', () => {
       sys('d', 'turn_duration'),
       sys('m', 'memory_saved'),
       sys('i', 'informational'),
-      queued('q', { commandMode: 'task-notification' }),
+      queued('q', {
+        commandMode: 'task-notification',
+        prompt:
+          '<task-notification><status>completed</status><summary>x</summary></task-notification>',
+      }),
     ])
     expect(ids(r.rows)).toEqual(['p', 'a'])
   })
@@ -1548,5 +1554,164 @@ describe('review round: image-led legacy notice and patchless create', () => {
       say('a', 'done'),
     ])
     expect(r.summary.linesAdded).toBe(2)
+  })
+})
+
+describe('review round: refusal notice, idle compaction, hooks, task notices', () => {
+  const taskNotice = (status: string) =>
+    `<task-notification><status>${status}</status><summary>ran</summary></task-notification>`
+  const hookAttachment = (id: string, type: string, extra: object = {}) =>
+    label(id, {
+      type: 'attachment' as const,
+      timestamp: '',
+      attachment: {
+        type,
+        hookName: 'PostToolUse:Bash',
+        toolUseID: 't1',
+        hookEvent: 'PostToolUse',
+        ...extra,
+      },
+    })
+
+  test('a Remote Control refusal row is a local notice, not the prompt boundary', () => {
+    const r = select([
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      notice('c', '/cost'),
+      commandOut('o', "/cost isn't available over Remote Control."),
+    ])
+    expect(r.boundary?.uuid).toBe('p1')
+    expect(ids(r.rows)).toEqual(['p1', 'a1', 'c', 'o'])
+  })
+
+  test('an idle auto compaction after an answered turn keeps the prompt as the boundary', () => {
+    const r = select([
+      prompt('p0', 'zero'),
+      say('a0', 'first'),
+      prompt('p1', 'one'),
+      say('a1', 'answer'),
+      label('cb', createCompactBoundaryMessage('auto', 100)),
+    ])
+    expect(r.boundary?.uuid).toBe('p1')
+    expect(r.hiddenTurns).toBe(1)
+    expect(r.compacted).toBe(false)
+    expect(ids(r.rows)).toEqual(['p1', 'a1'])
+  })
+
+  test('an idle auto compaction does not start a new unseen turn', () => {
+    const msgs = [
+      prompt('p', 'go'),
+      say('a1', 'answer'),
+      label('cb', createCompactBoundaryMessage('auto', 100)),
+      say('a2', 'post-compaction reply'),
+    ]
+    expect(countUnseenFocusTurns(msgs, 0)).toBe(1)
+  })
+
+  test('hook blocks and stops after a successful tool call stay visible', () => {
+    const r = select([
+      prompt('p', 'go'),
+      use('u', 't'),
+      result('r', 't'),
+      hookAttachment('hb', 'hook_blocking_error', {
+        blockingError: { blockingError: 'no', command: 'x' },
+      }),
+      hookAttachment('hs', 'hook_stopped_continuation', { message: 'stopped' }),
+      hookAttachment('hn', 'hook_non_blocking_error'),
+      say('a', 'done'),
+    ])
+    expect(ids(r.rows)).toEqual(['p', 'hb', 'hs', 'a'])
+  })
+
+  test('a PostToolUseFailure blocking error after a failed result stays visible', () => {
+    const r = select([
+      prompt('p', 'go'),
+      use('u', 't'),
+      result('r', 't', { isError: true, content: 'boom' }),
+      hookAttachment('hb', 'hook_blocking_error', {
+        hookEvent: 'PostToolUseFailure',
+        hookName: 'PostToolUseFailure:Bash',
+        blockingError: { blockingError: 'no', command: 'x' },
+      }),
+      say('a', 'handled'),
+    ])
+    expect(ids(r.rows)).toEqual(['p', 'u', 'r', 'hb', 'a'])
+  })
+
+  test('the auto mode description warning stays visible where another warning hides', () => {
+    const r = select([
+      prompt('p', 'go'),
+      sys('w1', 'informational', {
+        level: 'warning',
+        content: AUTO_MODE_DESCRIPTION,
+      }),
+      use('u', 't'),
+      result('r', 't'),
+      say('a', 'done'),
+    ])
+    expect(ids(r.rows)).toContain('w1')
+    const other = select([
+      prompt('p', 'go'),
+      sys('w2', 'informational', {
+        level: 'warning',
+        content: 'some other warning',
+      }),
+      use('u', 't'),
+      result('r', 't'),
+      say('a', 'done'),
+    ])
+    expect(ids(other.rows)).not.toContain('w2')
+  })
+
+  test('a failed queued task notification stays visible', () => {
+    const r = select([
+      prompt('p', 'go'),
+      say('a', 'done'),
+      queued('q', { commandMode: 'task-notification', prompt: taskNotice('failed') }),
+    ])
+    expect(ids(r.rows)).toEqual(['p', 'a', 'q'])
+  })
+
+  test('a killed task notification in a user row stays visible', () => {
+    const r = select([
+      prompt('p', 'go'),
+      say('a', 'done'),
+      prompt('n', taskNotice('killed'), { isMeta: true }),
+    ])
+    expect(ids(r.rows)).toEqual(['p', 'a', 'n'])
+  })
+})
+
+describe('unseenDividerIndex', () => {
+  const row = (uuid: string, type = 'user', subtype?: string) => ({
+    uuid,
+    type,
+    subtype,
+  })
+
+  test('the exact-prefix match skips focus marker and summary rows', () => {
+    const prefix = 'x'.repeat(24)
+    const rows = [
+      row(`${prefix}marker`, 'system', 'focus_marker'),
+      row(`${prefix}prompt`),
+      row(`${prefix}summary`, 'system', 'focus_summary'),
+      row('a'.repeat(36), 'assistant'),
+    ]
+    expect(unseenDividerIndex(rows, rows, `${prefix}unseen`, true)).toBe(1)
+  })
+
+  test('an exact match outside focus view is unchanged', () => {
+    const rows = [row('a'.repeat(36)), row('b'.repeat(36))]
+    expect(unseenDividerIndex(rows, rows, 'b'.repeat(36), false)).toBe(1)
+  })
+
+  test('the focus fallback still anchors at the first renderable row after the hidden one', () => {
+    const normalized = [
+      row('a'.repeat(36)),
+      row('z'.repeat(36)),
+      row('b'.repeat(36), 'assistant'),
+    ]
+    const renderable = [normalized[0]!, normalized[2]!]
+    expect(unseenDividerIndex(renderable, normalized, 'z'.repeat(36), true)).toBe(1)
   })
 })

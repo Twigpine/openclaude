@@ -1,4 +1,5 @@
 import type { UUID } from 'crypto'
+import { AUTO_MODE_DESCRIPTION } from '../components/AutoModeOptInDialog.js'
 import { stripSystemReminders } from '../components/messageActions.js'
 import { countHunkLines, isFileEditResult } from '../hooks/useTurnDiffs.js'
 import {
@@ -15,8 +16,14 @@ import {
   SLASH_FORM_NOTICE,
   SYNTHETIC_MESSAGES,
   UNKNOWN_SKILL_PREFIX,
+  extractTag,
+  getContentText,
 } from './messages.js'
-import { LOCAL_COMMAND_CAVEAT_TAG } from '../constants/xml.js'
+import {
+  LOCAL_COMMAND_CAVEAT_TAG,
+  STATUS_TAG,
+  TASK_NOTIFICATION_TAG,
+} from '../constants/xml.js'
 import { getGlobalConfig } from './config.js'
 import { isFullscreenEnvEnabled } from './fullscreen.js'
 import { deriveUUID } from './messages/normalize.js'
@@ -55,11 +62,13 @@ export type FocusMessage = {
   toolUseResult?: unknown
   compactMetadata?: { trigger?: string }
   message?: { id?: string; content: string | FocusBlock[] }
+  content?: string
   attachment?: {
     type: string
     isMeta?: boolean
     origin?: unknown
     commandMode?: string
+    prompt?: unknown
   }
 }
 
@@ -181,6 +190,35 @@ function isInterrupt(m: FocusMessage): boolean {
   if (m.type !== 'user') return false
   const t = firstText(m)
   return t === INTERRUPT_MESSAGE || t === INTERRUPT_MESSAGE_FOR_TOOL_USE
+}
+
+/**
+ * Text that can carry a task notification: the queued prompt of a
+ * task-notification attachment, or the first text of a user row.
+ */
+function taskNotificationText(m: FocusMessage): string | undefined {
+  const a = m.attachment
+  if (a?.type === 'queued_command' && a.commandMode === 'task-notification') {
+    return typeof a.prompt === 'string'
+      ? a.prompt
+      : (getContentText(a.prompt as Parameters<typeof getContentText>[0]) ??
+          undefined)
+  }
+  if (m.type === 'user') return firstText(m)
+  return undefined
+}
+
+/**
+ * Failed and killed task notifications stay visible one by one; completed
+ * ones collapse elsewhere and are noise here.
+ */
+function isFailedTaskNotification(m: FocusMessage): boolean {
+  const text = taskNotificationText(m)
+  if (text === undefined || !text.includes(`<${TASK_NOTIFICATION_TAG}`)) {
+    return false
+  }
+  const status = extractTag(text, STATUS_TAG)
+  return status === 'failed' || status === 'killed'
 }
 
 function isCompactBoundary(m: FocusMessage): boolean {
@@ -442,11 +480,12 @@ function isFinalResponseText(
 }
 
 /**
- * Compact boundaries that end a turn. A boundary the query emits while the
- * latest prompt is still unanswered (auto or reactive compaction) belongs to
- * that turn and is not a boundary here. A boundary with no earlier prompt
- * (restored history), a manual one, or one after a turn that ended in a final
- * response (idle) is a boundary.
+ * Compact boundaries that end a turn. An automatic compaction after an
+ * earlier prompt belongs to that turn, answered or not (reactive mid-turn,
+ * or idle after the final response), and is never a boundary here. A
+ * boundary with no earlier prompt (restored history), a manual one, or one
+ * with no recorded trigger after a turn that ended in a final response is a
+ * boundary.
  */
 function turnEndingCompactions(
   messages: readonly FocusMessage[],
@@ -465,6 +504,7 @@ function turnEndingCompactions(
       out.push(c)
       return
     }
+    if (m.compactMetadata?.trigger === 'auto') return
     const lastTool = lastToolActivityIndex(messages, p + 1, c)
     for (let i = c - 1; i > lastTool; i--) {
       if (isFinalResponseText(messages[i]!, toolResponses)) {
@@ -621,10 +661,22 @@ export function selectFocusView<T extends FocusMessage>(
         keep.add(i)
       } else {
         const t = stripSystemReminders(firstText(m) ?? '')
-        if (SHELL_OUTPUT_TAGS.some(p => t.startsWith(p))) keep.add(i)
+        if (
+          SHELL_OUTPUT_TAGS.some(p => t.startsWith(p)) ||
+          isFailedTaskNotification(m)
+        ) {
+          keep.add(i)
+        }
       }
     } else if (m.type === 'attachment') {
-      if (m.attachment?.type === 'max_turns_reached') keep.add(i)
+      if (
+        m.attachment?.type === 'max_turns_reached' ||
+        m.attachment?.type === 'hook_blocking_error' ||
+        m.attachment?.type === 'hook_stopped_continuation' ||
+        isFailedTaskNotification(m)
+      ) {
+        keep.add(i)
+      }
     } else if (m.type === 'system') {
       if (m.subtype === 'api_error' || m.subtype === 'local_command') keep.add(i)
       else if (
@@ -640,7 +692,11 @@ export function selectFocusView<T extends FocusMessage>(
   // A warning that ends its segment is the reason it stopped. One followed by
   // more tool work or a final response in the same segment is routine.
   for (const w of warnings) {
-    if (w.index > segmentFinal[w.segment]! && w.index > segmentLastTool[w.segment]!) {
+    if (
+      messages[w.index]!.content === AUTO_MODE_DESCRIPTION ||
+      (w.index > segmentFinal[w.segment]! &&
+        w.index > segmentLastTool[w.segment]!)
+    ) {
       keep.add(w.index)
     }
   }
@@ -756,6 +812,42 @@ export function countUnseenFocusTurns(
     }
   }
   return count
+}
+
+/**
+ * Index of the renderable row the unseen divider goes before. The exact match
+ * uses the 24-char prefix normalizeMessages and deriveUUID share, skipping the
+ * focus marker and summary rows, which derive their uuid from the boundary
+ * prompt and would otherwise steal an unseen prompt's position. When focus
+ * view hides the first unseen row, the divider anchors on the first rendered
+ * row at or after it in the full list.
+ */
+export function unseenDividerIndex(
+  renderable: readonly { uuid: string; type?: string; subtype?: string }[],
+  normalized: readonly { uuid: string }[],
+  firstUnseenUuid: string,
+  isFocusView: boolean,
+): number {
+  const prefix = firstUnseenUuid.slice(0, 24)
+  const exact = renderable.findIndex(
+    m =>
+      m.uuid.slice(0, 24) === prefix &&
+      !(
+        m.type === 'system' &&
+        (m.subtype === 'focus_marker' || m.subtype === 'focus_summary')
+      ),
+  )
+  if (exact >= 0 || !isFocusView) return exact
+  const position = new Map<string, number>()
+  normalized.forEach((m, i) => {
+    const key = m.uuid.slice(0, 24)
+    if (!position.has(key)) position.set(key, i)
+  })
+  const unseenPosition = position.get(prefix)
+  if (unseenPosition === undefined) return -1
+  return renderable.findIndex(
+    m => (position.get(m.uuid.slice(0, 24)) ?? -1) >= unseenPosition,
+  )
 }
 
 /**
