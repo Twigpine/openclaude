@@ -561,6 +561,10 @@ export type GlobalConfig = {
   // Env var still takes precedence: =0 always off, =1 always on.
   flickerFreeMode?: boolean
 
+  // Focus view: in fullscreen, show only the latest prompt, a tool summary and
+  // the final response. Toggled by /focus or /config. undefined reads as off.
+  focusView?: boolean
+
   // Mouse wheel scroll speed multiplier (rows per wheel event, baseline 1).
   // Set via /scroll-speed. CLAUDE_CODE_SCROLL_SPEED env var takes precedence.
   scrollSpeed?: number
@@ -822,6 +826,7 @@ export const GLOBAL_CONFIG_KEYS = [
   'copyFullResponse',
   'copyOnSelect',
   'flickerFreeMode',
+  'focusView',
   'scrollSpeed',
   'permissionExplainerEnabled',
   'prStatusFooterEnabled',

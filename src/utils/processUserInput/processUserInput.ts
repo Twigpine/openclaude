@@ -7,7 +7,7 @@ import type {
 import { randomUUID } from 'crypto'
 import type { QuerySource } from 'src/constants/querySource.js'
 import { logEvent } from 'src/services/analytics/index.js'
-import { getContentText } from 'src/utils/messages.js'
+import { HOOK_STOPPED_MESSAGE, getContentText } from 'src/utils/messages.js'
 import {
   type Command,
   findCommand,
@@ -216,11 +216,12 @@ export async function processUserInput({
     // prompt in context.
     if (hookResult.preventContinuation) {
       const message = hookResult.stopReason
-        ? `Operation stopped by hook: ${hookResult.stopReason}`
-        : 'Operation stopped by hook'
+        ? `${HOOK_STOPPED_MESSAGE}: ${hookResult.stopReason}`
+        : HOOK_STOPPED_MESSAGE
       result.messages.push(
         createUserMessage({
           content: message,
+          isLocalNotice: true,
         }),
       )
       result.shouldQuery = false
@@ -443,7 +444,7 @@ async function processUserInputBase(
         const msg = `/${getCommandName(cmd)} isn't available over Remote Control.`
         return {
           messages: [
-            createUserMessage({ content: inputString, uuid }),
+            createUserMessage({ content: inputString, uuid, isLocalNotice: true }),
             createCommandInputMessage(
               `<local-command-stdout>${msg}</local-command-stdout>`,
             ),

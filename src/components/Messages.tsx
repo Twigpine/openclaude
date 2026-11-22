@@ -26,6 +26,7 @@ import { collapseReadSearchGroups } from '../utils/collapseReadSearch.js';
 import { collapseTeammateShutdowns } from '../utils/collapseTeammateShutdowns.js';
 import { getGlobalConfig } from '../utils/config.js';
 import { isEnvTruthy } from '../utils/envUtils.js';
+import { assembleFocusRows, selectFocusView, unseenDividerIndex } from '../utils/focusView.js';
 import { isFullscreenEnvEnabled } from '../utils/fullscreen.js';
 import { applyGrouping } from '../utils/groupToolUses.js';
 import { buildMessageLookups, createAssistantMessage, deriveUUID, getMessagesAfterCompactBoundary, getToolUseID, getToolUseIDs, hasUnresolvedHooksFromLookup, isNotEmptyMessage, normalizeMessages, normalizeMessagesCached, reorderMessagesInUI, type StreamingThinking, type StreamingToolUse, shouldShowUserMessage } from '../utils/messages.js';
@@ -235,6 +236,8 @@ type Props = {
   streamingText?: string | null;
   /** When true, only show Brief tool output (hide everything else) */
   isBriefOnly?: boolean;
+  /** Fullscreen focus view: show only the latest prompt, a tool summary and the final response. */
+  isFocusView?: boolean;
   /** Fullscreen-mode "─── N new ───" divider. Renders before the first
    *  renderableMessage derived from firstUnseenUuid (matched by the 24-char
    *  prefix that deriveUUID preserves). */
@@ -360,6 +363,7 @@ const MessagesImpl = ({
   streamingThinking,
   streamingText,
   isBriefOnly = false,
+  isFocusView = false,
   unseenDivider,
   scrollRef,
   trackStickyPrompt,
@@ -516,8 +520,15 @@ const MessagesImpl = ({
     // assistant text for file-only turns would leave the user with no context.
     const dropTextToolNames = [BRIEF_TOOL_NAME].filter((n_0): n_0 is string => n_0 !== null);
     const briefFiltered = briefToolNames.length > 0 && !isTranscriptMode ? isBriefOnly ? filterForBriefTool(messagesToShowNotTruncated, briefToolNames) : dropTextToolNames.length > 0 ? dropTextInBriefTurns(messagesToShowNotTruncated, dropTextToolNames) : messagesToShowNotTruncated : messagesToShowNotTruncated;
-    const messagesToShow = shouldTruncate ? briefFiltered.slice(-MAX_MESSAGES_TO_SHOW_IN_TRANSCRIPT_MODE) : briefFiltered;
-    const hasTruncatedMessages = shouldTruncate && briefFiltered.length > MAX_MESSAGES_TO_SHOW_IN_TRANSCRIPT_MODE;
+    // Focus view runs after the brief tier and before truncation and grouping,
+    // and never in the ctrl+o transcript, which stays unfiltered.
+    const focusFiltered = isFocusView && !isTranscriptMode ? assembleFocusRows(selectFocusView(briefFiltered, {
+      isLoading,
+      replyToolNames: new Set(dropTextToolNames),
+      syntheticToolUseIds: new Set(syntheticStreamingToolUseMessages.flatMap(m => m.message.content.flatMap(b => b.type === 'tool_use' ? [b.id] : [])))
+    })) : briefFiltered;
+    const messagesToShow = shouldTruncate ? focusFiltered.slice(-MAX_MESSAGES_TO_SHOW_IN_TRANSCRIPT_MODE) : focusFiltered;
+    const hasTruncatedMessages = shouldTruncate && focusFiltered.length > MAX_MESSAGES_TO_SHOW_IN_TRANSCRIPT_MODE;
     const {
       messages: groupedMessages
     } = applyGrouping(messagesToShow, tools, verbose);
@@ -530,7 +541,7 @@ const MessagesImpl = ({
       hasTruncatedMessages,
       hiddenMessageCount
     };
-  }, [verbose, normalizedMessages, isTranscriptMode, syntheticStreamingToolUseMessages, shouldTruncate, tools, isBriefOnly]);
+  }, [verbose, normalizedMessages, isTranscriptMode, syntheticStreamingToolUseMessages, shouldTruncate, tools, isBriefOnly, isFocusView, isFocusView && isLoading]);
 
   // Cheap slice — only runs when scroll range or slice config changes.
   const renderableMessages = useMemo(() => {
@@ -552,9 +563,8 @@ const MessagesImpl = ({
   // chars of the source message uuid, so this matches any block from it).
   const dividerBeforeIndex = useMemo(() => {
     if (!unseenDivider) return -1;
-    const prefix = unseenDivider.firstUnseenUuid.slice(0, 24);
-    return renderableMessages.findIndex(m => m.uuid.slice(0, 24) === prefix);
-  }, [unseenDivider, renderableMessages]);
+    return unseenDividerIndex(renderableMessages, normalizedMessages, unseenDivider.firstUnseenUuid, isFocusView);
+  }, [unseenDivider, renderableMessages, isFocusView, normalizedMessages]);
   const selectedIdx = useMemo(() => {
     if (!cursor) return -1;
     return renderableMessages.findIndex(m_0 => m_0.uuid === cursor.uuid);
@@ -701,7 +711,7 @@ const MessagesImpl = ({
           passing the array would accumulate every historical version
           (~1-2MB over a 7-turn session). */}
       {virtualScrollRuntimeGate ? <InVirtualListContext.Provider value={true}>
-          <VirtualMessageList messages={renderableMessages} scrollRef={scrollRef} columns={columns} itemKey={messageKey} renderItem={renderMessageRow} onItemClick={onItemClick} isItemClickable={isItemClickable} isItemExpanded={isItemExpanded} trackStickyPrompt={trackStickyPrompt} selectedIndex={selectedIdx >= 0 ? selectedIdx : undefined} cursorNavRef={cursorNavRef} setCursor={setCursor} jumpRef={jumpRef} onSearchMatchesChange={onSearchMatchesChange} scanElement={scanElement} setPositions={setPositions} extractSearchText={extractSearchText} />
+          <VirtualMessageList messages={renderableMessages} scrollRef={scrollRef} columns={columns} itemKey={messageKey} renderItem={renderMessageRow} onItemClick={onItemClick} isItemClickable={isItemClickable} isItemExpanded={isItemExpanded} trackStickyPrompt={trackStickyPrompt} selectedIndex={selectedIdx >= 0 ? selectedIdx : undefined} cursorNavRef={cursorNavRef} setCursor={setCursor} jumpRef={jumpRef} onSearchMatchesChange={onSearchMatchesChange} scanElement={scanElement} setPositions={setPositions} extractSearchText={extractSearchText} rekeyOnChange={isFocusView} />
         </InVirtualListContext.Provider> : renderableMessages.flatMap(renderMessageRow)}
 
       {streamingText && !isBriefOnly && <Box alignItems="flex-start" flexDirection="row" marginTop={1} width="100%">
@@ -715,7 +725,7 @@ const MessagesImpl = ({
           </Box>
         </Box>}
 
-      {isStreamingThinkingVisible && streamingThinking && !isBriefOnly && <Box marginTop={1}>
+      {isStreamingThinkingVisible && streamingThinking && !isBriefOnly && !isFocusView && <Box marginTop={1}>
           <AssistantThinkingMessage param={{
         type: 'thinking',
         thinking: streamingThinking.thinking
@@ -817,7 +827,9 @@ export function shouldRenderStatically(message: RenderableMessage, streamingTool
       {
         // api errors always render dynamically, since we hide
         // them as soon as we see another non-error message.
-        return message.subtype !== 'api_error';
+        // The focus summary updates in place under a stable uuid, so it must
+        // keep re-rendering.
+        return message.subtype !== 'api_error' && message.subtype !== 'focus_summary';
       }
     case 'grouped_tool_use':
       {

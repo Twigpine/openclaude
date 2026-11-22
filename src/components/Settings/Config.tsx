@@ -828,6 +828,29 @@ export function Config({
         value: String(flickerFreeMode) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
       });
     }
+  }, {
+    id: 'focusView',
+    label: 'Focus view',
+    value: globalConfig.focusView ?? false,
+    type: 'boolean' as const,
+    onChange(focusView: boolean) {
+      saveGlobalConfig(current => ({
+        ...current,
+        focusView
+      }));
+      // The save can be skipped (permission error), so show and log what is stored.
+      const stored = getGlobalConfig().focusView ?? false;
+      setGlobalConfig({
+        ...getGlobalConfig(),
+        focusView: stored
+      });
+      if (stored === focusView) {
+        logEvent('tengu_config_changed', {
+          setting: 'focusView' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          value: String(focusView) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
+        });
+      }
+    }
   },
   // autoUpdates setting is hidden - use DISABLE_AUTOUPDATER env var to control
   autoUpdaterDisabledReason ? {

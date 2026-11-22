@@ -29,7 +29,7 @@ import { toArray } from '../generators.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 import { logError } from '../log.js';
 import { enqueuePendingNotification } from '../messageQueueManager.js';
-import { createCommandInputMessage, createSyntheticUserCaveatMessage, createSystemMessage, createUserInterruptionMessage, createUserMessage, formatCommandInputTags, isCompactBoundaryMessage, isSystemLocalCommandMessage, normalizeMessages, prepareUserContent } from '../messages.js';
+import { createCommandInputMessage, createSyntheticUserCaveatMessage, createSystemMessage, createUserInterruptionMessage, createUserMessage, formatCommandInputTags, isCompactBoundaryMessage, isSystemLocalCommandMessage, MODEL_ONLY_SKILL_PREFIX, MODEL_ONLY_SKILL_SUFFIX, normalizeMessages, prepareUserContent, SLASH_FORM_NOTICE, UNKNOWN_SKILL_PREFIX } from '../messages.js';
 import type { ModelAlias } from '../model/aliases.js';
 import { parseToolListFromCLI } from '../permissions/permissionSetup.js';
 import { hasPermissionsToUseTool } from '../permissions/permissions.js';
@@ -317,13 +317,14 @@ export async function processSlashCommand(inputString: string, precedingInputBlo
   const parsed = parseSlashCommand(inputString);
   if (!parsed) {
     logEvent('tengu_input_slash_missing', {});
-    const errorMessage = 'Commands are in the form `/command [args]`';
+    const errorMessage = SLASH_FORM_NOTICE;
     return {
       messages: [createSyntheticUserCaveatMessage(), ...attachmentMessages, createUserMessage({
         content: prepareUserContent({
           inputString: errorMessage,
           precedingInputBlocks
-        })
+        }),
+        isLocalNotice: true
       })],
       shouldQuery: false,
       resultText: errorMessage
@@ -351,13 +352,14 @@ export async function processSlashCommand(inputString: string, precedingInputBlo
       logEvent('tengu_input_slash_invalid', {
         input: commandName as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
       });
-      const unknownMessage = `Unknown skill: ${commandName}`;
+      const unknownMessage = `${UNKNOWN_SKILL_PREFIX}${commandName}`;
       return {
         messages: [createSyntheticUserCaveatMessage(), ...attachmentMessages, createUserMessage({
           content: prepareUserContent({
             inputString: unknownMessage,
             precedingInputBlocks
-          })
+          }),
+          isLocalNotice: true
         }),
         // gh-32591: preserve args so the user can copy/resubmit without
         // retyping. System warning is UI-only (filtered before API).
@@ -526,7 +528,8 @@ async function getMessagesForSlashCommand(commandName: string, args: string, set
           precedingInputBlocks
         })
       }), createUserMessage({
-        content: `This skill can only be invoked by Claude, not directly by users. Ask Claude to use the "${commandName}" skill for you.`
+        content: `${MODEL_ONLY_SKILL_PREFIX}${commandName}${MODEL_ONLY_SKILL_SUFFIX}`,
+        isLocalNotice: true
       })],
       shouldQuery: false,
       command

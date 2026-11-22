@@ -1,0 +1,888 @@
+import type { UUID } from 'crypto'
+import { AUTO_MODE_DESCRIPTION } from '../components/AutoModeOptInDialog.js'
+import { stripSystemReminders } from '../components/messageActions.js'
+import { countHunkLines, isFileEditResult } from '../hooks/useTurnDiffs.js'
+import {
+  CANCEL_MESSAGE,
+  INTERRUPT_MESSAGE,
+  INTERRUPT_MESSAGE_FOR_TOOL_USE,
+  PLAN_REJECTION_PREFIX,
+  REJECT_MESSAGE,
+  REJECT_MESSAGE_WITH_REASON_PREFIX,
+  SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
+  HOOK_STOPPED_MESSAGE,
+  MODEL_ONLY_SKILL_PREFIX,
+  MODEL_ONLY_SKILL_SUFFIX,
+  SLASH_FORM_NOTICE,
+  SYNTHETIC_MESSAGES,
+  UNKNOWN_SKILL_PREFIX,
+  extractTag,
+  getContentText,
+} from './messages.js'
+import {
+  LOCAL_COMMAND_CAVEAT_TAG,
+  STATUS_TAG,
+  TASK_NOTIFICATION_TAG,
+} from '../constants/xml.js'
+import { getGlobalConfig } from './config.js'
+import { isFullscreenEnvEnabled } from './fullscreen.js'
+import { deriveUUID } from './messages/normalize.js'
+import type {
+  SystemFocusMarkerMessage,
+  SystemFocusSummaryMessage,
+} from '../types/message.js'
+
+type FocusBlock = {
+  type: string
+  text?: string
+  id?: string
+  name?: string
+  tool_use_id?: string
+  is_error?: boolean
+  content?: unknown
+}
+
+/**
+ * The message shape focus view reads. Structural, like filterForBriefTool,
+ * so tests can build messages by hand and real Message values fit.
+ */
+export type FocusMessage = {
+  type: string
+  subtype?: string
+  uuid?: string
+  timestamp?: string
+  level?: string
+  isMeta?: boolean
+  isCompactSummary?: boolean
+  isLocalNotice?: boolean
+  isApiErrorMessage?: boolean
+  origin?: unknown
+  hookErrors?: unknown[]
+  preventedContinuation?: boolean
+  toolUseResult?: unknown
+  compactMetadata?: { trigger?: string }
+  message?: { id?: string; content: string | FocusBlock[] }
+  content?: string
+  attachment?: {
+    type: string
+    isMeta?: boolean
+    origin?: unknown
+    commandMode?: string
+    prompt?: unknown
+  }
+}
+
+export type FocusSummary = {
+  toolCount: number
+  linesAdded: number
+  linesRemoved: number
+  failed: number
+}
+
+export type FocusOptions = {
+  /** True while a turn is in flight. */
+  isLoading?: boolean
+  /** tool_use ids of the synthetic streaming rows Messages appends. */
+  syntheticToolUseIds?: ReadonlySet<string>
+  /**
+   * Tools whose result is the reply the user reads (SendUserMessage). Their
+   * call and successful result stay visible and are not counted as tool use.
+   */
+  replyToolNames?: ReadonlySet<string>
+}
+
+export type FocusSelection<T> = {
+  /**
+   * Kept rows in source order. When a boundary exists, the first row is the
+   * boundary (the latest prompt, or the compaction boundary row). With no
+   * boundary this is the input array itself.
+   */
+  rows: T[]
+  /** Prompt turns before the boundary. */
+  hiddenTurns: number
+  /** True when the boundary is a compaction with no prompt since. */
+  compacted: boolean
+  summary: FocusSummary
+  /** The boundary row, for deriving stable ids. Undefined when none exists. */
+  boundary: T | undefined
+}
+
+const EMPTY_SUMMARY: FocusSummary = {
+  toolCount: 0,
+  linesAdded: 0,
+  linesRemoved: 0,
+  failed: 0,
+}
+
+const SHELL_OUTPUT_TAGS = ['<bash-input>', '<bash-stdout>', '<bash-stderr>']
+const NON_PROMPT_TAGS = [
+  ...SHELL_OUTPUT_TAGS,
+  '<local-command-',
+  '<task-notification>',
+  '<teammate-message>',
+  '<system-reminder>',
+]
+const COMMAND_TAG = '<command-name>'
+
+const REJECTION_PREFIXES = [
+  CANCEL_MESSAGE,
+  REJECT_MESSAGE,
+  REJECT_MESSAGE_WITH_REASON_PREFIX,
+  SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
+  PLAN_REJECTION_PREFIX,
+]
+
+function blocksOf(m: FocusMessage): FocusBlock[] {
+  const c = m.message?.content
+  if (c === undefined) return []
+  return typeof c === 'string' ? [{ type: 'text', text: c }] : c
+}
+
+function firstText(m: FocusMessage): string | undefined {
+  return blocksOf(m).find(b => b.type === 'text')?.text
+}
+
+function toolResultOf(m: FocusMessage): FocusBlock | undefined {
+  if (m.type !== 'user') return undefined
+  return blocksOf(m).find(b => b.type === 'tool_result')
+}
+
+function isAdvisorCall(b: FocusBlock): boolean {
+  return b.type === 'server_tool_use' && b.name === 'advisor'
+}
+
+function isAdvisorActivity(b: FocusBlock): boolean {
+  return isAdvisorCall(b) || b.type === 'advisor_tool_result'
+}
+
+function isAdvisorError(b: FocusBlock): boolean {
+  return (
+    b.type === 'advisor_tool_result' &&
+    (b.content as { type?: unknown } | undefined)?.type === 'advisor_tool_result_error'
+  )
+}
+
+function toolUsesOf(m: FocusMessage): FocusBlock[] {
+  if (m.type !== 'assistant') return []
+  return blocksOf(m).filter(b => b.type === 'tool_use')
+}
+
+function resultText(b: FocusBlock): string {
+  if (typeof b.content === 'string') return b.content
+  if (Array.isArray(b.content)) {
+    return b.content
+      .map(x => (x && typeof x === 'object' && 'text' in x ? String(x.text) : ''))
+      .join('')
+  }
+  return ''
+}
+
+function isRejection(b: FocusBlock): boolean {
+  if (!b.is_error) return false
+  const t = resultText(b)
+  return (
+    t === INTERRUPT_MESSAGE_FOR_TOOL_USE ||
+    REJECTION_PREFIXES.some(p => t.startsWith(p))
+  )
+}
+
+function isInterrupt(m: FocusMessage): boolean {
+  if (m.type !== 'user') return false
+  const t = firstText(m)
+  return t === INTERRUPT_MESSAGE || t === INTERRUPT_MESSAGE_FOR_TOOL_USE
+}
+
+/**
+ * Text that can carry a task notification: the queued prompt of a
+ * task-notification attachment, or the first text of a user row.
+ */
+function taskNotificationText(m: FocusMessage): string | undefined {
+  const a = m.attachment
+  if (a?.type === 'queued_command' && a.commandMode === 'task-notification') {
+    return typeof a.prompt === 'string'
+      ? a.prompt
+      : (getContentText(a.prompt as Parameters<typeof getContentText>[0]) ??
+          undefined)
+  }
+  if (m.type === 'user') return firstText(m)
+  return undefined
+}
+
+/**
+ * Failed and killed task notifications stay visible one by one; completed
+ * ones collapse elsewhere and are noise here.
+ */
+function isFailedTaskNotification(m: FocusMessage): boolean {
+  const text = taskNotificationText(m)
+  if (text === undefined || !text.includes(`<${TASK_NOTIFICATION_TAG}`)) {
+    return false
+  }
+  const status = extractTag(text, STATUS_TAG)
+  return status === 'failed' || status === 'killed'
+}
+
+function isCompactBoundary(m: FocusMessage): boolean {
+  return m.type === 'system' && m.subtype === 'compact_boundary'
+}
+
+function isScheduledFire(m: FocusMessage): boolean {
+  return m.type === 'system' && m.subtype === 'scheduled_task_fire'
+}
+
+function isLocalCommandOutput(m: FocusMessage): boolean {
+  if (m.type === 'system') return m.subtype === 'local_command'
+  if (m.type !== 'user') return false
+  const t = firstText(m) ?? ''
+  return (
+    t.startsWith('<local-command-stdout>') ||
+    t.startsWith('<local-command-stderr>')
+  )
+}
+
+function hasVisibleText(m: FocusMessage): boolean {
+  return blocksOf(m).some(b => b.type === 'text' && (b.text ?? '').trim() !== '')
+}
+
+/**
+ * Typed input has no origin. A channel message is a real question from a
+ * person, so it starts a turn too; coordinator and task-notification rows are
+ * written by the system and do not.
+ */
+function isPromptOrigin(origin: unknown): boolean {
+  return (
+    origin === undefined ||
+    (typeof origin === 'object' &&
+      origin !== null &&
+      (origin as { kind?: unknown }).kind === 'channel')
+  )
+}
+
+type CandidateKind = 'prompt' | 'command'
+
+/**
+ * A message that could start a turn, before slash-command classification.
+ * legacyNotice marks a row that predates isLocalNotice (see legacyNoticeIndices).
+ */
+function candidateKind(
+  m: FocusMessage,
+  legacyNotice = false,
+): CandidateKind | undefined {
+  if (m.type === 'attachment') {
+    const a = m.attachment
+    return a?.type === 'queued_command' &&
+      a.commandMode === 'prompt' &&
+      !a.isMeta &&
+      isPromptOrigin(a.origin)
+      ? 'prompt'
+      : undefined
+  }
+  if (m.type !== 'user') return undefined
+  if (
+    m.isMeta ||
+    m.isCompactSummary ||
+    m.isLocalNotice ||
+    legacyNotice ||
+    !isPromptOrigin(m.origin)
+  ) {
+    return undefined
+  }
+  const blocks = blocksOf(m)
+  if (blocks.some(b => b.type === 'tool_result')) return undefined
+  const rawText = firstText(m)
+  if (rawText !== undefined && SYNTHETIC_MESSAGES.has(rawText)) return undefined
+  const hasImage = blocks.some(b => b.type === 'image')
+  if (rawText === undefined && !hasImage) return undefined
+  const text = stripSystemReminders(rawText ?? '')
+  if (text.startsWith(COMMAND_TAG)) return 'command'
+  if (NON_PROMPT_TAGS.some(t => text.startsWith(t))) return undefined
+  if (text === '' && !hasImage) return undefined
+  return 'prompt'
+}
+
+const UNKNOWN_SKILL_NOTICE = new RegExp(
+  `^${UNKNOWN_SKILL_PREFIX}[a-zA-Z0-9:_-]+$`,
+)
+
+/**
+ * Indices of rows that are local notices without the isLocalNotice flag, which
+ * only rows written before the flag existed lack (a resumed transcript). The
+ * input pipeline wrote four shapes. A hook stop, with or without a reason,
+ * follows the prompt it stopped. A model-only skill notice follows the typed
+ * `/name` row it answers. An unknown-skill notice (a bare command token) and
+ * the slash-form notice follow the synthetic caveat row. The text alone cannot
+ * be told from typed text, so each shape counts only where the pipeline wrote
+ * it: never after an assistant reply or an interrupt. Text that merely starts
+ * like a notice stays a prompt.
+ */
+function legacyNoticeIndices(messages: readonly FocusMessage[]): Set<number> {
+  const out = new Set<number>()
+  messages.forEach((m, i) => {
+    if (m.type !== 'user' || m.isLocalNotice || m.isMeta || m.origin !== undefined) {
+      return
+    }
+    if (blocksOf(m).some(b => b.type === 'tool_result')) return
+    const text = firstText(m)
+    if (text === undefined) return
+    const afterCaveat =
+      UNKNOWN_SKILL_NOTICE.test(text) || text === SLASH_FORM_NOTICE
+    const isHookStop =
+      text === HOOK_STOPPED_MESSAGE || text.startsWith(`${HOOK_STOPPED_MESSAGE}: `)
+    const skillName =
+      text.startsWith(MODEL_ONLY_SKILL_PREFIX) && text.endsWith(MODEL_ONLY_SKILL_SUFFIX)
+        ? text.slice(MODEL_ONLY_SKILL_PREFIX.length, -MODEL_ONLY_SKILL_SUFFIX.length)
+        : undefined
+    const isModelOnly = skillName !== undefined && skillName !== ''
+    if (!afterCaveat && !isHookStop && !isModelOnly) return
+    // A caveat-led notice can arrive as [image, text] in one submission (array
+    // input), which normalization splits into rows. Look for the caveat before
+    // the submission's first row and mark every row of it.
+    const key = afterCaveat ? sourceKey(m) : undefined
+    let p = i - 1
+    const submission = [i]
+    while (p >= 0) {
+      const row = messages[p]!
+      if (row.type === 'attachment') p--
+      else if (key !== undefined && sourceKey(row) === key) submission.push(p--)
+      else break
+    }
+    const prev = p >= 0 ? messages[p]! : undefined
+    if (prev === undefined) return
+    // Caveat-led notices are written right after the synthetic caveat row; a
+    // hook stop right after the prompt it stopped; a model-only skill notice
+    // right after the typed `/name` row.
+    const afterWriterRow = afterCaveat
+      ? prev.type === 'user' &&
+        prev.isMeta === true &&
+        (firstText(prev) ?? '').startsWith(`<${LOCAL_COMMAND_CAVEAT_TAG}>`)
+      : isModelOnly
+        ? candidateKind(prev) === 'prompt' &&
+          sourceKey(prev) !== sourceKey(m) &&
+          firstText(prev) === `/${skillName}`
+        : candidateKind(prev) !== undefined && sourceKey(prev) !== sourceKey(m)
+    if (afterWriterRow) for (const j of submission) out.add(j)
+  })
+  return out
+}
+
+/**
+ * normalizeMessages splits one submitted message into a row per content block
+ * and derives every row's uuid from the original, keeping its first 24
+ * characters. Rows with the same prefix therefore come from one submission.
+ */
+function sourceKey(m: FocusMessage): string | undefined {
+  return m.type === 'user' && m.uuid ? m.uuid.slice(0, 24) : undefined
+}
+
+/** user rows of the list grouped by the submission they were split from. */
+function submissionGroups(
+  messages: readonly FocusMessage[],
+): Map<string, number[]> {
+  const groups = new Map<string, number[]>()
+  messages.forEach((m, i) => {
+    const key = sourceKey(m)
+    if (key === undefined) return
+    const g = groups.get(key)
+    if (g) g.push(i)
+    else groups.set(key, [i])
+  })
+  return groups
+}
+
+/**
+ * Indices of every row that starts a prompt turn, with slash commands
+ * classified: a command invocation is a prompt only when no local command
+ * output follows it before the next candidate and either an assistant
+ * message follows or it is the last candidate during a turn in flight.
+ * Rows split from one submission count once, at the group's first row, and a
+ * submission that carries a tool_result (permission feedback) is not a prompt.
+ */
+function promptBoundaryIndices(
+  messages: readonly FocusMessage[],
+  isLoading: boolean,
+  legacy: ReadonlySet<number>,
+): number[] {
+  const groups = submissionGroups(messages)
+  const kindAt = (j: number) => candidateKind(messages[j]!, legacy.has(j))
+  const candidates: Array<{ index: number; kind: CandidateKind }> = []
+  messages.forEach((m, index) => {
+    const kind = kindAt(index)
+    if (!kind) return
+    const key = sourceKey(m)
+    const group = key === undefined ? undefined : groups.get(key)
+    if (group) {
+      if (group.some(j => toolResultOf(messages[j]!))) return
+      const first = group.find(j => kindAt(j))
+      if (first !== index) return
+      const kinds = group.map(kindAt)
+      candidates.push({ index, kind: kinds.includes('command') ? 'command' : kind })
+      return
+    }
+    candidates.push({ index, kind })
+  })
+  const out: number[] = []
+  candidates.forEach((c, n) => {
+    if (c.kind === 'prompt') {
+      out.push(c.index)
+      return
+    }
+    const next = candidates[n + 1]
+    const end = next ? next.index : messages.length
+    let hasOutput = false
+    let hasAssistant = false
+    for (let j = c.index + 1; j < end; j++) {
+      const m = messages[j]!
+      if (isLocalCommandOutput(m)) hasOutput = true
+      else if (m.type === 'assistant') hasAssistant = true
+    }
+    if (!hasOutput && (hasAssistant || (!next && isLoading))) out.push(c.index)
+  })
+  return out
+}
+
+/**
+ * Index of the last row in [from, to) that is a tool call or tool result,
+ * Advisor calls and results included.
+ */
+function lastToolActivityIndex(
+  messages: readonly FocusMessage[],
+  from: number,
+  to: number,
+): number {
+  for (let i = to - 1; i >= from; i--) {
+    const m = messages[i]!
+    if (toolResultOf(m) || toolUsesOf(m).length > 0) return i
+    if (m.type === 'assistant' && blocksOf(m).some(isAdvisorActivity)) return i
+  }
+  return from - 1
+}
+
+/**
+ * ids of API responses that called a tool. Tools run after their response
+ * completes, so text from such a response was emitted before the results and
+ * is narration whatever position display reordering gave it.
+ */
+function toolCallingResponseIds(messages: readonly FocusMessage[]): Set<string> {
+  const ids = new Set<string>()
+  for (const m of messages) {
+    const id = m.message?.id
+    if (id !== undefined && toolUsesOf(m).length > 0) ids.add(id)
+  }
+  return ids
+}
+
+function isFinalResponseText(
+  m: FocusMessage,
+  toolResponses: ReadonlySet<string>,
+): boolean {
+  if (m.type !== 'assistant' || m.isApiErrorMessage || !hasVisibleText(m)) return false
+  const id = m.message?.id
+  return id === undefined || !toolResponses.has(id)
+}
+
+/**
+ * Compact boundaries that end a turn. An automatic compaction after an
+ * earlier prompt belongs to that turn, answered or not (reactive mid-turn,
+ * or idle after the final response), and is never a boundary here. A
+ * boundary with no earlier prompt (restored history), a manual one, or one
+ * with no recorded trigger after a turn that ended in a final response is a
+ * boundary.
+ */
+function turnEndingCompactions(
+  messages: readonly FocusMessage[],
+  prompts: readonly number[],
+): number[] {
+  const out: number[] = []
+  const toolResponses = toolCallingResponseIds(messages)
+  messages.forEach((m, c) => {
+    if (!isCompactBoundary(m)) return
+    let p = -1
+    for (const i of prompts) if (i < c) p = i
+    const prev = out.length > 0 ? out[out.length - 1]! : -1
+    // A manual compaction is the user's own command, so it ends the turn with
+    // or without answer text (an interrupted or tool-only turn has none).
+    if (p === -1 || p < prev || m.compactMetadata?.trigger === 'manual') {
+      out.push(c)
+      return
+    }
+    if (m.compactMetadata?.trigger === 'auto') return
+    const lastTool = lastToolActivityIndex(messages, p + 1, c)
+    for (let i = c - 1; i > lastTool; i--) {
+      if (isFinalResponseText(messages[i]!, toolResponses)) {
+        out.push(c)
+        return
+      }
+    }
+  })
+  return out
+}
+
+function addEditLines(result: unknown, into: FocusSummary): void {
+  if (!isFileEditResult(result)) return
+  const isCreate = 'type' in result && result.type === 'create'
+  // A create result from another producer, or a restored payload, can lack it.
+  const patch = Array.isArray(result.structuredPatch) ? result.structuredPatch : []
+  if (isCreate && patch.length === 0 && 'content' in result) {
+    // Same convention as the diff path: a trailing newline ends the last line
+    // instead of starting another, and empty content adds nothing.
+    const c = result.content
+    into.linesAdded += c === '' ? 0 : c.split('\n').length - (c.endsWith('\n') ? 1 : 0)
+    return
+  }
+  const { added, removed } = countHunkLines(patch)
+  into.linesAdded += added
+  into.linesRemoved += removed
+}
+
+/**
+ * Decides which rows focus view shows for the given message list: the latest
+ * turn's prompt, its failures, interrupts, local command output and final
+ * response, plus counts for the summary line and the hidden earlier turns.
+ * Returns the input unchanged when there is no turn boundary.
+ */
+export function selectFocusView<T extends FocusMessage>(
+  messages: T[],
+  options: FocusOptions = {},
+): FocusSelection<T> {
+  const synthetic = options.syntheticToolUseIds
+  const legacy = legacyNoticeIndices(messages)
+  const prompts = promptBoundaryIndices(messages, options.isLoading ?? false, legacy)
+  let boundaryIdx = prompts.length > 0 ? prompts[prompts.length - 1]! : -1
+  const compactions = turnEndingCompactions(messages, prompts)
+  const lastCompaction = compactions.length > 0 ? compactions[compactions.length - 1]! : -1
+  if (lastCompaction > boundaryIdx) boundaryIdx = lastCompaction
+  if (boundaryIdx < 0) {
+    return {
+      rows: messages,
+      hiddenTurns: 0,
+      compacted: false,
+      summary: { ...EMPTY_SUMMARY },
+      boundary: undefined,
+    }
+  }
+  const boundary = messages[boundaryIdx]!
+  const boundaryKey = sourceKey(boundary)
+  const siblings = new Set<number>(
+    boundaryKey === undefined
+      ? []
+      : (submissionGroups(messages).get(boundaryKey) ?? []).filter(
+          j => j > boundaryIdx && candidateKind(messages[j]!, legacy.has(j)) !== undefined,
+        ),
+  )
+  const hiddenTurns = prompts.filter(i => i < boundaryIdx).length
+  const summary = { ...EMPTY_SUMMARY }
+  const isSynthetic = (m: FocusMessage) =>
+    toolUsesOf(m).some(b => b.id !== undefined && synthetic?.has(b.id))
+
+  const start = boundaryIdx + 1
+  // A scheduled run's marker splits the rows after the boundary: tool activity
+  // and final-response rules apply per segment, and only the typed segment
+  // feeds the summary.
+  const fires: number[] = []
+  for (let i = start; i < messages.length; i++) {
+    if (isScheduledFire(messages[i]!)) fires.push(i)
+  }
+  const edges = [start, ...fires, messages.length]
+  const segmentLastTool = edges
+    .slice(0, -1)
+    .map((from, k) => lastToolActivityIndex(messages, from, edges[k + 1]!))
+  const toolResponses = toolCallingResponseIds(messages)
+  const replyTools = options.replyToolNames
+  const replyCalls = new Map<string, number>()
+  const keep = new Set<number>()
+  const callLineIdx = new Map<string, number>()
+  const segmentInterrupt = segmentLastTool.map(() => -1)
+  const segmentFinal = segmentLastTool.map(() => -1)
+  let segment = 0
+  const warnings: Array<{ index: number; segment: number }> = []
+  const rejections: Array<{ index: number; segment: number; toolUseId: string | undefined }> = []
+
+  for (let i = start; i < messages.length; i++) {
+    const m = messages[i]!
+    while (segment < fires.length && i > fires[segment]!) segment++
+    const typed = segment === 0
+    if (siblings.has(i)) keep.add(i)
+    if (m.type === 'assistant') {
+      for (const b of toolUsesOf(m)) {
+        if (b.id !== undefined && synthetic?.has(b.id)) continue
+        if (b.id !== undefined && b.name !== undefined && replyTools?.has(b.name)) {
+          replyCalls.set(b.id, i)
+          continue
+        }
+        if (typed) summary.toolCount++
+        if (b.id !== undefined) callLineIdx.set(b.id, i)
+      }
+      for (const b of blocksOf(m)) {
+        if (isAdvisorCall(b)) {
+          if (typed) summary.toolCount++
+          if (b.id !== undefined) callLineIdx.set(b.id, i)
+        } else if (isAdvisorError(b)) {
+          if (typed) summary.failed++
+          keep.add(i)
+          const call = b.tool_use_id !== undefined ? callLineIdx.get(b.tool_use_id) : undefined
+          if (call !== undefined) keep.add(call)
+        }
+      }
+      if (m.isApiErrorMessage) keep.add(i)
+      else if (i > segmentLastTool[segment]! && isFinalResponseText(m, toolResponses)) {
+        keep.add(i)
+        segmentFinal[segment] = i
+      }
+    } else if (m.type === 'user') {
+      const tr = toolResultOf(m)
+      if (tr) {
+        const reply = tr.tool_use_id !== undefined ? replyCalls.get(tr.tool_use_id) : undefined
+        if (reply !== undefined && !tr.is_error) {
+          keep.add(i)
+          keep.add(reply)
+          continue
+        }
+        const agentCount = (m.toolUseResult as { totalToolUseCount?: unknown } | undefined)
+          ?.totalToolUseCount
+        if (typed) {
+          if (typeof agentCount === 'number') summary.toolCount += agentCount
+          addEditLines(m.toolUseResult, summary)
+        }
+        if (isRejection(tr)) rejections.push({ index: i, segment, toolUseId: tr.tool_use_id })
+        else if (tr.is_error) {
+          if (typed) summary.failed++
+          keep.add(i)
+          const call = tr.tool_use_id !== undefined ? callLineIdx.get(tr.tool_use_id) : undefined
+          if (call !== undefined) keep.add(call)
+        }
+      } else if (isInterrupt(m)) {
+        keep.add(i)
+        segmentInterrupt[segment] = i
+      } else if (
+        m.isLocalNotice ||
+        legacy.has(i) ||
+        candidateKind(m) === 'command' ||
+        isLocalCommandOutput(m)
+      ) {
+        keep.add(i)
+      } else {
+        const t = stripSystemReminders(firstText(m) ?? '')
+        if (
+          SHELL_OUTPUT_TAGS.some(p => t.startsWith(p)) ||
+          isFailedTaskNotification(m)
+        ) {
+          keep.add(i)
+        }
+      }
+    } else if (m.type === 'attachment') {
+      if (
+        m.attachment?.type === 'max_turns_reached' ||
+        m.attachment?.type === 'hook_blocking_error' ||
+        m.attachment?.type === 'hook_stopped_continuation' ||
+        isFailedTaskNotification(m)
+      ) {
+        keep.add(i)
+      }
+    } else if (m.type === 'system') {
+      if (m.subtype === 'api_error' || m.subtype === 'local_command') keep.add(i)
+      else if (
+        m.subtype === 'stop_hook_summary' &&
+        ((m.hookErrors?.length ?? 0) > 0 || m.preventedContinuation)
+      ) {
+        keep.add(i)
+      } else if (m.level === 'error') keep.add(i)
+      else if (m.level === 'warning') warnings.push({ index: i, segment })
+    }
+  }
+
+  // A warning that ends its segment is the reason it stopped. One followed by
+  // more tool work or a final response in the same segment is routine.
+  for (const w of warnings) {
+    if (
+      messages[w.index]!.content === AUTO_MODE_DESCRIPTION ||
+      (w.index > segmentFinal[w.segment]! &&
+        w.index > segmentLastTool[w.segment]!)
+    ) {
+      keep.add(w.index)
+    }
+  }
+  for (const r of rejections) {
+    if (segmentInterrupt[r.segment]! > r.index) continue
+    keep.add(r.index)
+    const call = r.toolUseId !== undefined ? callLineIdx.get(r.toolUseId) : undefined
+    if (call !== undefined) keep.add(call)
+  }
+
+  const rows: T[] = [boundary]
+  for (let i = start; i < messages.length; i++) {
+    if (keep.has(i) && !isSynthetic(messages[i]!)) rows.push(messages[i]!)
+  }
+  return {
+    rows,
+    hiddenTurns,
+    compacted: isCompactBoundary(boundary),
+    summary,
+    boundary,
+  }
+}
+
+/**
+ * Block indices normalizeMessages uses count up from 0 and never reach these,
+ * so synthetic row ids cannot equal a normalized row id with the same prefix.
+ */
+const FOCUS_MARKER_SUFFIX = 0xf0c5_0000_0000
+const FOCUS_SUMMARY_SUFFIX = FOCUS_MARKER_SUFFIX + 1
+
+/**
+ * Turns a selection into the final list: the hidden-turns marker directly
+ * before the boundary row and the summary row directly after it, then the
+ * kept rows. Both synthetic uuids derive from the boundary uuid, so they stay
+ * the same while the summary content changes. Returns the input array when
+ * there is no boundary.
+ */
+export function assembleFocusRows<T extends FocusMessage>(
+  selection: FocusSelection<T>,
+): Array<T | SystemFocusMarkerMessage | SystemFocusSummaryMessage> {
+  const { rows, boundary, hiddenTurns, compacted, summary } = selection
+  if (boundary === undefined) return rows
+  const parent = (boundary.uuid ?? '') as UUID
+  const timestamp = boundary.timestamp ?? ''
+  const out: Array<T | SystemFocusMarkerMessage | SystemFocusSummaryMessage> = []
+  if (hiddenTurns > 0 || compacted) {
+    out.push({
+      type: 'system',
+      subtype: 'focus_marker',
+      uuid: deriveUUID(parent, FOCUS_MARKER_SUFFIX),
+      timestamp,
+      hiddenTurns,
+      compacted,
+    })
+  }
+  // The boundary prompt may be split into several rows (text and image);
+  // the summary follows the last of them.
+  let promptEnd = 1
+  const key = sourceKey(boundary)
+  while (
+    key !== undefined &&
+    promptEnd < rows.length &&
+    sourceKey(rows[promptEnd]!) === key
+  ) {
+    promptEnd++
+  }
+  for (let i = 0; i < promptEnd; i++) out.push(rows[i]!)
+  if (summary.toolCount > 0) {
+    out.push({
+      type: 'system',
+      subtype: 'focus_summary',
+      uuid: deriveUUID(parent, FOCUS_SUMMARY_SUFFIX),
+      timestamp,
+      summary,
+    })
+  }
+  for (let i = promptEnd; i < rows.length; i++) out.push(rows[i]!)
+  return out
+}
+
+/**
+ * Number of turns with a final response at or after dividerIndex, using the
+ * same turn and final-response rules as selectFocusView. Narration runs do
+ * not count.
+ */
+export function countUnseenFocusTurns(
+  messages: readonly FocusMessage[],
+  dividerIndex: number,
+  options: FocusOptions = {},
+): number {
+  const prompts = promptBoundaryIndices(
+    messages,
+    options.isLoading ?? false,
+    legacyNoticeIndices(messages),
+  )
+  const starts = [...prompts, ...turnEndingCompactions(messages, prompts)]
+  messages.forEach((m, i) => {
+    if (isScheduledFire(m)) starts.push(i)
+  })
+  starts.sort((a, b) => a - b)
+  const toolResponses = toolCallingResponseIds(messages)
+  const edges = [-1, ...starts, messages.length]
+  let count = 0
+  for (let n = 0; n < edges.length - 1; n++) {
+    const from = edges[n]! + 1
+    const to = edges[n + 1]!
+    const lastTool = lastToolActivityIndex(messages, from, to)
+    for (let i = Math.max(lastTool + 1, from, dividerIndex); i < to; i++) {
+      if (isFinalResponseText(messages[i]!, toolResponses)) {
+        count++
+        break
+      }
+    }
+  }
+  return count
+}
+
+/**
+ * Index of the renderable row the unseen divider goes before. The exact match
+ * uses the 24-char prefix normalizeMessages and deriveUUID share, skipping the
+ * focus marker and summary rows, which derive their uuid from the boundary
+ * prompt and would otherwise steal an unseen prompt's position. When focus
+ * view hides the first unseen row, the divider anchors on the first rendered
+ * row at or after it in the full list.
+ */
+export function unseenDividerIndex(
+  renderable: readonly { uuid: string; type?: string; subtype?: string }[],
+  normalized: readonly { uuid: string }[],
+  firstUnseenUuid: string,
+  isFocusView: boolean,
+): number {
+  const prefix = firstUnseenUuid.slice(0, 24)
+  const exact = renderable.findIndex(
+    m =>
+      m.uuid.slice(0, 24) === prefix &&
+      !(
+        m.type === 'system' &&
+        (m.subtype === 'focus_marker' || m.subtype === 'focus_summary')
+      ),
+  )
+  if (exact >= 0 || !isFocusView) return exact
+  const position = new Map<string, number>()
+  normalized.forEach((m, i) => {
+    const key = m.uuid.slice(0, 24)
+    if (!position.has(key)) position.set(key, i)
+  })
+  const unseenPosition = position.get(prefix)
+  if (unseenPosition === undefined) return -1
+  return renderable.findIndex(
+    m => (position.get(m.uuid.slice(0, 24)) ?? -1) >= unseenPosition,
+  )
+}
+
+/**
+ * The unseen-messages divider for focus view: its count follows the turns that
+ * end in a final response, and a divider with none (a tool-only turn in
+ * flight) is dropped so the pill reads "Jump to bottom" instead of "1 new".
+ */
+export function focusUnseenDivider<D extends { count: number }>(
+  divider: D | undefined,
+  messages: readonly FocusMessage[],
+  dividerIndex: number | null,
+  isLoading: boolean,
+): D | undefined {
+  if (!divider) return undefined
+  const count = countUnseenFocusTurns(messages, dividerIndex ?? 0, { isLoading })
+  return count > 0 ? { ...divider, count } : undefined
+}
+
+/**
+ * Whether focus view applies right now: the stored setting is on and the
+ * fullscreen renderer is active, and nothing else owns the display. Read at render time because /tui can switch
+ * the renderer mid-session while the stored setting stays on.
+ */
+export function isFocusViewActive(
+  blockers: {
+    /** Brief-only owns the display and bypasses focus filtering. */
+    isBriefOnly?: boolean
+    /** /focus is unavailable, so the stored setting cannot be undone. */
+    disableSlashCommands?: boolean
+    /** Commands run on the remote host, not against this config. */
+    isRemoteSession?: boolean
+  } = {},
+): boolean {
+  if (blockers.isBriefOnly || blockers.disableSlashCommands || blockers.isRemoteSession) {
+    return false
+  }
+  return isFullscreenEnvEnabled() && (getGlobalConfig().focusView ?? false)
+}
