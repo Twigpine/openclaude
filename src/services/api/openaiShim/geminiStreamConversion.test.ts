@@ -19,9 +19,16 @@ const dependencies = {
 }
 
 function responseFor(...payloads: Array<Record<string, unknown>>): Response {
+  return buildResponse(payloads, true)
+}
+
+function buildResponse(
+  payloads: Array<Record<string, unknown>>,
+  withDone: boolean,
+): Response {
   const frames = [
     ...payloads.map(payload => `data: ${JSON.stringify(payload)}\n\n`),
-    'data: [DONE]\n\n',
+    ...(withDone ? ['data: [DONE]\n\n'] : []),
   ].join('')
   return new Response(new TextEncoder().encode(frames), {
     headers: { 'Content-Type': 'text/event-stream' },
@@ -216,15 +223,19 @@ test('reports Gemini cachedContentTokenCount as cache_read_input_tokens', async 
   })
 })
 
-test.each(['SAFETY', 'RECITATION'])(
-  'reports %s as a blocked reply instead of max_tokens',
-  async finishReason => {
-    const events = await collectEvents(responseFor({
+test.each(
+  ['SAFETY', 'RECITATION'].flatMap(reason =>
+    [true, false].map(withDone => [reason, withDone] as const),
+  ),
+)(
+  'reports %s as a blocked reply instead of max_tokens (withDone=%s)',
+  async (finishReason, withDone) => {
+    const events = await collectEvents(buildResponse([{
       candidates: [{
         content: { parts: [{ text: 'Partial answer' }] },
         finishReason,
       }],
-    }))
+    }], withDone))
 
     const texts = events
       .filter(event => event.type === 'content_block_delta')
