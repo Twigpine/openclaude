@@ -630,6 +630,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     registry?._setCommitPublishReclaimHookForTesting(undefined)
     registry?._setCommitPublishReclaimHookForTestingSync(undefined)
     registry?._setCommitPublishClaimMaxPollsForTesting(undefined)
+    registry?._setCommitPublishDenialMaxRetriesForTesting(undefined)
     while (pendingPlatformRestores.length > 0) {
       pendingPlatformRestores.pop()!()
     }
@@ -1827,18 +1828,16 @@ describe('terminal-fact publish across withdrawn claims', () => {
         }
         const exitCode = outcome === 'collision' ? 3 : 0
         // The real rename can report a Windows denial instead of
-        // EEXIST/ENOTEMPTY. Only that denial is rethrown after the winner
-        // has published; in either case the winner's bytes must survive.
+        // EEXIST/ENOTEMPTY. The winner has already published and cleaned
+        // up by the time the contender classifies that denial, so the
+        // denial resolves to the winner's existing record; in either
+        // case the winner's bytes must survive (CodeRabbit follow-up
+        // on #2564).
         const result = await publishForTest(synchronous, session).then(
           value => ({ value }),
           (error: unknown) => ({ error }),
         )
-        const collisionCode = (collision as NodeJS.ErrnoException | undefined)?.code
-        if (process.platform === 'win32' && (
-          collisionCode === 'EACCES' || collisionCode === 'EPERM'
-        )) {
-          expect(result).toHaveProperty('error', collision)
-        } else if (synchronous) {
+        if (synchronous) {
           expect(result).toEqual({ value: undefined })
         } else {
           expect(result).toMatchObject({ value: { exitCode } })
@@ -2041,7 +2040,8 @@ describe('terminal-fact publish across withdrawn claims', () => {
 
     for (const code of ['EACCES', 'EPERM']) {
       for (const outcome of [
-        'retry', 'winner', 'active', 'both', 'not-directory', 'persistent', 'late-winner', 'non-Windows',
+        'retry', 'winner', 'active', 'both', 'winner-with-malformed-claim',
+        'not-directory', 'persistent', 'late-winner', 'non-Windows',
       ] as const) {
         it(`classifies ${code} at claim installation: ${outcome} (${runtime})`, async () => {
           const { session, target, claimDir } = await createPublishFixture()
@@ -2049,6 +2049,9 @@ describe('terminal-fact publish across withdrawn claims', () => {
           registry._setCommitPublishClaimMaxPollsForTesting(2)
           const denial = Object.assign(new Error('claim install denied'), { code })
           const exhaustsBudget = outcome === 'persistent' || outcome === 'late-winner'
+          const malformedClaim = outcome === 'not-directory' || outcome === 'winner-with-malformed-claim'
+          const hasWinner = outcome === 'winner' || outcome === 'both' ||
+            outcome === 'winner-with-malformed-claim' || outcome === 'non-Windows'
           const publishWinner = () => {
             realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
           }
@@ -2058,12 +2061,12 @@ describe('terminal-fact publish across withdrawn claims', () => {
             if (outcome === 'active' || outcome === 'both') {
               realFs.mkdirSync(claimDir)
               realWriteFileSync(join(claimDir, liveStagedName), '{}')
-            } else if (outcome === 'not-directory') {
+            } else if (malformedClaim) {
               realWriteFileSync(claimDir, 'not a directory')
             } else if (exhaustsBudget && attempts === 1) {
               claimInstallInjection = deny
             }
-            if (outcome === 'winner' || outcome === 'both') publishWinner()
+            if (hasWinner) publishWinner()
             if (outcome === 'late-winner' && attempts === 2) {
               // Both paths are absent at classification. Another writer
               // publishes while this attempt cleans up its private copy.
@@ -2072,25 +2075,40 @@ describe('terminal-fact publish across withdrawn claims', () => {
             throw denial
           }
           const publication = publishForTest(synchronous, session)
-          if (outcome === 'retry' || outcome === 'late-winner') {
+          // A denial that arrives after the winner committed resolves to
+          // the winner's existing record; a denial beside a live claim
+          // routes through the claim loop (CodeRabbit follow-up on #2564).
+          if (outcome === 'retry' || outcome === 'late-winner' ||
+            (hasWinner && outcome !== 'non-Windows')) {
             const exitCode = outcome === 'retry' ? 0 : 3
             const result = await publication
             if (!synchronous) expect(result).toMatchObject({ exitCode })
             expect(await storedExitCode(session.id)).toBe(exitCode)
-            expect(realFs.existsSync(claimDir)).toBe(false)
+            if (outcome === 'both') {
+              // The live claim belongs to the winning publisher.
+              expect(await readFile(join(claimDir, liveStagedName), 'utf8')).toBe('{}')
+            } else if (malformedClaim) {
+              expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
+            } else {
+              expect(realFs.existsSync(claimDir)).toBe(false)
+            }
+          } else if (outcome === 'active') {
+            // Poll the live claim within the budget instead of
+            // surfacing the denial; the holder can still publish.
+            await expect(publication).rejects.toThrow(
+              `Timed out waiting for a concurrent publish to ${target}`)
+            expect(await readFile(join(claimDir, liveStagedName), 'utf8')).toBe('{}')
+            expect(realFs.existsSync(target)).toBe(false)
+          } else if (outcome === 'not-directory') {
+            // The denial handler rejects a non-directory claim immediately.
+            await expect(publication).rejects.toThrow(
+              `Expected a commit claim directory at ${claimDir}`)
+            expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
+            expect(realFs.existsSync(target)).toBe(false)
           } else {
             await expect(publication).rejects.toBe(denial)
-            if (outcome === 'active' || outcome === 'both') {
-              expect(await readFile(join(claimDir, liveStagedName), 'utf8')).toBe('{}')
-            }
-            if (outcome === 'not-directory') {
-              expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
-            }
-            if (outcome === 'winner' || outcome === 'both') {
-              expect(await storedExitCode(session.id)).toBe(3)
-            } else {
-              expect(realFs.existsSync(target)).toBe(false)
-            }
+            if (hasWinner) expect(await storedExitCode(session.id)).toBe(3)
+            else expect(realFs.existsSync(target)).toBe(false)
           }
           expect(attempts).toBe(exhaustsBudget ? 2 : 1)
           expect((await readdir(dirname(target))).filter(name => name.startsWith('.publish-')))
@@ -2098,6 +2116,179 @@ describe('terminal-fact publish across withdrawn claims', () => {
         })
       }
     }
+
+    it(`preserves other Windows install errors even when a winner exists (${runtime})`, async () => {
+      const { session, target } = await createPublishFixture()
+      pinProcessPlatform('win32')
+      const failure = Object.assign(new Error('claim install I/O error'), { code: 'EIO' })
+      const failInstall = mock(() => {
+        realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+        throw failure
+      })
+      claimInstallInjection = failInstall
+
+      await expect(publishForTest(synchronous, session)).rejects.toBe(failure)
+      expect(failInstall).toHaveBeenCalledTimes(1)
+      expect(await storedExitCode(session.id)).toBe(3)
+    })
+
+    it(`reclaims a stale claim after a Windows install denial (${runtime})`, async () => {
+      // CodeRabbit follow-up on #2564: when a Windows denial leaves
+      // another holder's claim installed and that holder died long
+      // ago, routing the denial through the claim loop lets stale
+      // recovery reclaim the claim and complete the publication
+      // instead of failing a publishable record.
+      const { session, target, claimDir } = await createPublishFixture()
+      pinProcessPlatform('win32')
+      const denial = Object.assign(new Error('claim install denied'), { code: 'EACCES' })
+      const stale = new Date(Date.now() - 11_000)
+      let attempts = 0
+      claimInstallInjection = () => {
+        attempts++
+        realFs.mkdirSync(claimDir)
+        realWriteFileSync(join(claimDir, staleStagedName), '{}')
+        realUtimesSync(join(claimDir, staleStagedName), stale, stale)
+        realUtimesSync(claimDir, stale, stale)
+        throw denial
+      }
+      const result = await publishForTest(synchronous, session)
+      if (!synchronous) expect(result).toMatchObject({ exitCode: 0 })
+      expect(await storedExitCode(session.id)).toBe(0)
+      expect(attempts).toBe(1)
+      expect(realFs.existsSync(claimDir)).toBe(false)
+      expect(realFs.existsSync(target)).toBe(true)
+    })
+
+    for (const outcome of ['persistent', 'withdrawn-claim', 'late-winner'] as const) {
+      // The production-budget case syncs a fresh private copy on each
+      // attempt. Allow for slow local I/O without using timing as an oracle.
+      const timeout = outcome === 'persistent' ? 15_000 : 5000
+      it(`handles the short Windows denial budget: ${outcome} (${runtime})`, async () => {
+        const { session, target, claimDir } = await createPublishFixture()
+        pinProcessPlatform('win32')
+        if (outcome === 'persistent') {
+          // Do not override the short budget: the production default
+          // must fail before the independently bounded overall loop.
+          registry._setCommitPublishClaimMaxPollsForTesting(60)
+        } else {
+          registry._setCommitPublishClaimMaxPollsForTesting(10)
+          registry._setCommitPublishDenialMaxRetriesForTesting(3)
+        }
+        const denial = Object.assign(new Error('claim install denied'), { code: 'EPERM' })
+        let attempts = 0
+        claimInstallInjection = function deny() {
+          attempts++
+          if (attempts === 4 && outcome === 'withdrawn-claim') {
+            // Only the denial handler sees the claim. It is gone by the
+            // next poll, but separates two runs of contentless denials.
+            realFs.mkdirSync(claimDir)
+            beforePendingCleanup = () => realFs.rmdirSync(claimDir)
+          } else if (attempts === 4 && outcome === 'late-winner') {
+            beforePendingCleanup = () => {
+              realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+            }
+          }
+          claimInstallInjection = deny
+          throw denial
+        }
+        const publication = publishForTest(synchronous, session)
+        if (outcome === 'late-winner') {
+          const result = await publication
+          if (!synchronous) expect(result).toMatchObject({ exitCode: 3 })
+          expect(await storedExitCode(session.id)).toBe(3)
+        } else {
+          await expect(publication).rejects.toBe(denial)
+          expect(realFs.existsSync(target)).toBe(false)
+        }
+        const expectedAttempts = outcome === 'persistent' ? 51 : outcome === 'withdrawn-claim' ? 8 : 4
+        expect(attempts).toBe(expectedAttempts)
+        expect(realFs.existsSync(claimDir)).toBe(false)
+        expect((await readdir(dirname(target))).filter(name => name.startsWith('.publish-')))
+          .toEqual([])
+      }, timeout)
+    }
+
+    it(`rejects a malformed claim observed at a Windows denial (${runtime})`, async () => {
+      // A non-directory at the claim path is not contention evidence:
+      // it must be rejected at the observation point with the same
+      // malformed-claim error the poll loop uses, not reset the short
+      // budget or surface a contention timeout on the final poll.
+      const { session, target, claimDir } = await createPublishFixture()
+      pinProcessPlatform('win32')
+      registry._setCommitPublishClaimMaxPollsForTesting(2)
+      registry._setCommitPublishDenialMaxRetriesForTesting(1)
+      const denial = Object.assign(new Error('claim install denied'), { code: 'EACCES' })
+      let attempts = 0
+      claimInstallInjection = function deny() {
+        attempts++
+        if (attempts === 2) realWriteFileSync(claimDir, 'not a directory')
+        else claimInstallInjection = deny
+        throw denial
+      }
+      await expect(publishForTest(synchronous, session))
+        .rejects.toThrow(`Expected a commit claim directory at ${claimDir}`)
+      expect(attempts).toBe(2)
+      expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
+      expect(realFs.existsSync(target)).toBe(false)
+    })
+
+    it(`returns the winner when a Windows denial interrupts ${runtime} claim adoption`, async () => {
+      const { session, target, claimDir } = await createPublishFixture()
+      pinProcessPlatform('win32')
+      const ownerClaim = `${target}.claim`
+      const ownedTmp = join(dirname(target), `${session.id}.${session.pid}.${randomUUID()}.tmp`)
+      await writeFile(ownedTmp, JSON.stringify(successorFact(session.id, 5)))
+      await mkdir(ownerClaim)
+      await writeFile(join(ownerClaim, 'tmp'), ownedTmp)
+      const deny = mock((from: string) => {
+        const [entry] = realFs.readdirSync(from)
+        // The publish source must be the owner's pending fact, not the
+        // adopter's draft. A third publisher wins during the rename.
+        expect(JSON.parse(realFs.readFileSync(join(from, entry!), 'utf8')))
+          .toMatchObject({ exitCode: 5 })
+        realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+        throw Object.assign(new Error('claim install denied'), { code: 'EACCES' })
+      })
+      claimInstallInjection = deny
+      const result = await publishForTest(synchronous, session)
+      if (!synchronous) expect(result).toMatchObject({ exitCode: 3 })
+      expect(deny).toHaveBeenCalledTimes(1)
+      expect(await storedExitCode(session.id)).toBe(3)
+      expect(await readFile(join(ownerClaim, 'tmp'), 'utf8')).toBe(ownedTmp)
+      expect(realFs.existsSync(claimDir)).toBe(false)
+    })
+
+    it(`keeps the full claim budget after a denial observes a live claim (${runtime})`, async () => {
+      // An observed live claim is contention evidence: it earns the
+      // full claim-poll budget and resets the short denial budget.
+      const { session, target, claimDir } = await createPublishFixture()
+      pinProcessPlatform('win32')
+      registry._setCommitPublishClaimMaxPollsForTesting(4)
+      registry._setCommitPublishDenialMaxRetriesForTesting(1)
+      const denial = Object.assign(new Error('claim install denied'), { code: 'EACCES' })
+      let attempts = 0
+      claimInstallInjection = function deny() {
+        attempts++
+        if (attempts === 2) {
+          realFs.mkdirSync(claimDir)
+          realWriteFileSync(join(claimDir, liveStagedName), '{}')
+        } else {
+          claimInstallInjection = deny
+        }
+        throw denial
+      }
+      const readClaim = synchronous
+        ? spyOn(realFs, 'readdirSync')
+        : spyOn(realFsPromises, 'readdir')
+      await expect(publishForTest(synchronous, session)).rejects.toThrow(
+        `Timed out waiting for a concurrent publish to ${target}`)
+      // Two of four polls were spent attempting installation. The
+      // remaining two must inspect the live claim before timing out.
+      expect(readClaim.mock.calls.filter(([path]) => path === claimDir)).toHaveLength(2)
+      expect(attempts).toBe(2)
+      expect(await readFile(join(claimDir, liveStagedName), 'utf8')).toBe('{}')
+      expect(realFs.existsSync(target)).toBe(false)
+    })
   }
 
   for (const synchronous of [false, true]) {

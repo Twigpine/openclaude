@@ -1585,6 +1585,11 @@ const TERMINAL_FACT_PUBLISH_ATTEMPTS = 3
 // stale after COMMIT_PUBLISH_CLAIM_STALE_MS and is reclaimed first.
 // 3000 polls at 10 ms is about 30 s.
 const COMMIT_PUBLISH_CLAIM_MAX_POLLS = 3000
+// A Windows claim-install denial with neither an observed claim nor a
+// published target carries no evidence of contention: bound its retries
+// to a short budget so a persistent ACL denial surfaces quickly instead
+// of consuming the full claim-poll budget.
+const COMMIT_PUBLISH_DENIAL_MAX_RETRIES = 50
 // A commit claim older than this belongs to a dead or suspended
 // holder: the waiter reclaims it. Matches proper-lockfile's 10 s stale
 // threshold used by the per-ID locks in this file.
@@ -1772,6 +1777,14 @@ export function _setCommitPublishClaimMaxPollsForTesting(
   maxPolls: number | undefined,
 ): void {
   commitPublishClaimMaxPollsForTesting = maxPolls
+}
+
+let commitPublishDenialMaxRetriesForTesting: number | undefined
+
+export function _setCommitPublishDenialMaxRetriesForTesting(
+  maxRetries: number | undefined,
+): void {
+  commitPublishDenialMaxRetriesForTesting = maxRetries
 }
 
 async function waitForTerminalFact(
@@ -1978,12 +1991,20 @@ async function commitPublishFile(
   const claimDir = `${target}.commit`
   const maxClaimPolls =
     commitPublishClaimMaxPollsForTesting ?? COMMIT_PUBLISH_CLAIM_MAX_POLLS
+  const maxDenialRetries =
+    commitPublishDenialMaxRetriesForTesting ?? COMMIT_PUBLISH_DENIAL_MAX_RETRIES
   const claimIsStale = observeCommitPublishClaimAge()
   let finalInstallDenial: unknown
+  // Consecutive Windows install denials with no observed claim: these
+  // carry no contention evidence and get their own short budget.
+  let denialRetries = 0
   for (let attempt = 0; attempt < maxClaimPolls; attempt++) {
     if (await commitPublishPathStat(target)) return 'exists'
     const claim = await commitPublishPathStat(claimDir)
     if (claim) {
+      // An observed claim is contention evidence: it earns the full
+      // poll budget and resets the short denial budget.
+      denialRetries = 0
       if (!claim.isDirectory()) {
         throw new Error(`Expected a commit claim directory at ${claimDir}`)
       }
@@ -2046,15 +2067,28 @@ async function commitPublishFile(
       } catch (error) {
         if (isErrno(error, 'EEXIST') || isErrno(error, 'ENOTEMPTY')) continue
         if (!isCommitPublishDirectoryCollisionOnWindows(error)) throw error
-        if (
-          (await commitPublishPathStat(claimDir)) ||
-          (await commitPublishPathStat(target))
-        ) {
-          throw error
+        if (await commitPublishPathStat(target)) return 'exists'
+        const deniedClaim = await commitPublishPathStat(claimDir)
+        if (deniedClaim) {
+          if (!deniedClaim.isDirectory()) {
+            // Same malformed-claim rejection as the poll loop: a file at
+            // the claim path is not contention evidence, and deferring to
+            // a later poll could turn it into a timeout instead.
+            throw new Error(`Expected a commit claim directory at ${claimDir}`)
+          }
+          // A claim can disappear before the next poll. Reset the short
+          // budget at this observation, then let the loop validate or
+          // reclaim the claim if it is still present.
+          denialRetries = 0
+          await new Promise(resolve => setTimeout(resolve, 10))
+          continue
         }
-        // Both paths are absent: the collision may have cleared, or this
-        // may be a real denial. Retry within the same poll budget.
-        if (attempt + 1 < maxClaimPolls) {
+        // Both paths are absent: the collision may have cleared, or
+        // this may be a real denial. With no observed claim there is
+        // no contention evidence, so a short denial budget bounds the
+        // wait; the poll budget still applies.
+        if (denialRetries < maxDenialRetries && attempt + 1 < maxClaimPolls) {
+          denialRetries++
           await new Promise(resolve => setTimeout(resolve, 10))
           continue
         }
@@ -2120,12 +2154,20 @@ function commitPublishFileSync(
   const claimDir = `${target}.commit`
   const maxClaimPolls =
     commitPublishClaimMaxPollsForTesting ?? COMMIT_PUBLISH_CLAIM_MAX_POLLS
+  const maxDenialRetries =
+    commitPublishDenialMaxRetriesForTesting ?? COMMIT_PUBLISH_DENIAL_MAX_RETRIES
   const claimIsStale = observeCommitPublishClaimAge()
   let finalInstallDenial: unknown
+  // Consecutive Windows install denials with no observed claim: these
+  // carry no contention evidence and get their own short budget.
+  let denialRetries = 0
   for (let attempt = 0; attempt < maxClaimPolls; attempt++) {
     if (commitPublishPathStatSync(target)) return 'exists'
     const claim = commitPublishPathStatSync(claimDir)
     if (claim) {
+      // An observed claim is contention evidence: it earns the full
+      // poll budget and resets the short denial budget.
+      denialRetries = 0
       if (!claim.isDirectory()) {
         throw new Error(`Expected a commit claim directory at ${claimDir}`)
       }
@@ -2189,12 +2231,26 @@ function commitPublishFileSync(
       } catch (error) {
         if (isErrno(error, 'EEXIST') || isErrno(error, 'ENOTEMPTY')) continue
         if (!isCommitPublishDirectoryCollisionOnWindows(error)) throw error
-        if (commitPublishPathStatSync(claimDir) || commitPublishPathStatSync(target)) {
-          throw error
+        if (commitPublishPathStatSync(target)) return 'exists'
+        const deniedClaim = commitPublishPathStatSync(claimDir)
+        if (deniedClaim) {
+          if (!deniedClaim.isDirectory()) {
+            // Same malformed-claim rejection as the poll loop: a file at
+            // the claim path is not contention evidence, and deferring to
+            // a later poll could turn it into a timeout instead.
+            throw new Error(`Expected a commit claim directory at ${claimDir}`)
+          }
+          // As in the async path, the next poll may no longer see it.
+          denialRetries = 0
+          sleepSync(10)
+          continue
         }
-        // Both paths are absent: the collision may have cleared, or this
-        // may be a real denial. Retry within the same poll budget.
-        if (attempt + 1 < maxClaimPolls) {
+        // Both paths are absent: the collision may have cleared, or
+        // this may be a real denial. With no observed claim there is
+        // no contention evidence, so a short denial budget bounds the
+        // wait; the poll budget still applies.
+        if (denialRetries < maxDenialRetries && attempt + 1 < maxClaimPolls) {
+          denialRetries++
           sleepSync(10)
           continue
         }
