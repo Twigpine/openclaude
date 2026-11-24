@@ -19,9 +19,16 @@ const dependencies = {
 }
 
 function responseFor(...payloads: Array<Record<string, unknown>>): Response {
+  return buildResponse(payloads, true)
+}
+
+function buildResponse(
+  payloads: Array<Record<string, unknown>>,
+  withDone: boolean,
+): Response {
   const frames = [
     ...payloads.map(payload => `data: ${JSON.stringify(payload)}\n\n`),
-    'data: [DONE]\n\n',
+    ...(withDone ? ['data: [DONE]\n\n'] : []),
   ].join('')
   return new Response(new TextEncoder().encode(frames), {
     headers: { 'Content-Type': 'text/event-stream' },
@@ -213,5 +220,47 @@ test('reports Gemini cachedContentTokenCount as cache_read_input_tokens', async 
       output_tokens: 2,
       cache_read_input_tokens: 80,
     },
+  })
+})
+
+test.each(
+  ['SAFETY', 'RECITATION'].flatMap(reason =>
+    [true, false].map(withDone => [reason, withDone] as const),
+  ),
+)(
+  'reports %s as a blocked reply instead of max_tokens (withDone=%s)',
+  async (finishReason, withDone) => {
+    const events = await collectEvents(buildResponse([{
+      candidates: [{
+        content: { parts: [{ text: 'Partial answer' }] },
+        finishReason,
+      }],
+    }], withDone))
+
+    const texts = events
+      .filter(event => event.type === 'content_block_delta')
+      .map(event => (event.delta as { text: string }).text)
+    expect(texts).toEqual([
+      'Partial answer',
+      '\n\n[Content blocked by provider safety filter]',
+    ])
+    expect(events.at(-2)).toMatchObject({
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn' },
+    })
+  },
+)
+
+test('reports SAFETY with no content as a blocked reply', async () => {
+  const events = await collectEvents(responseFor({
+    candidates: [{ finishReason: 'SAFETY' }],
+  }))
+
+  expect(events.find(event => event.type === 'content_block_delta')).toMatchObject({
+    delta: { text: '\n\n[Content blocked by provider safety filter]' },
+  })
+  expect(events.at(-2)).toMatchObject({
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn' },
   })
 })

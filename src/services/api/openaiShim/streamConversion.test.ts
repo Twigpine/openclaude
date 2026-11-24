@@ -729,7 +729,7 @@ test('Gemini converter starts an empty message and maps blocked finishes', async
   ))
   expect(safetyEvents).toContainEqual({
     type: 'message_delta',
-    delta: { stop_reason: 'max_tokens' },
+    delta: { stop_reason: 'end_turn' },
     usage: {},
   })
 })
