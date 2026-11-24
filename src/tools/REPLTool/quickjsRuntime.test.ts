@@ -1,0 +1,120 @@
+import { describe, expect, test } from 'bun:test'
+import { executeQuickJSScript, PromptWaitTracker } from './quickjsRuntime.js'
+
+const TEST_TIMEOUT = 10_000
+
+describe('executeQuickJSScript', () => {
+  test('returns arithmetic and object completion values', async () => {
+    const numeric = await executeQuickJSScript({ code: 'return 1 + 1' })
+    expect(numeric.status).toBe('completed')
+    expect(numeric.result).toBe(2)
+
+    const object = await executeQuickJSScript({ code: 'return {ok: true, items: [1, 2]}' })
+    expect(object.status).toBe('completed')
+    expect(object.result).toEqual({ ok: true, items: [1, 2] })
+  }, TEST_TIMEOUT)
+
+  test('captures bounded console output', async () => {
+    const result = await executeQuickJSScript({
+      code: "console.log('hello', {a: 1}); console.error('bad'); return undefined",
+      stdoutLimit: 12,
+      stderrLimit: 4,
+    })
+    expect(result.status).toBe('completed')
+    expect(result.stdout.length).toBeLessThanOrEqual(12)
+    expect(result.stdout).toContain('hello')
+    expect(result.stderr).toBe('bad\n')
+  }, TEST_TIMEOUT)
+
+  test('overlaps deferred host promises through Promise.all and drains pending jobs', async () => {
+    let active = 0
+    let maxActive = 0
+    const result = await executeQuickJSScript({
+      code: "const a = hostDelay('a'); const b = hostDelay('b'); return await Promise.all([a, b])",
+      hostFunctions: {
+        hostDelay: async args => {
+          active += 1
+          maxActive = Math.max(maxActive, active)
+          await new Promise(resolve => setTimeout(resolve, 25))
+          active -= 1
+          return args[0]
+        },
+      },
+    })
+    expect(result.status).toBe('completed')
+    expect(result.result).toEqual(['a', 'b'])
+    expect(maxActive).toBe(2)
+  }, TEST_TIMEOUT)
+
+  test('settles one host promise while another remains pending', async () => {
+    const result = await executeQuickJSScript({
+      code: "const slow = hostNever(); const fast = hostValue(3); return await fast",
+      timeoutMs: 100,
+      hostFunctions: {
+        hostNever: () => new Promise(() => {}),
+        hostValue: async args => args[0],
+      },
+    })
+    expect(result.status).toBe('completed')
+    expect(result.result).toBe(3)
+  }, TEST_TIMEOUT)
+
+  test('times out an infinite loop under a test-shortened budget', async () => {
+    const started = Date.now()
+    const result = await executeQuickJSScript({ code: 'while (true) {}', timeoutMs: 40 })
+    expect(result.status).toBe('timeout')
+    expect(Date.now() - started).toBeLessThan(2_000)
+  }, TEST_TIMEOUT)
+
+  test('disposes cleanly with an unsettled host promise', async () => {
+    const result = await executeQuickJSScript({
+      code: 'await hostNever(); return 1',
+      timeoutMs: 40,
+      hostFunctions: { hostNever: () => new Promise(() => {}) },
+    })
+    expect(result.status).toBe('timeout')
+  }, TEST_TIMEOUT)
+
+  test('does not expose require, process, or dynamic module loading', async () => {
+    const globals = await executeQuickJSScript({ code: "return [typeof require, typeof process]" })
+    expect(globals.status).toBe('completed')
+    expect(globals.result).toEqual(['undefined', 'undefined'])
+
+    const dynamicImport = await executeQuickJSScript({ code: "await import('x'); return 1", timeoutMs: 1_000 })
+    expect(dynamicImport.status).toBe('error')
+  }, TEST_TIMEOUT)
+
+  test('memory exhaustion produces a controlled error', async () => {
+    const result = await executeQuickJSScript({
+      code: 'const a=[]; while (true) { a.push(new Array(1000).fill(1)) }',
+      timeoutMs: 2_000,
+      memoryLimitBytes: 2 * 1024 * 1024,
+    })
+    expect(['error', 'timeout']).toContain(result.status)
+    expect(result.error).toBeDefined()
+  }, TEST_TIMEOUT)
+
+  test('host errors become catchable guest rejections', async () => {
+    const result = await executeQuickJSScript({
+      code: "try { await hostFail(); return 'not reached' } catch (error) { return error.message }",
+      hostFunctions: {
+        hostFail: async () => { throw new Error('host failed') },
+      },
+    })
+    expect(result.status).toBe('completed')
+    expect(result.result).toBe('host failed')
+  }, TEST_TIMEOUT)
+})
+
+describe('PromptWaitTracker', () => {
+  test('excludes active and completed wait intervals', async () => {
+    const tracker = new PromptWaitTracker()
+    tracker.begin()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const activeExcluded = tracker.currentExcludedMs()
+    tracker.end()
+    const completedExcluded = tracker.currentExcludedMs()
+    expect(activeExcluded).toBeGreaterThan(0)
+    expect(completedExcluded).toBeGreaterThanOrEqual(activeExcluded)
+  })
+})
