@@ -20,6 +20,11 @@ import {
   getActiveAgentsFromList,
   getAgentDefinitionsWithOverrides,
 } from '../tools/AgentTool/loadAgentsDir.js'
+import {
+  CODE_MODE_ENV_VAR,
+  isReplModeEnabled,
+  setReplModeEnabledForSession,
+} from '../tools/REPLTool/constants.js'
 import { TODO_WRITE_TOOL_NAME } from '../tools/TodoWriteTool/constants.js'
 import { asSessionId } from '../types/ids.js'
 import type {
@@ -320,6 +325,7 @@ type ResumeLoadResult = {
   customTitle?: string
   tag?: string
   mode?: 'coordinator' | 'normal'
+  codeMode?: boolean
   worktreeSession?: PersistedWorktreeSession | null
   prNumber?: number
   prUrl?: string
@@ -437,6 +443,27 @@ export function exitRestoredWorktree(): void {
 }
 
 /**
+ * Enforce the Code Mode resume contract before any resume side effects.
+ * Code Mode transcripts require the orchestration surface that wrote them.
+ * Direct transcripts keep their original direct-tool contract even when the
+ * current process has Code Mode enabled, so the resumed session never switches
+ * tool contracts mid-history.
+ */
+export function enforceCodeModeResumeCompatibility(
+  sessionCodeMode: boolean | undefined,
+): void {
+  const transcriptUsedCodeMode = sessionCodeMode === true
+  if (transcriptUsedCodeMode && !isReplModeEnabled()) {
+    throw new Error(
+      `This session was created in Code Mode and cannot be resumed with direct tools. Restart with ${CODE_MODE_ENV_VAR}=1 to resume it.`,
+    )
+  }
+  if (!transcriptUsedCodeMode) {
+    setReplModeEnabledForSession(false)
+  }
+}
+
+/**
  * Process a loaded conversation for resume/continue.
  *
  * Handles coordinator mode matching, session ID setup, agent restoration,
@@ -460,6 +487,8 @@ export async function processResumedConversation(
     initialState: AppState
   },
 ): Promise<ProcessedResume> {
+  enforceCodeModeResumeCompatibility(result.codeMode)
+
   // Match coordinator/normal mode to the resumed session
   let modeWarning: string | undefined
   if (feature('COORDINATOR_MODE')) {

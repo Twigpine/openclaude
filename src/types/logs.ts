@@ -72,6 +72,7 @@ export type LogOption = {
   prUrl?: string // Full URL to the linked PR
   prRepository?: string // Repository in "owner/repo" format
   mode?: 'coordinator' | 'normal' // Session mode for coordinator/normal detection
+  codeMode?: boolean // Whether this session used the Code Mode orchestration surface
   worktreeSession?: PersistedWorktreeSession | null // Worktree state at session end (null = exited, undefined = never entered)
   contentReplacements?: ContentReplacementRecord[] // Replacement decisions for resume reconstruction
   goal?: GoalState | null // Last session goal state, if any
@@ -164,6 +165,12 @@ export type ModeEntry = {
   type: 'mode'
   sessionId: UUID
   mode: 'coordinator' | 'normal'
+}
+
+export type CodeModeEntry = {
+  type: 'code-mode'
+  sessionId: UUID
+  codeMode: boolean
 }
 
 /**
@@ -370,6 +377,7 @@ export type Entry =
   | QueueOperationMessage
   | SpeculationAcceptMessage
   | ModeEntry
+  | CodeModeEntry
   | WorktreeStateEntry
   | ContentReplacementEntry
   | GoalStateEntry

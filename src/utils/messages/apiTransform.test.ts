@@ -4,6 +4,7 @@ import { describe, expect, test } from 'bun:test'
 import { feature } from 'bun:bundle'
 import {
   createAssistantAPIErrorMessage,
+  createAssistantMessage,
   createUserMessage,
   mergeUserMessages,
   normalizeMessagesForAPI,
@@ -41,6 +42,70 @@ describe('appendMessageTagToUserMessage', () => {
     expect(merged?.isMeta).toBe(feature('HISTORY_SNIP') ? undefined : true)
     expect(JSON.stringify(merged?.message.content)).toContain('context')
     expect(JSON.stringify(merged?.message.content)).toContain('do Y instead')
+  })
+
+
+  test('virtual Code Mode inner tool messages never reach the API transcript', () => {
+    const outerUse = createAssistantMessage({
+      content: [
+        {
+          type: 'tool_use',
+          id: 'repl-use-1',
+          name: 'REPL',
+          input: { code: 'return 1' },
+          caller: { type: 'direct' },
+        },
+      ],
+    })
+    const innerUse = {
+      ...createAssistantMessage({
+        content: [
+          {
+            type: 'tool_use',
+            id: 'inner-use-1',
+            name: 'InnerUniqueTool',
+            input: { value: 'inner-should-not-enter-api' },
+            caller: { type: 'direct' },
+          },
+        ],
+      }),
+      isVirtual: true,
+    }
+    const innerResult = {
+      ...createUserMessage({
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'inner-use-1',
+            content: 'inner-should-not-enter-api',
+            is_error: false,
+          },
+        ],
+      }),
+      isVirtual: true,
+    }
+    const outerResult = createUserMessage({
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'repl-use-1',
+          content: 'REPL completed',
+          is_error: false,
+        },
+      ],
+    })
+
+    const normalized = normalizeMessagesForAPI([
+      outerUse,
+      innerUse,
+      innerResult,
+      outerResult,
+    ])
+    const serialized = JSON.stringify(normalized)
+
+    expect(serialized).toContain('REPL')
+    expect(serialized).not.toContain('InnerUniqueTool')
+    expect(serialized).not.toContain('inner-should-not-enter-api')
   })
 
   test(

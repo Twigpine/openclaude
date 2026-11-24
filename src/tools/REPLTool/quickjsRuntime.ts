@@ -155,6 +155,22 @@ export async function executeQuickJSScript(
 
   const context = runtime.newContext()
   const activeDisposables = new Set<{ dispose: () => void }>()
+  const jsonHandle = context.getProp(context.global, 'JSON')
+  const jsonStringifyHandle = context.getProp(jsonHandle, 'stringify')
+  disposeQuietly(jsonHandle)
+  activeDisposables.add(jsonStringifyHandle)
+
+  function guestInputFromHandle(handle: QuickJSHandle): unknown {
+    const stringified = context.callFunction(jsonStringifyHandle, context.undefined, [handle])
+    if (stringified.error) {
+      const serialized = errorHandleToSerialized(context, stringified.error)
+      disposeQuietly(stringified.error)
+      throw new Error(`REPL tool input is not JSON-compatible: ${serialized.message}`)
+    }
+    const jsonText = context.dump(stringified.value) as string | undefined
+    disposeQuietly(stringified.value)
+    return jsonText === undefined ? undefined : JSON.parse(jsonText)
+  }
 
   function installConsole(): void {
     const consoleObject = context.newObject()
@@ -193,7 +209,7 @@ export async function executeQuickJSScript(
     const fn = context.newFunction(name, (...argHandles) => {
       const deferred = context.newPromise()
       activeDisposables.add(deferred)
-      const args = argHandles.map(handle => serializeBridgeValue(context.dump(handle)))
+      const args = argHandles.map(handle => guestInputFromHandle(handle))
       void Promise.resolve()
         .then(() => implementation(args))
         .then(value => {

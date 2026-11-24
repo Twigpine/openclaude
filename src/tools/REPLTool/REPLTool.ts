@@ -15,13 +15,15 @@ import { ReplInnerToolRunner } from './innerToolRunner.js'
 import { getReplToolDescription, getReplToolPrompt } from './prompt.js'
 import { executeQuickJSScript, PromptWaitTracker } from './quickjsRuntime.js'
 import { buildReplToolInventory } from './toolWrappers.js'
+import { isResultTruncated, renderToolResultMessage, renderToolUseMessage } from './UI.js'
 
 const REPL_TIMEOUT_MS = 10 * 60 * 1000
+const REPL_CODE_MAX_CHARS = 100_000
 const MODEL_OUTPUT_TEXT_LIMIT = 8_000
 
 const inputSchema = lazySchema(() =>
   z.strictObject({
-    code: z.string().min(1).describe('JavaScript to execute in the isolated foreground REPL runtime'),
+    code: z.string().min(1).max(REPL_CODE_MAX_CHARS).describe('JavaScript to execute in the isolated foreground REPL runtime'),
   }),
 )
 type InputSchema = ReturnType<typeof inputSchema>
@@ -29,18 +31,19 @@ type Input = z.infer<InputSchema>
 
 const outputSchema = lazySchema(() =>
   z.object({
-    status: z.enum(['completed', 'error', 'timeout', 'aborted']),
+    status: z.enum(['completed', 'error', 'timeout', 'aborted']).optional(),
+    code: z.string().optional(),
     result: z.unknown().optional(),
     error: z.object({
       name: z.string(),
       message: z.string(),
       stack: z.string().optional(),
     }).optional(),
-    stdout: z.string(),
-    stderr: z.string(),
-    durationMs: z.number(),
-    toolsUsed: z.array(z.string()),
-    innerMessageCount: z.number(),
+    stdout: z.string().optional(),
+    stderr: z.string().optional(),
+    durationMs: z.number().optional(),
+    toolsUsed: z.array(z.string()).optional(),
+    innerMessageCount: z.number().optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -188,6 +191,7 @@ export const REPLTool = buildTool({
       return {
         data: {
           ...execution,
+          code: input.code,
           toolsUsed: [...toolsUsed].sort(),
           innerMessageCount: virtualMessages.length,
         },
@@ -199,9 +203,14 @@ export const REPLTool = buildTool({
     }
   },
   mapToolResultToToolResultBlockParam(output, toolUseID) {
+    const status = output.status ?? 'unknown'
+    const toolsUsed = output.toolsUsed ?? []
+    const duration = typeof output.durationMs === 'number'
+      ? ` in ${Math.round(output.durationMs)}ms`
+      : ''
     const lines = [
-      `REPL ${output.status} in ${Math.round(output.durationMs)}ms`,
-      `tools used: ${output.toolsUsed.length ? output.toolsUsed.join(', ') : 'none'}`,
+      `REPL ${status}${duration}`,
+      `tools used: ${toolsUsed.length ? toolsUsed.join(', ') : 'none'}`,
       `result: ${formatUnknownForModel(output.result)}`,
     ]
     if (output.error) lines.push(`error: ${output.error.name}: ${output.error.message}`)
@@ -213,12 +222,9 @@ export const REPLTool = buildTool({
       content: lines.join('\n'),
     }
   },
-  renderToolUseMessage() {
-    return null
-  },
-  renderToolResultMessage() {
-    return null
-  },
+  renderToolUseMessage,
+  renderToolResultMessage,
+  isResultTruncated,
 })
 
 export default REPLTool

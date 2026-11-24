@@ -52,6 +52,7 @@ import {
 import { jsonStringify } from './slowOperations.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
 import { isDangerousPermissionMode } from './permissions/PermissionMode.js'
+import { enforceCodeModeResumeCompatibility } from './sessionRestore.js'
 
 // Dead code elimination: internal-only tool names are conditionally required so
 // their strings don't leak into external builds. Static imports always bundle.
@@ -677,6 +678,7 @@ export async function loadConversationForResume(
   customTitle?: string
   tag?: string
   mode?: 'coordinator' | 'normal'
+  codeMode?: boolean
   worktreeSession?: PersistedWorktreeSession | null
   prNumber?: number
   prUrl?: string
@@ -725,6 +727,11 @@ export async function loadConversationForResume(
     if (isLiteLog(log)) {
       log = await loadFullLog(log)
     }
+
+    // Refuse mode-mismatched resumes before plan/file-history copies or
+    // SessionStart hooks produce side effects for a transcript this process
+    // cannot coherently continue.
+    enforceCodeModeResumeCompatibility(log.codeMode)
 
     // Determine sessionId first so we can pass it to copy functions
     if (!sessionId) {
@@ -778,6 +785,7 @@ export async function loadConversationForResume(
       customTitle: log?.customTitle,
       tag: log?.tag,
       mode: log?.mode,
+      codeMode: log?.codeMode,
       worktreeSession: log?.worktreeSession,
       prNumber: log?.prNumber,
       prUrl: log?.prUrl,

@@ -60,6 +60,7 @@ import {
 import { getTools } from './tools.js';
 import {
   getCodeModeOriginalProcessEnv,
+  isReplModeEnabled,
   resolveCodeModeActivationAfterConsent,
   resolveCodeModeEnablement,
   setReplModeEnabledForSession,
@@ -152,7 +153,7 @@ import { getGlobExclusionsForPluginCache } from './utils/plugins/orphanedPluginF
 import { getPluginSeedDirs } from './utils/plugins/pluginDirectories.js';
 import { countFilesRoundedRg } from './utils/ripgrep.js';
 import { processSessionStartHooks, processSetupHooks } from './utils/sessionStart.js';
-import { cacheSessionTitle, getSessionIdFromLog, saveAgentSetting, saveMode, searchSessionsByCustomTitle, sessionIdExists } from './utils/sessionStorage.js';
+import { cacheSessionTitle, getSessionIdFromLog, saveAgentSetting, saveCodeModeState, saveMode, searchSessionsByCustomTitle, sessionIdExists } from './utils/sessionStorage.js';
 import { ensureMdmSettingsLoaded } from './utils/settings/mdm/settings.js';
 import { eagerLoadSettingsFromArgs } from './utils/settings/flagSettings.js';
 import { isSettingSourceEnabled } from './utils/settings/constants.js';
@@ -555,6 +556,7 @@ async function configureCodeModeForInteractiveSession(root: Root): Promise<void>
   });
   if (!enabled) {
     setReplModeEnabledForSession(false);
+    saveCodeModeState(false);
     return;
   }
 
@@ -564,6 +566,7 @@ async function configureCodeModeForInteractiveSession(root: Root): Promise<void>
       enablement: enabled,
       hasAcknowledged,
     }));
+    saveCodeModeState(isReplModeEnabled());
     return;
   }
 
@@ -577,10 +580,12 @@ async function configureCodeModeForInteractiveSession(root: Root): Promise<void>
       hasAcknowledged: false,
       consentAccepted: accepted,
     }));
+    saveCodeModeState(isReplModeEnabled());
     if (!accepted) return;
     markCodeModeAcknowledged();
   } catch (error) {
     setReplModeEnabledForSession(false);
+    saveCodeModeState(false);
     logForDebugging(`[main] Code Mode consent dialog failed: ${errorMessage(error)}`, { level: 'warn' });
     writeToStderr('Code Mode is inactive because the first-use confirmation could not be shown.\n');
   }

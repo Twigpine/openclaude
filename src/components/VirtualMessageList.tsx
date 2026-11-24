@@ -17,7 +17,7 @@ const HEADROOM = 3;
 import { logForDebugging } from '../utils/debug.js';
 import { sleep } from '../utils/sleep.js';
 import { renderableSearchText } from '../utils/transcriptSearch.js';
-import { isNavigableMessage, type MessageActionsNav, type MessageActionsState, type NavigableMessage, stripSystemReminders, toolCallOf } from './messageActions.js';
+import { isNavigableMessage, messageExpandKey, primaryInputOf, type MessageActionsNav, type MessageActionsState, type NavigableMessage, stripSystemReminders, toolCallOf } from './messageActions.js';
 
 // Fallback extractor: lower + cache here for callers without the
 // Messages.tsx tool-lookup path (tests, static contexts). Messages.tsx
@@ -348,12 +348,17 @@ export function VirtualMessageList({
     return isNavigableMessage(messages[i]!);
   }, [getItemHeight, messages]);
   useImperativeHandle(cursorNavRef, (): MessageActionsNav => {
-    const select = (m: NavigableMessage) => setCursor?.({
-      uuid: m.uuid,
-      msgType: m.type,
-      expanded: false,
-      toolName: toolCallOf(m)?.name
-    });
+    const select = (m: NavigableMessage) => {
+      const primaryInput = primaryInputOf(m);
+      setCursor?.({
+        uuid: m.uuid,
+        msgType: m.type,
+        expanded: false,
+        expandKey: messageExpandKey(m),
+        toolName: toolCallOf(m)?.name,
+        primaryInputLineCount: primaryInput === undefined ? undefined : primaryInput.split('\n').length
+      });
+    };
     const selIdx = selectedIndex ?? -1;
     const scan = (from: number, dir: 1 | -1, pred: (i: number) => boolean = isVisible) => {
       for (let i = from; i >= 0 && i < messages.length; i += dir) {

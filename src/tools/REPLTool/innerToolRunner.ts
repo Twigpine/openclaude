@@ -166,6 +166,18 @@ function omitAttachmentPayloads(value: unknown, depth = 0): unknown {
   return out
 }
 
+const REPL_ERGONOMIC_ALIASES = new Map([
+  ['Read', 'read'],
+  ['Write', 'write'],
+  ['Edit', 'edit'],
+  ['Glob', 'glob'],
+  ['Grep', 'grep'],
+  ['Bash', 'bash'],
+  ['NotebookEdit', 'notebookEdit'],
+  ['PowerShell', 'powerShell'],
+  ['Agent', 'agent'],
+])
+
 function validateForegroundOnlyInput(tool: Tool, input: unknown): void {
   if (!isObjectInput(input)) return
   if ('run_in_background' in input) {
@@ -178,6 +190,16 @@ function validateForegroundOnlyInput(tool: Tool, input: unknown): void {
       }
     }
   }
+}
+
+function markInnerMessageVirtual(message: Message): Message {
+  if (
+    (message.type === 'user' || message.type === 'assistant') &&
+    message.isVirtual !== true
+  ) {
+    return { ...message, isVirtual: true }
+  }
+  return message
 }
 
 function extractTextFromToolResultContent(content: unknown): string {
@@ -222,6 +244,11 @@ export class ReplInnerToolRunner {
     for (const tool of this.options.inventory) {
       if (!isLegalGuestIdentifier(tool.name)) continue
       hostFunctions[tool.name] = args => this.callTool(tool.name, args[0])
+    }
+    for (const tool of this.options.inventory) {
+      const alias = REPL_ERGONOMIC_ALIASES.get(tool.name)
+      if (!alias || hostFunctions[alias]) continue
+      hostFunctions[alias] = args => this.callTool(tool.name, args[0])
     }
     hostFunctions.tool = args => {
       const name = args[0]
@@ -367,7 +394,8 @@ export class ReplInnerToolRunner {
           this.options.onProgress?.(message)
           continue
         }
-        this.options.onVirtualMessage?.(message)
+        const virtualMessage = markInnerMessageVirtual(message)
+        this.options.onVirtualMessage?.(virtualMessage)
         if (message.type !== 'user') continue
         const content = message.message.content
         if (Array.isArray(content)) {

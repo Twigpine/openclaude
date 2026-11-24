@@ -145,19 +145,20 @@ export function getToolSearchOrReadInfo(
   toolInput: unknown,
   tools: Tools,
 ): SearchOrReadResult {
-  // REPL is absorbed silently — its inner tool calls are emitted as virtual
-  // messages (isVirtual: true) via newMessages and flow through this function
-  // as regular Read/Grep/Bash messages. The REPL wrapper itself contributes
-  // no counts and doesn't break the group, so consecutive REPL calls merge.
+  // REPL is a visible orchestration row, not an absorbed implementation
+  // detail. Its virtual inner tool calls flow through this function as regular
+  // Read/Grep/Bash messages and can collapse beneath the outer row, but the
+  // outer row itself must stay navigable so transcript expansion can reveal
+  // the exact script.
   if (toolName === REPL_TOOL_NAME) {
     return {
-      isCollapsible: true,
+      isCollapsible: false,
       isSearch: false,
       isRead: false,
       isList: false,
-      isREPL: true,
+      isREPL: false,
       isMemoryWrite: false,
-      isAbsorbedSilently: true,
+      isAbsorbedSilently: false,
     }
   }
 

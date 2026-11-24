@@ -48,7 +48,7 @@ import type { McpServerType, MessageUpdateLazy } from './toolExecution.js'
 
 export type PostToolUseHooksResult<Output> =
   | MessageUpdateLazy<AttachmentMessage | ProgressMessage<HookProgress>>
-  | { updatedMCPToolOutput: Output }
+  | { updatedToolOutput: Output }
 
 export async function* runPostToolUseHooks<Input extends AnyObject, Output>(
   toolUseContext: ToolUseContext,
@@ -156,11 +156,18 @@ export async function* runPostToolUseHooks<Input extends AnyObject, Output>(
           }
         }
 
-        // If hooks provided updatedMCPToolOutput, yield it if this is an MCP tool
-        if (result.updatedMCPToolOutput && isMcpTool(tool)) {
-          toolOutput = result.updatedMCPToolOutput as Output
+        // Generic updatedToolOutput applies to every tool. The legacy
+        // MCP-only alias remains accepted only for MCP tools. Hooks execute
+        // concurrently, so the last yielded replacement wins downstream.
+        const replacement = result.updatedToolOutput !== undefined
+          ? result.updatedToolOutput
+          : isMcpTool(tool)
+            ? result.updatedMCPToolOutput
+            : undefined
+        if (replacement !== undefined) {
+          toolOutput = replacement as Output
           yield {
-            updatedMCPToolOutput: toolOutput,
+            updatedToolOutput: toolOutput,
           }
         }
       } catch (error) {

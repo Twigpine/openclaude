@@ -264,14 +264,23 @@ export function filterToolsByDenyRules<
   return tools.filter(tool => !getDenyRuleForTool(permissionContext, tool))
 }
 
-export const getTools = (permissionContext: ToolPermissionContext): Tools => {
+type GetToolsOptions = {
+  forceDirectToolInventory?: boolean
+}
+
+export const getTools = (
+  permissionContext: ToolPermissionContext,
+  options: GetToolsOptions = {},
+): Tools => {
+  const replModeActive = isReplModeEnabled() && !options.forceDirectToolInventory
+
   // Simple mode: only Bash, Read, and Edit tools
   if (isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)) {
     // --bare + REPL mode: REPL wraps Bash/Read/Edit/etc inside the VM, so
     // return REPL instead of the raw primitives. Matches the non-bare path
     // below which also hides REPL_ONLY_TOOLS when REPL is enabled.
     const activeREPLTool = getREPLTool()
-    if (isReplModeEnabled() && activeREPLTool) {
+    if (replModeActive && activeREPLTool) {
       const replSimple: Tool[] = [activeREPLTool]
       if (
         feature('COORDINATOR_MODE') &&
@@ -310,8 +319,10 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
   let allowedTools = filterToolsByDenyRules(tools, permissionContext)
 
   // When REPL mode is enabled, hide primitive tools from direct use.
-  // They're still accessible inside REPL via the VM context.
-  if (isReplModeEnabled()) {
+  // They're still accessible inside REPL via the VM context. A forced direct
+  // inventory instead removes REPL itself; nested Agent workers use that shape
+  // so recursive Code Mode cannot be re-entered from inside the guest runtime.
+  if (replModeActive) {
     const replEnabled = allowedTools.some(tool =>
       toolMatchesName(tool, REPL_TOOL_NAME),
     )
@@ -320,6 +331,10 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
         tool => !REPL_ONLY_TOOLS.has(tool.name),
       )
     }
+  } else if (isReplModeEnabled()) {
+    allowedTools = allowedTools.filter(
+      tool => !toolMatchesName(tool, REPL_TOOL_NAME),
+    )
   }
 
   // Filter out any null/undefined tools that might have slipped through
@@ -349,8 +364,9 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
 export function assembleToolPool(
   permissionContext: ToolPermissionContext,
   mcpTools: Tools,
+  options: GetToolsOptions = {},
 ): Tools {
-  const builtInTools = getTools(permissionContext)
+  const builtInTools = getTools(permissionContext, options)
 
   // Filter out MCP tools that are in the deny list, and filter out any null/undefined
   // tools that might have been added by MCP client initialization

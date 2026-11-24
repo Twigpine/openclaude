@@ -744,7 +744,9 @@ export const AgentTool = buildTool({
       ...appState.toolPermissionContext,
       mode: selectedAgent.permissionMode ?? 'acceptEdits'
     };
-    const workerTools = assembleToolPool(workerPermissionContext, appState.mcp.tools);
+    const workerTools = assembleToolPool(workerPermissionContext, appState.mcp.tools, {
+      forceDirectToolInventory: toolUseContext.replInnerExecution === true,
+    });
 
     // Create a stable agent ID early so it can be used for worktree slug
     const earlyAgentId = createAgentId();

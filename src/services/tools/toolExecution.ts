@@ -39,6 +39,7 @@ import { FILE_READ_TOOL_NAME } from '../../tools/FileReadTool/prompt.js'
 import { FILE_WRITE_TOOL_NAME } from '../../tools/FileWriteTool/prompt.js'
 import { NOTEBOOK_EDIT_TOOL_NAME } from '../../tools/NotebookEditTool/constants.js'
 import { POWERSHELL_TOOL_NAME } from '../../tools/PowerShellTool/toolName.js'
+import { REPL_TOOL_NAME } from '../../tools/REPLTool/constants.js'
 import { SKILL_TOOL_NAME } from '../../tools/SkillTool/constants.js'
 import { parseGitCommitId } from '../../tools/shared/gitOperationTracking.js'
 import {
@@ -1439,9 +1440,6 @@ export async function checkPermissionsAndCallTool(
     )
     const durationMs = Date.now() - startTime
     addToToolDuration(durationMs)
-    const replayResultPreview =
-      typeof result.data === 'string' ? result.data.slice(0, 200) : undefined
-
     // Capture structured output from tool result if present
     if (typeof result === 'object' && 'structured_output' in result) {
       // Store the structured output in an attachment message
@@ -1560,10 +1558,10 @@ export async function checkPermissionsAndCallTool(
     const toolContextModifier = result.contextModifier
     const mcpMeta = result.mcpMeta
 
-    async function addToolResult(
+    async function createToolResultUpdate(
       toolUseResult: unknown,
       preMappedBlock?: ToolResultBlockParam,
-    ) {
+    ): Promise<MessageUpdateLazy> {
       // Use the pre-mapped block when available (non-MCP tools where hooks
       // don't modify the output), otherwise map from scratch.
       const toolResultBlock = preMappedBlock
@@ -1613,7 +1611,7 @@ export async function checkPermissionsAndCallTool(
         }
       }
 
-      resultingMessages.push({
+      return {
         message: createUserMessage({
           content: contentBlocks,
           imagePasteIds: allowImageIds,
@@ -1631,13 +1629,23 @@ export async function checkPermissionsAndCallTool(
               modifyContext: toolContextModifier,
             }
           : undefined,
-      })
+      }
+    }
+
+    async function addToolResult(
+      toolUseResult: unknown,
+      preMappedBlock?: ToolResultBlockParam,
+    ): Promise<number> {
+      resultingMessages.push(
+        await createToolResultUpdate(toolUseResult, preMappedBlock),
+      )
+      return resultingMessages.length - 1
     }
 
     // TODO(hackyon): refactor so we don't have different experiences for MCP tools
-    if (!isMcpTool(tool)) {
-      await addToolResult(toolOutput, mappedToolResultBlock)
-    }
+    const committedToolResultIndex = !isMcpTool(tool)
+      ? await addToolResult(toolOutput, mappedToolResultBlock)
+      : undefined
 
     const postToolHookInfos: StopHookInfo[] = []
     const postToolHookStart = Date.now()
@@ -1652,9 +1660,14 @@ export async function checkPermissionsAndCallTool(
       mcpServerType,
       mcpServerBaseUrl,
     )) {
-      if ('updatedMCPToolOutput' in hookResult) {
-        if (isMcpTool(tool)) {
-          toolOutput = hookResult.updatedMCPToolOutput
+      if ('updatedToolOutput' in hookResult) {
+        toolOutput = hookResult.updatedToolOutput
+        if (!isMcpTool(tool) && committedToolResultIndex !== undefined) {
+          // Non-MCP results are ordered before hook attachments. The array is
+          // still local to execution, so replace the pending result in place
+          // before it can reach model context, rendering, or persistence.
+          resultingMessages[committedToolResultIndex] =
+            await createToolResultUpdate(toolOutput)
         }
       } else if (isMcpTool(tool)) {
         hookResults.push(hookResult)
@@ -1724,10 +1737,16 @@ export async function checkPermissionsAndCallTool(
     }
 
     // If the tool provided new messages, add them to the list to return.
+    // REPL's messages are virtual inner provenance produced while the script
+    // ran, so they belong before the reduced outer tool result even though
+    // the tool can only hand them back after execution completes.
     if (result.newMessages && result.newMessages.length > 0) {
-      for (const message of result.newMessages) {
-        resultingMessages.push({ message })
-      }
+      const updates = result.newMessages.map(message => ({ message }))
+      const insertionIndex =
+        tool.name === REPL_TOOL_NAME && committedToolResultIndex !== undefined
+          ? committedToolResultIndex
+          : resultingMessages.length
+      resultingMessages.splice(insertionIndex, 0, ...updates)
     }
     // If hook indicated to prevent continuation after successful execution, yield a stop reason message
     if (shouldPreventContinuation) {
@@ -1753,7 +1772,7 @@ export async function checkPermissionsAndCallTool(
           toolUseID,
           tool.name,
           'success',
-          replayResultPreview,
+          typeof toolOutput === 'string' ? toolOutput.slice(0, 200) : undefined,
           getReplayModifiedFiles(tool.name, callInput),
         )
       } catch {

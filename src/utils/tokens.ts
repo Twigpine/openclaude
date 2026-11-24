@@ -28,6 +28,18 @@ export type SessionUsage = {
   output_tokens: number
 }
 
+
+function isVirtualInnerToolMessage(message: Message | undefined): boolean {
+  return (
+    (message?.type === 'user' || message?.type === 'assistant') &&
+    message.isVirtual === true
+  )
+}
+
+function apiProjectedMessages<T extends readonly Message[]>(messages: T): Message[] {
+  return messages.filter(message => !isVirtualInnerToolMessage(message))
+}
+
 export function getIncrementalTokenCounter(): IncrementalTokenCounter {
   if (!_tokenCounter) {
     _tokenCounter = new IncrementalTokenCounter({
@@ -282,7 +294,7 @@ export function messageTokenCountFromLastAPIResponse(
 export function getCurrentUsage(messages: Message[]): CurrentUsage | null {
   // Scrollback retains pre-compact messages, but current usage must describe
   // only the context sent to the model, including all-zero usage estimates.
-  messages = getMessagesAfterCompactBoundary(messages)
+  messages = apiProjectedMessages(getMessagesAfterCompactBoundary(messages))
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]
     const usage = message ? getTokenUsage(message) : undefined
@@ -322,7 +334,7 @@ export function doesMostRecentAssistantMessageExceed200k(
 ): boolean {
   const THRESHOLD = 200_000
 
-  const lastAsst = messages.findLast(m => m.type === 'assistant')
+  const lastAsst = apiProjectedMessages(messages).findLast(m => m.type === 'assistant')
   if (!lastAsst) return false
   const usage = getTokenUsage(lastAsst)
   return usage ? getTokenCountFromUsage(usage) > THRESHOLD : false
@@ -577,21 +589,25 @@ export class TokenUsageTracker {
  * so every interleaved tool_result is included in the rough estimate.
  */
 export function tokenCountWithEstimation(messages: readonly Message[]): number {
-  let i = messages.length - 1
+  // Virtual REPL inner rows are audit/display provenance only. Token pressure
+  // must follow the API projection: the reduced outer REPL result counts, the
+  // inner payloads that never reach the provider do not.
+  const apiMessages = apiProjectedMessages(messages)
+  let i = apiMessages.length - 1
   while (i >= 0) {
-    const message = messages[i]
+    const message = apiMessages[i]
     const usage = message ? getTokenUsage(message) : undefined
     if (message && usage) {
       // Walk back past any earlier sibling records split from the same API
       // response (same message.id) so interleaved tool_results between them
       // are included in the estimation slice.
-      i = getAssistantResponseStartIndex(messages, i)
+      i = getAssistantResponseStartIndex(apiMessages, i)
       return (
         getTokenCountFromUsage(usage) +
-        getIncrementalTokenCounter().getCount(messages.slice(i + 1))
+        getIncrementalTokenCounter().getCount(apiMessages.slice(i + 1))
       )
     }
     i--
   }
-  return getIncrementalTokenCounter().getCount(messages)
+  return getIncrementalTokenCounter().getCount(apiMessages)
 }

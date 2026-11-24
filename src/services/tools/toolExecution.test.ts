@@ -6,6 +6,7 @@ import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import { getEmptyToolPermissionContext, type Tool, type ToolUseContext } from '../../Tool.js'
 import {
   getReplayIndexBuilder,
+  getSessionId,
   resetAllReplayIndexBuilders,
 } from '../../bootstrap/state.js'
 import { getDefaultAppState } from '../../state/AppStateStore.js'
@@ -88,6 +89,7 @@ function createLifecycleToolUseContext(
   tools: readonly Tool[],
   queryLifecycle: QueryLifecycleOperationTracker,
   abortController = new AbortController(),
+  sessionHooks = new Map(),
 ): ToolUseContext {
   const appState = getDefaultAppState()
   return {
@@ -108,7 +110,7 @@ function createLifecycleToolUseContext(
     readFileState: {},
     getAppState: () => ({
       ...appState,
-      sessionHooks: new Map(),
+      sessionHooks,
       toolPermissionContext: getEmptyToolPermissionContext(),
     }),
     setAppState: () => {},
@@ -145,6 +147,57 @@ async function collectRunToolUse(
   }
   return updates
 }
+
+
+test('PostToolUse updatedToolOutput replaces non-MCP output before commit', async () => {
+  const tool = createToolFixture(z.object({ value: z.string() }), {
+    name: 'HookOutputReplacementTool',
+    async call() {
+      return { data: 'original-sensitive-output' }
+    },
+  })
+  const replacementJson = JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PostToolUse',
+      updatedToolOutput: 'redacted-output',
+    },
+  })
+  const sessionHooks = new Map([
+    [
+      getSessionId(),
+      {
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: 'HookOutputReplacementTool',
+              hooks: [
+                {
+                  hook: {
+                    type: 'command',
+                    command: `printf '%s' '${replacementJson}'`,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  ])
+  const context = createLifecycleToolUseContext(
+    [tool],
+    new CountingQueryLifecycleTracker(),
+    new AbortController(),
+    sessionHooks,
+  )
+
+  const updates = await collectRunToolUse(tool, { value: 'x' }, context)
+  const toolResult = updates.find(update => update.message.type === 'user')?.message
+
+  expect(toolUseResultText(toolResult)).toBe('redacted-output')
+  expect(firstToolResultText(toolResult)).toContain('redacted-output')
+  expect(JSON.stringify(toolResult)).not.toContain('original-sensitive-output')
+})
 
 test('a late successful tool result resets doom blocks without clearing another agent', async () => {
   const agentId = asAgentId('doom-loop-late-success')

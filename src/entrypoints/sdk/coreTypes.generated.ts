@@ -1115,6 +1115,7 @@ export type SubagentStartHookSpecificOutput = {
 export type PostToolUseHookSpecificOutput = {
   hookEventName: "PostToolUse"
   additionalContext?: string
+  updatedToolOutput?: unknown
   updatedMCPToolOutput?: unknown
 }
 
@@ -1242,6 +1243,7 @@ export type SyncHookJSONOutput = {
   }) | ({
     hookEventName: "PostToolUse"
     additionalContext?: string
+    updatedToolOutput?: unknown
     updatedMCPToolOutput?: unknown
   }) | ({
     hookEventName: "PostToolUseFailure"
@@ -1352,6 +1354,7 @@ export type HookJSONOutput = ({
   }) | ({
     hookEventName: "PostToolUse"
     additionalContext?: string
+    updatedToolOutput?: unknown
     updatedMCPToolOutput?: unknown
   }) | ({
     hookEventName: "PostToolUseFailure"

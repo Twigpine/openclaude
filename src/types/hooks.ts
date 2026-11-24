@@ -100,9 +100,13 @@ export const syncHookResponseSchema = lazySchema(() =>
         z.object({
           hookEventName: z.literal('PostToolUse'),
           additionalContext: z.string().optional(),
+          updatedToolOutput: z
+            .unknown()
+            .describe('Updates the output for any tool')
+            .optional(),
           updatedMCPToolOutput: z
             .unknown()
-            .describe('Updates the output for MCP tools')
+            .describe('Legacy alias for updating MCP tool output')
             .optional(),
         }),
         z.object({
@@ -269,6 +273,7 @@ export type HookResult = {
   additionalContext?: string
   initialUserMessage?: string
   updatedInput?: Record<string, unknown>
+  updatedToolOutput?: unknown
   updatedMCPToolOutput?: unknown
   permissionRequestResult?: PermissionRequestResult
   retry?: boolean
@@ -284,6 +289,7 @@ export type AggregatedHookResult = {
   additionalContexts?: string[]
   initialUserMessage?: string
   updatedInput?: Record<string, unknown>
+  updatedToolOutput?: unknown
   updatedMCPToolOutput?: unknown
   permissionRequestResult?: PermissionRequestResult
   retry?: boolean

@@ -537,6 +537,7 @@ export interface HookResult {
   additionalContext?: string
   initialUserMessage?: string
   updatedInput?: Record<string, unknown>
+  updatedToolOutput?: unknown
   updatedMCPToolOutput?: unknown
   permissionRequestResult?: PermissionRequestResult
   elicitationResponse?: ElicitationResponse
@@ -557,6 +558,7 @@ export type AggregatedHookResult = {
   additionalContexts?: string[]
   initialUserMessage?: string
   updatedInput?: Record<string, unknown>
+  updatedToolOutput?: unknown
   updatedMCPToolOutput?: unknown
   permissionRequestResult?: PermissionRequestResult
   watchPaths?: string[]
@@ -832,8 +834,12 @@ function processHookJSONOutput({
         break
       case 'PostToolUse':
         result.additionalContext = json.hookSpecificOutput.additionalContext
-        // Extract updatedMCPToolOutput if provided
-        if (json.hookSpecificOutput.updatedMCPToolOutput) {
+        // Extract generic tool-output replacement first. The legacy MCP-only
+        // alias remains accepted for existing hooks.
+        if (json.hookSpecificOutput.updatedToolOutput !== undefined) {
+          result.updatedToolOutput = json.hookSpecificOutput.updatedToolOutput
+        }
+        if (json.hookSpecificOutput.updatedMCPToolOutput !== undefined) {
           result.updatedMCPToolOutput =
             json.hookSpecificOutput.updatedMCPToolOutput
         }
@@ -3008,8 +3014,18 @@ async function* executeHooks({
       }
     }
 
-    // Yield updatedMCPToolOutput if provided (from PostToolUse hooks)
-    if (result.updatedMCPToolOutput) {
+    // Yield tool-output replacements if provided (from PostToolUse hooks).
+    // undefined is meaningful absence; null, false, and empty values are valid
+    // replacement outputs and must be preserved.
+    if (result.updatedToolOutput !== undefined) {
+      logForDebugging(
+        `Hook ${hookEvent} (${getHookDisplayText(result.hook)}) replaced tool output`,
+      )
+      yield {
+        updatedToolOutput: result.updatedToolOutput,
+      }
+    }
+    if (result.updatedMCPToolOutput !== undefined) {
       logForDebugging(
         `Hook ${hookEvent} (${getHookDisplayText(result.hook)}) replaced MCP tool output`,
       )

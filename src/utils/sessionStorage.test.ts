@@ -18,6 +18,7 @@ import {
   loadSameRepoMessageLogsProgressive,
   loadTranscriptFile,
   loadTranscriptFromFile,
+  reAppendSessionMetadata,
   recordGoalState,
   recordTranscript,
   flushSessionStorage,
@@ -26,6 +27,7 @@ import {
   setSessionFileForTesting,
   restoreSessionMetadata,
   stripPersistedToolUseResultsFromJSONLBuffer,
+  cleanMessagesForLogging,
 } from './sessionStorage.ts'
 import { createGoalState } from '../services/goal/state.js'
 import {
@@ -42,6 +44,10 @@ import {
   setClaudeConfigHomeDirForTesting,
 } from './envUtils.js'
 import { resetSettingsCache } from './settings/settingsCache.js'
+import { SKIP_PRECOMPACT_THRESHOLD } from './sessionStoragePortable.js'
+import {
+  setReplModeEnabledForSession,
+} from '../tools/REPLTool/constants.js'
 
 const tempDirs: string[] = []
 const sessionId = '00000000-0000-4000-8000-000000000999'
@@ -241,6 +247,136 @@ afterEach(async () => {
   } finally {
     releaseSharedMutationLock()
   }
+})
+
+
+test('cleanMessagesForLogging preserves Code Mode outer script and inner provenance', () => {
+  setReplModeEnabledForSession(true)
+  try {
+    const outerUse = {
+      ...assistant(id(801), id(800), ''),
+      message: {
+        ...assistant(id(801), id(800), '').message,
+        content: [
+          {
+            type: 'tool_use',
+            id: 'repl-use-1',
+            name: 'REPL',
+            input: { code: 'await Read({file_path:"a.ts"})' },
+          },
+        ],
+      },
+    }
+    const innerUse = {
+      ...assistant(id(802), id(801), ''),
+      isVirtual: true,
+      message: {
+        ...assistant(id(802), id(801), '').message,
+        content: [
+          {
+            type: 'tool_use',
+            id: 'inner-use-1',
+            name: 'Read',
+            input: { file_path: 'a.ts' },
+          },
+        ],
+      },
+    }
+    const innerResult = {
+      ...user(id(803), id(802), [
+        {
+          type: 'tool_result',
+          tool_use_id: 'inner-use-1',
+          content: 'inner output',
+          is_error: false,
+        } as ToolResultBlockParam,
+      ]),
+      isVirtual: true,
+    }
+    const outerResult = user(id(804), id(803), [
+      {
+        type: 'tool_result',
+        tool_use_id: 'repl-use-1',
+        content: 'REPL completed',
+        is_error: false,
+      } as ToolResultBlockParam,
+    ])
+
+    const cleaned = cleanMessagesForLogging([
+      outerUse,
+      innerUse,
+      innerResult,
+      outerResult,
+    ] as never)
+
+    expect(cleaned).toHaveLength(4)
+    expect(cleaned[0] as object).toBe(outerUse as object)
+    expect((cleaned[1] as { isVirtual?: boolean }).isVirtual).toBe(true)
+    expect((cleaned[2] as { isVirtual?: boolean }).isVirtual).toBe(true)
+    expect(cleaned[3] as object).toBe(outerResult as object)
+  } finally {
+    setReplModeEnabledForSession(false)
+  }
+})
+
+test('session metadata persists and reloads the Code Mode contract', async () => {
+  await withSessionPersistence(async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openclaude-session-storage-'))
+    tempDirs.push(dir)
+    const filePath = join(dir, `${sessionId}.jsonl`)
+    await writeFile(
+      filePath,
+      `${JSON.stringify(user(id(805), null, 'resume me'))}\n`,
+    )
+
+    switchSession(sessionId as never, dir)
+    await resetSessionFilePointer()
+    restoreSessionMetadata({ codeMode: true })
+    adoptResumedSessionFile()
+    reAppendSessionMetadata()
+
+    const text = await readFile(filePath, 'utf8')
+    expect(text).toContain('"type":"code-mode"')
+    expect(text).toContain('"codeMode":true')
+
+    const { codeModes } = await loadTranscriptFile(filePath)
+    expect(codeModes.get(sessionId as never)).toBe(true)
+  })
+})
+
+
+test('loadTranscriptFile recovers Code Mode metadata written before compaction', async () => {
+  const filler = user(
+    id(810),
+    null,
+    'pre-compact filler '.padEnd(SKIP_PRECOMPACT_THRESHOLD + 100, 'x'),
+  )
+  const boundary = {
+    ...base(id(811), id(810)),
+    type: 'system',
+    subtype: 'compact_boundary',
+    level: 'info',
+    isMeta: false,
+    content: 'Conversation compacted',
+    compactMetadata: {
+      trigger: 'manual',
+      preTokens: 123,
+    },
+  }
+  const postCompactUser = user(id(812), id(811), 'post compact prompt')
+  const postCompactAssistant = assistant(id(813), id(812), 'post compact reply')
+
+  const filePath = await writeJsonl([
+    { type: 'code-mode', sessionId, codeMode: true },
+    filler,
+    boundary,
+    postCompactUser,
+    postCompactAssistant,
+  ])
+
+  const { codeModes } = await loadTranscriptFile(filePath)
+
+  expect(codeModes.get(sessionId as never)).toBe(true)
 })
 
 test('recordTranscript respects prompt-history opt-out for replay state', async () => {

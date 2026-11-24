@@ -26,6 +26,26 @@ describe('executeQuickJSScript', () => {
     expect(result.stderr).toBe('bad\n')
   }, TEST_TIMEOUT)
 
+  test('preserves large string inputs exactly instead of truncating tool arguments', async () => {
+    const result = await executeQuickJSScript({
+      code: "const content = 'x'.repeat(20000); return await capture({content})",
+      hostFunctions: {
+        capture: args => (args[0] as { content: string }).content.length,
+      },
+    })
+    expect(result.status).toBe('completed')
+    expect(result.result).toBe(20_000)
+  }, TEST_TIMEOUT)
+
+  test('rejects non-JSON host inputs instead of coercing them into tool arguments', async () => {
+    const circular = await executeQuickJSScript({
+      code: "const value = {}; value.self = value; try { await capture(value); return 'coerced' } catch (error) { return error.message }",
+      hostFunctions: { capture: args => args[0] },
+    })
+    expect(circular.status).toBe('completed')
+    expect(String(circular.result)).not.toBe('coerced')
+  }, TEST_TIMEOUT)
+
   test('overlaps deferred host promises through Promise.all and drains pending jobs', async () => {
     let active = 0
     let maxActive = 0

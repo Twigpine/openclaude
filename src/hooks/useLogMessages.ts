@@ -101,12 +101,12 @@ export function useLogMessages(messages: Message[], ignore: boolean = false) {
     // messagesToKeep whose last-actually-recorded uuid differs.
     if (isIncremental || wasFirstRender || isSameHeadShrink) {
       // Match EXACTLY what recordTranscript persists: cleanMessagesForLogging
-      // applies both the isLoggableMessage filter and (for external users) the
-      // REPL-strip + isVirtual-promote transform. Using the raw predicate here
-      // would pick a UUID that the transform drops, leaving the parent hint
-      // pointing at a message that never reached disk. Pass full messages as
-      // replId context — REPL tool_use and its tool_result land in separate
-      // render cycles, so the slice alone can't pair them.
+      // applies both the isLoggableMessage filter and any legacy REPL
+      // transcript transform. Using the raw predicate here could pick a UUID
+      // that the transform drops, leaving the parent hint pointing at a
+      // message that never reached disk. Pass full messages as replId context.
+      // REPL tool_use and its tool_result land in separate render cycles,
+      // so the slice alone can't pair them.
       const last = cleanMessagesForLogging(slice, messages).findLast(
         isChainParticipant,
       )
