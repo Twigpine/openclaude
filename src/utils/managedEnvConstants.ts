@@ -1,3 +1,25 @@
+export const CODE_MODE_ENV_VAR = 'CLAUDE_CODE_EXPERIMENTAL_CODE_MODE'
+
+/**
+ * Snapshot of the process environment before any settings-sourced env is
+ * applied. managedEnv.ts imports this module before every settings merge, so
+ * module evaluation is the earliest reliable capture point owned by the
+ * settings-env pipeline. Code Mode activation must use this snapshot rather
+ * than rereading mutable process.env after settings or provider profiles run.
+ */
+const originalProcessEnvBeforeSettings: Readonly<
+  Record<string, string | undefined>
+> = Object.freeze(
+  // eslint-disable-next-line custom-rules/no-process-env-top-level -- intentional pre-settings snapshot
+  { ...process.env },
+)
+
+export function getOriginalProcessEnvBeforeSettings(): Readonly<
+  Record<string, string | undefined>
+> {
+  return originalProcessEnvBeforeSettings
+}
+
 /**
  * Environment variables that control inference routing: which provider to use,
  * which endpoint to hit, and which model IDs to send.

@@ -4,6 +4,7 @@ import { getGlobalConfig } from './config.js'
 import { reapplyRememberedEnvFileValues } from './envFile.js'
 import { isEnvTruthy } from './envUtils.js'
 import {
+  CODE_MODE_ENV_VAR,
   isProviderManagedEnvVar,
   SAFE_ENV_VARS,
 } from './managedEnvConstants.js'
@@ -97,6 +98,36 @@ function filterSettingsEnv(
 }
 
 /**
+ * Remove project/local-settings control of Code Mode from the merged settings
+ * env while preserving the normal cascade among non-project sources. The
+ * merged object alone cannot say which source supplied the key, so reconstruct
+ * just this key from user -> flag -> policy order. Project and local values are
+ * ignored in both directions: they can neither enable nor disable the mode.
+ */
+function withoutProjectScopedCodeModeEnv(
+  env: Record<string, string> | undefined,
+): Record<string, string> {
+  if (!env || !(CODE_MODE_ENV_VAR in env)) return env || {}
+  const out = { ...env }
+  let nonProjectValue: string | undefined
+  for (const source of [
+    'userSettings',
+    'flagSettings',
+    'policySettings',
+  ] as const) {
+    if (!isSettingSourceEnabled(source)) continue
+    const value = getSettingsForSource(source)?.env?.[CODE_MODE_ENV_VAR]
+    if (value !== undefined) nonProjectValue = value
+  }
+  if (nonProjectValue === undefined) {
+    delete out[CODE_MODE_ENV_VAR]
+  } else {
+    out[CODE_MODE_ENV_VAR] = nonProjectValue
+  }
+  return out
+}
+
+/**
  * Trusted setting sources whose env vars can be applied before the trust dialog.
  *
  * - userSettings (~/.claude/settings.json): controlled by the user, not project-specific
@@ -175,7 +206,9 @@ export function applySafeConfigEnvironmentVariables(): void {
   // unchanged (it has the highest merge priority in both loops) — except
   // provider-routing vars, which filterSettingsEnv strips from every source
   // when CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST is set.
-  const settingsEnv = filterSettingsEnv(getSettings_DEPRECATED()?.env)
+  const settingsEnv = filterSettingsEnv(
+    withoutProjectScopedCodeModeEnv(getSettings_DEPRECATED()?.env),
+  )
   for (const [key, value] of Object.entries(settingsEnv)) {
     if (SAFE_ENV_VARS.has(key.toUpperCase())) {
       process.env[key] = value
@@ -209,7 +242,12 @@ export function applyConfigEnvironmentVariables(): void {
   try {
     Object.assign(process.env, filterSettingsEnv(getGlobalConfig().env))
 
-    Object.assign(process.env, filterSettingsEnv(getSettings_DEPRECATED()?.env))
+    Object.assign(
+      process.env,
+      filterSettingsEnv(
+        withoutProjectScopedCodeModeEnv(getSettings_DEPRECATED()?.env),
+      ),
+    )
 
     // Keep runtime provider/model env aligned with the active profile, except
     // when an explicit provider selection is already present in process.env.

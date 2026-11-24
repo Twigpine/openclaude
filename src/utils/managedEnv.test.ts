@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -30,6 +30,16 @@ import {
 } from './providerFlag.js'
 import { snapshotEnv } from '../test/envSnapshot.js'
 import {
+  getFlagSettingsInline,
+  getFlagSettingsPath,
+  getProjectRoot,
+  setFlagSettingsInline,
+  setFlagSettingsPath,
+  setProjectRoot,
+} from '../bootstrap/state.js'
+import { CODE_MODE_ENV_VAR, SAFE_ENV_VARS } from './managedEnvConstants.js'
+import { resetSettingsCache } from './settings/settingsCache.js'
+import {
   applyProviderProfileToProcessEnv,
   clearProviderProfileEnvFromProcessEnv,
   updateProviderProfile,
@@ -39,6 +49,8 @@ import { getSmallFastModel } from './model/model.js'
 import { getCommandcodeChatCompletionsModelError } from '../integrations/gateways/commandcode.js'
 
 const ENV_KEYS = [
+  CODE_MODE_ENV_VAR,
+  'CLAUDE_CODE_USE_COWORK_PLUGINS',
   'GEMINI_ACCESS_TOKEN',
   'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
   'CLAUDE_CODE_USE_GEMINI',
@@ -115,6 +127,114 @@ function writeTempEnvFile(content: string): string {
   writeFileSync(filePath, content, 'utf-8')
   return filePath
 }
+
+describe('Code Mode settings env boundary', () => {
+  function writeSettingsFiles(input: {
+    user?: Record<string, unknown>
+    project?: Record<string, unknown>
+    local?: Record<string, unknown>
+  }): {
+    restore: () => void
+  } {
+    const previousProjectRoot = getProjectRoot()
+    const previousConfigDir = process.env.OPENCLAUDE_CONFIG_DIR
+    const previousFlagSettingsPath = getFlagSettingsPath()
+    const previousFlagSettingsInline = getFlagSettingsInline()
+    const configDir = join(tempDir, 'config')
+    const projectRoot = join(tempDir, 'project')
+    mkdirSync(configDir, { recursive: true })
+    mkdirSync(join(projectRoot, '.openclaude'), { recursive: true })
+    if (input.user) {
+      writeFileSync(join(configDir, 'settings.json'), JSON.stringify(input.user))
+    }
+    if (input.project) {
+      writeFileSync(join(projectRoot, '.openclaude/settings.json'), JSON.stringify(input.project))
+    }
+    if (input.local) {
+      writeFileSync(join(projectRoot, '.openclaude/settings.local.json'), JSON.stringify(input.local))
+    }
+    process.env.OPENCLAUDE_CONFIG_DIR = configDir
+    setProjectRoot(projectRoot)
+    setFlagSettingsPath(undefined)
+    setFlagSettingsInline(null)
+    resetSettingsCache()
+    return {
+      restore: () => {
+        setProjectRoot(previousProjectRoot)
+        setFlagSettingsPath(previousFlagSettingsPath)
+        setFlagSettingsInline(previousFlagSettingsInline)
+        if (previousConfigDir === undefined) {
+          delete process.env.OPENCLAUDE_CONFIG_DIR
+        } else {
+          process.env.OPENCLAUDE_CONFIG_DIR = previousConfigDir
+        }
+        resetSettingsCache()
+      },
+    }
+  }
+
+  it('does not apply project settings before trust and is not a safe env var', () => {
+    const { restore } = writeSettingsFiles({
+      project: { env: { [CODE_MODE_ENV_VAR]: '1' } },
+    })
+    try {
+      delete process.env[CODE_MODE_ENV_VAR]
+      applySafeConfigEnvironmentVariables()
+
+      expect(SAFE_ENV_VARS.has(CODE_MODE_ENV_VAR)).toBe(false)
+      expect(process.env[CODE_MODE_ENV_VAR]).toBeUndefined()
+    } finally {
+      restore()
+    }
+  })
+
+  it('filters project and local settings after trust', () => {
+    const { restore } = writeSettingsFiles({
+      project: { env: { [CODE_MODE_ENV_VAR]: '1' } },
+      local: { env: { [CODE_MODE_ENV_VAR]: '1' } },
+    })
+    try {
+      delete process.env[CODE_MODE_ENV_VAR]
+      applyConfigEnvironmentVariables()
+
+      expect(process.env[CODE_MODE_ENV_VAR]).toBeUndefined()
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not let project or local falsy values override trusted user settings', () => {
+    const { restore } = writeSettingsFiles({
+      user: { env: { [CODE_MODE_ENV_VAR]: '1' } },
+      project: { env: { [CODE_MODE_ENV_VAR]: '0' } },
+      local: { env: { [CODE_MODE_ENV_VAR]: '0' } },
+    })
+    try {
+      delete process.env[CODE_MODE_ENV_VAR]
+      applyConfigEnvironmentVariables()
+
+      expect(process.env[CODE_MODE_ENV_VAR]).toBe('1')
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not let project or local truthy values override trusted user falsy settings', () => {
+    const { restore } = writeSettingsFiles({
+      user: { env: { [CODE_MODE_ENV_VAR]: '0' } },
+      project: { env: { [CODE_MODE_ENV_VAR]: '1' } },
+      local: { env: { [CODE_MODE_ENV_VAR]: '1' } },
+    })
+    try {
+      delete process.env[CODE_MODE_ENV_VAR]
+      applyConfigEnvironmentVariables()
+
+      expect(process.env[CODE_MODE_ENV_VAR]).toBe('0')
+    } finally {
+      restore()
+    }
+  })
+})
 
 describe('host-managed API Route settings boundary', () => {
   for (const [name, applySettings] of [

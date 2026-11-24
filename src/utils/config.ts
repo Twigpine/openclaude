@@ -282,6 +282,8 @@ export type GlobalConfig = {
   }
   primaryApiKey?: string // Primary API key for the user when no environment variable is set, set via oauth (TODO: rename)
   hasAcknowledgedCostThreshold?: boolean
+  // Persistent first-use acknowledgement for experimental Code Mode.
+  hasAcknowledgedCodeMode?: boolean
   hasSeenUndercoverAutoNotice?: boolean // internal-only: whether the one-time auto-undercover explainer has been shown
   hasSeenUltraplanTerms?: boolean // internal-only: whether the one-time CCR terms notice has been shown in the ultraplan launch dialog
   hasResetAutoModeOptInForDefaultOffer?: boolean // internal-only: one-shot migration guard, re-prompts churned auto-mode users
@@ -984,6 +986,17 @@ function wouldLoseAuthState(fresh: {
     cached.hasCompletedOnboarding === true &&
     fresh.hasCompletedOnboarding !== true
   return lostOauth || lostOnboarding
+}
+
+export function hasAcknowledgedCodeMode(): boolean {
+  return getGlobalConfig().hasAcknowledgedCodeMode === true
+}
+
+export function markCodeModeAcknowledged(): void {
+  saveGlobalConfig(current => ({
+    ...current,
+    hasAcknowledgedCodeMode: true,
+  }))
 }
 
 export function saveGlobalConfig(

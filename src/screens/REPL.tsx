@@ -77,6 +77,7 @@ import type { SSHSession } from '../ssh/createSSHSession.js';
 import { SpinnerWithVerb, BriefIdleStatus, type SpinnerMode } from '../components/Spinner.js';
 import { CompletionFlash } from '../components/Spinner/CompletionFlash.js';
 import { getSystemPrompt } from '../constants/prompts.js';
+import { CODE_MODE_STARTUP_NOTICE, isReplModeEnabled } from '../tools/REPLTool/constants.js';
 import { buildEffectiveSystemPrompt } from '../utils/systemPrompt.js';
 import { getSystemContext, getUserContext } from '../context.js';
 import { getMemoryFiles } from '../utils/claudemd.js';
@@ -1379,6 +1380,19 @@ export function REPL({
     }
     rawSetMessages(next);
   }, [interruptionCorrectionTracker]);
+  useEffect(() => {
+    if (!isReplModeEnabled()) return;
+    setMessages(prev => {
+      const alreadyShown = prev.some(message =>
+        message.type === 'system' &&
+        message.subtype === 'informational' &&
+        message.content === CODE_MODE_STARTUP_NOTICE,
+      );
+      return alreadyShown
+        ? prev
+        : [...prev, createSystemMessage(CODE_MODE_STARTUP_NOTICE, 'warning')];
+    });
+  }, [setMessages]);
   // Capture the baseline message count alongside the placeholder text so
   // the render can hide it once displayedMessages grows past the baseline.
   const setUserInputOnProcessing = useCallback((input: string | undefined) => {

@@ -1,24 +1,80 @@
+import {
+  CODE_MODE_ENV_VAR,
+  getOriginalProcessEnvBeforeSettings,
+} from '../../utils/managedEnvConstants.js'
 import { isEnvDefinedFalsy, isEnvTruthy } from '../../utils/envUtils.js'
 
 export const REPL_TOOL_NAME = 'REPL'
+export { CODE_MODE_ENV_VAR }
+
+export const CODE_MODE_STARTUP_NOTICE = `Experimental Code Mode is active. The model can orchestrate tools through JavaScript in this interactive session. This session can be resumed only when ${CODE_MODE_ENV_VAR} is enabled.`
 
 /**
- * REPL mode is default-on for ants in the interactive CLI (opt out with
- * CLAUDE_CODE_REPL=0). The legacy CLAUDE_REPL_MODE=1 also forces it on.
- *
- * SDK entrypoints (sdk-ts, sdk-py, sdk-cli) are NOT defaulted on — SDK
- * consumers script direct tool calls (Bash, Read, etc.) and REPL mode
- * hides those tools. USER_TYPE is a build-time --define, so the ant-native
- * binary would otherwise force REPL mode on every SDK subprocess regardless
- * of the env the caller passes.
+ * Session-stable Code Mode activation. The interactive CLI resolves this once
+ * during startup from the pre-settings process environment plus user settings.
+ * Programmatic entrypoints never enable it, so the default state is direct tools.
  */
+let replModeEnabledForSession = false
+
+export function setReplModeEnabledForSession(enabled: boolean): void {
+  replModeEnabledForSession = enabled
+}
+
 export function isReplModeEnabled(): boolean {
-  if (isEnvDefinedFalsy(process.env.CLAUDE_CODE_REPL)) return false
-  if (isEnvTruthy(process.env.CLAUDE_REPL_MODE)) return true
-  return (
-    process.env.USER_TYPE === 'ant' &&
-    process.env.CLAUDE_CODE_ENTRYPOINT === 'cli'
-  )
+  return replModeEnabledForSession
+}
+
+/**
+ * Resolve the experimental enablement without reading mutable process.env.
+ *
+ * Accepted sources are exactly the original process environment and user-level
+ * settings env. Project and local settings are filtered before this point and
+ * are never accepted. An explicitly falsy value in either accepted source wins
+ * over a truthy value in the other. Legacy CLAUDE_CODE_REPL, CLAUDE_REPL_MODE,
+ * and USER_TYPE=ant intentionally have no effect.
+ */
+export function resolveCodeModeEnablement(input: {
+  originalProcessEnv?: Readonly<Record<string, string | undefined>>
+  userSettingsEnv?: Readonly<Record<string, string | undefined>>
+  isInteractive: boolean
+  entrypoint: string | undefined
+}): boolean {
+  if (!input.isInteractive || input.entrypoint !== 'cli') return false
+
+  const acceptedValues = [
+    input.originalProcessEnv?.[CODE_MODE_ENV_VAR],
+    input.userSettingsEnv?.[CODE_MODE_ENV_VAR],
+  ]
+  if (acceptedValues.some(isEnvDefinedFalsy)) return false
+  return acceptedValues.some(isEnvTruthy)
+}
+
+
+export function shouldShowCodeModeConsent(
+  enablement: boolean,
+  hasAcknowledged: boolean,
+): boolean {
+  return enablement && !hasAcknowledged
+}
+
+export function resolveCodeModeActivationAfterConsent(input: {
+  enablement: boolean
+  hasAcknowledged: boolean
+  consentAccepted?: boolean
+}): boolean {
+  if (!input.enablement) return false
+  return input.hasAcknowledged || input.consentAccepted === true
+}
+
+/**
+ * The process env snapshot captured before settings env application. This is
+ * the only process-env input to activation; later process.env mutations from
+ * settings, provider profiles, or tests must not toggle the session mode.
+ */
+export function getCodeModeOriginalProcessEnv(): Readonly<
+  Record<string, string | undefined>
+> {
+  return getOriginalProcessEnvBeforeSettings()
 }
 
 /**
