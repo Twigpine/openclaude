@@ -3281,9 +3281,11 @@ export const fetchToolsForClient = memoizeWithLRU(
                         }
                         : undefined,
                     handleElicitation: context.handleElicitation,
-                    onServerTaskStarted: () => {
-                      taskified = true
-                    },
+                    onServerTaskStarted: context.replInnerExecution
+                      ? undefined
+                      : () => {
+                        taskified = true
+                      },
                   })
 
                   stopActivityHeartbeat()

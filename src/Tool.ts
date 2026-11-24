@@ -223,6 +223,8 @@ export type ToolUseContext = {
   abortController: AbortController
   /** Cancels work attached to discarded tool results, independently of sibling failures. */
   toolResultAbortSignal?: AbortSignal
+  /** True for canonical tool calls scoped inside a foreground REPL script. */
+  replInnerExecution?: boolean
   readFileState: FileStateCache
   getAppState(): AppState
   /** Returns untransformed root state when this context belongs to an agent. */

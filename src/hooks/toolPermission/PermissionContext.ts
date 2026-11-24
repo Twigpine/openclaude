@@ -314,7 +314,7 @@ function createPermissionContext(
           controllerRole: 'query-root',
         })
       }
-      return { behavior: 'ask', message, contentBlocks }
+      return { behavior: 'ask', message, contentBlocks, ...(feedback ? { rejectFeedback: feedback } : {}) }
     },
     ...(feature('BASH_CLASSIFIER')
       ? {

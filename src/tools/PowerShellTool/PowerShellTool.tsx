@@ -780,7 +780,8 @@ export const PowerShellTool = buildTool({
         preventCwdChanges: !isMainThread,
         isMainThread,
         toolUseId: toolUseContext.toolUseId,
-        agentId: toolUseContext.agentId
+        agentId: toolUseContext.agentId,
+        foregroundOnly: toolUseContext.replInnerExecution === true
       });
       let generatorResult;
       do {
@@ -1036,7 +1037,8 @@ async function* runPowerShellCommand({
   preventCwdChanges,
   isMainThread,
   toolUseId,
-  agentId
+  agentId,
+  foregroundOnly
 }: {
   input: PowerShellToolInput;
   abortController: AbortController;
@@ -1046,6 +1048,7 @@ async function* runPowerShellCommand({
   isMainThread?: boolean;
   toolUseId?: string;
   agentId?: AgentId;
+  foregroundOnly?: boolean;
 }): AsyncGenerator<{
   type: 'progress';
   output: string;
@@ -1082,7 +1085,7 @@ async function* runPowerShellCommand({
       resolveProgress = () => resolve(null);
     });
   }
-  const shouldAutoBackground = !isBackgroundTasksDisabled && isAutobackgroundingAllowed(command);
+  const shouldAutoBackground = foregroundOnly !== true && !isBackgroundTasksDisabled && isAutobackgroundingAllowed(command);
   const powershellPath = await getCachedPowerShellPath();
   if (!powershellPath) {
     // Pre-flight failure: pwsh not installed. Return code 0 so call() surfaces
@@ -1200,7 +1203,7 @@ async function* runPowerShellCommand({
   // In assistant mode, the main agent should stay responsive. Auto-background
   // blocking commands after ASSISTANT_BLOCKING_BUDGET_MS so the agent can keep
   // coordinating instead of waiting. The command keeps running — no state loss.
-  if (feature('KAIROS') && getKairosActive() && isMainThread && !isBackgroundTasksDisabled && run_in_background !== true) {
+  if (foregroundOnly !== true && feature('KAIROS') && getKairosActive() && isMainThread && !isBackgroundTasksDisabled && run_in_background !== true) {
     setTimeout(() => {
       if (shellCommand.status === 'running' && backgroundShellId === undefined) {
         assistantAutoBackgrounded = true;
@@ -1325,7 +1328,7 @@ async function* runPowerShellCommand({
       const elapsedSeconds = Math.floor(elapsed / 1000);
 
       // Show backgrounding UI hint after threshold
-      if (!isBackgroundTasksDisabled && backgroundShellId === undefined && elapsedSeconds >= PROGRESS_THRESHOLD_MS / 1000 && setToolJSX) {
+      if (foregroundOnly !== true && !isBackgroundTasksDisabled && backgroundShellId === undefined && elapsedSeconds >= PROGRESS_THRESHOLD_MS / 1000 && setToolJSX) {
         if (!foregroundTaskId) {
           foregroundTaskId = registerForeground({
             command,

@@ -49,17 +49,21 @@ function getQuickJSModule(): Promise<QuickJSWASMModule> {
 /** Tracks intervals spent waiting for a human decision so they do not count as script execution time. */
 export class PromptWaitTracker {
   private excludedMs = 0
+  private activeWaits = 0
   private startedAt: number | undefined
 
   begin(): void {
-    if (this.startedAt !== undefined) return
-    this.startedAt = Date.now()
+    this.activeWaits += 1
+    if (this.activeWaits === 1) this.startedAt = Date.now()
   }
 
   end(): void {
-    if (this.startedAt === undefined) return
-    this.excludedMs += Date.now() - this.startedAt
-    this.startedAt = undefined
+    if (this.activeWaits === 0) return
+    this.activeWaits -= 1
+    if (this.activeWaits === 0 && this.startedAt !== undefined) {
+      this.excludedMs += Date.now() - this.startedAt
+      this.startedAt = undefined
+    }
   }
 
   currentExcludedMs(now = Date.now()): number {
@@ -201,7 +205,11 @@ export async function executeQuickJSScript(
         })
         .catch((error: unknown) => {
           if (tornDown) return
-          const errorHandle = hostValueToQuickJS(context, serializeBridgeError(error))
+          const serialized = serializeBridgeError(error)
+          const errorHandle = context.newError({
+            name: serialized.name,
+            message: serialized.message,
+          })
           deferred.reject(errorHandle)
           disposeQuietly(errorHandle)
         })
