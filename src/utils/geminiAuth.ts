@@ -78,7 +78,7 @@ export function getGeminiVertexProjectId(
 }
 
 const DEFAULT_GEMINI_VERTEX_LOCATION = 'global'
-export const DEFAULT_GEMINI_VERTEX_MODEL = 'gemini-2.5-flash'
+export const DEFAULT_GEMINI_VERTEX_MODEL = 'gemini-3.8-flash'
 
 export function getGeminiVertexLocation(
   env: NodeJS.ProcessEnv = process.env,
