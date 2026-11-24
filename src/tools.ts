@@ -14,7 +14,12 @@ import { TaskStopTool } from './tools/TaskStopTool/TaskStopTool.js'
 import { BriefTool } from './tools/BriefTool/BriefTool.js'
 // Dead code elimination: conditional import for internal-only tools
 /* eslint-disable @typescript-eslint/no-require-imports */
-const REPLTool = null
+const getREPLTool = () => {
+  if (!isReplModeEnabled()) return null
+  return (
+    require('./tools/REPLTool/REPLTool.js') as typeof import('./tools/REPLTool/REPLTool.js')
+  ).REPLTool
+}
 const SuggestBackgroundPRTool = null
 const SleepTool =
   feature('PROACTIVE') || feature('KAIROS')
@@ -231,6 +236,7 @@ export function getAllBaseTools(): Tools {
     ...(() => { const pst = getPowerShellTool(); return pst ? [pst] : [] })(),
     ...(SnipTool ? [SnipTool] : []),
     ...(process.env.NODE_ENV === 'test' ? [TestingPermissionTool] : []),
+    ...(() => { const repl = getREPLTool(); return repl ? [repl] : [] })(),
     ListMcpResourcesTool,
     ReadMcpResourceTool,
     // Include ToolSearchTool when tool search might be enabled (optimistic check)
@@ -264,8 +270,9 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
     // --bare + REPL mode: REPL wraps Bash/Read/Edit/etc inside the VM, so
     // return REPL instead of the raw primitives. Matches the non-bare path
     // below which also hides REPL_ONLY_TOOLS when REPL is enabled.
-    if (isReplModeEnabled() && REPLTool) {
-      const replSimple: Tool[] = [REPLTool]
+    const activeREPLTool = getREPLTool()
+    if (isReplModeEnabled() && activeREPLTool) {
+      const replSimple: Tool[] = [activeREPLTool]
       if (
         feature('COORDINATOR_MODE') &&
         coordinatorModeModule?.isCoordinatorMode()

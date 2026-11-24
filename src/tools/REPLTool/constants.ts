@@ -90,5 +90,6 @@ export const REPL_ONLY_TOOLS = new Set([
   'Grep',
   'Bash',
   'NotebookEdit',
+  'PowerShell',
   'Agent',
 ])

@@ -1,6 +1,7 @@
 import { c as _c } from "react-compiler-runtime";
 import type { ToolUseBlockParam } from '@anthropic-ai/sdk/resources/index.mjs';
-import { findToolByName, type Tool, type Tools } from '../../../Tool.js';
+import { type Tool, type Tools } from '../../../Tool.js';
+import { findToolForDisplay } from '../../../utils/toolDisplay.js';
 import type { buildMessageLookups } from '../../../utils/messages.js';
 export function useGetToolFromMessages(toolUseID, tools, lookups) {
   const $ = _c(7);
@@ -12,7 +13,7 @@ export function useGetToolFromMessages(toolUseID, tools, lookups) {
         t0 = null;
         break bb0;
       }
-      const tool = findToolByName(tools, toolUse.name);
+      const tool = findToolForDisplay(tools, toolUse.name);
       if (!tool) {
         t0 = null;
         break bb0;

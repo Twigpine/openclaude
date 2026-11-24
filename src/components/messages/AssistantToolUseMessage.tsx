@@ -8,7 +8,8 @@ import { BLACK_CIRCLE } from '../../constants/figures.js';
 import { stringWidth } from '../../ink/stringWidth.js';
 import { Box, Text, useTheme } from '../../ink.js';
 import { useAppStateMaybeOutsideOfProvider } from '../../state/AppState.js';
-import { findToolByName, type Tool, type ToolProgressData, type Tools } from '../../Tool.js';
+import { type Tool, type ToolProgressData, type Tools } from '../../Tool.js';
+import { findToolForDisplay } from '../../utils/toolDisplay.js';
 import type { ProgressMessage } from '../../types/message.js';
 import { logError } from '../../utils/log.js';
 import type { buildMessageLookups } from '../../utils/messages.js';
@@ -58,7 +59,7 @@ export function AssistantToolUseMessage(t0) {
         t1 = null;
         break bb0;
       }
-      const tool = findToolByName(tools, param.name);
+      const tool = findToolForDisplay(tools, param.name);
       if (!tool) {
         t1 = null;
         break bb0;
