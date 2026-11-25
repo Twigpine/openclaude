@@ -55,6 +55,15 @@ function allowCanUseTool(calls: string[] = []): CanUseToolFn {
   }
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return
+    await Bun.sleep(1)
+  }
+  throw new Error('Timed out waiting for inner runner test condition')
+}
+
 function createRunner(tools: readonly Tool[], options: {
   caps?: ConstructorParameters<typeof ReplInnerToolRunner>[0]['caps']
   onVirtualMessage?: (message: Message) => void
@@ -630,6 +639,62 @@ describe('ReplInnerToolRunner', () => {
       ])).resolves.toEqual(['write', 'write'])
       expect(maxActive).toBe(1)
     } finally {
+      runner.dispose()
+    }
+  })
+
+  test('does not start an upgraded write when abort wins the lane grant race', async () => {
+    resetDoomLoop()
+    let releaseFirst!: () => void
+    const firstCanFinish = new Promise<void>(resolve => {
+      releaseFirst = resolve
+    })
+    const events: string[] = []
+    const tool = createToolFixture(z.object({ value: z.string(), mode: z.string().optional() }), {
+      name: 'AbortLaneRaceFixture',
+      isReadOnly: () => true,
+      isConcurrencySafe: input => input.mode !== 'write',
+      async call(input) {
+        events.push(`start:${input.value}`)
+        if (input.value === 'one') await firstCanFinish
+        events.push(`end:${input.value}`)
+        return { data: input.value }
+      },
+    })
+    const rewriteSecondCanUseTool: CanUseToolFn = async (_tool, input) => {
+      const record = input as Record<string, unknown>
+      return {
+        behavior: 'allow',
+        updatedInput: record.value === 'two'
+          ? { ...record, mode: 'write' }
+          : record,
+      }
+    }
+    const runner = createRunner([tool], { canUseTool: rewriteSecondCanUseTool })
+    const lane = (runner as unknown as {
+      executionLane: {
+        releaseRead(): void
+        waiters: Array<{ kind: 'read' | 'write' }>
+      }
+    }).executionLane
+    const originalReleaseRead = lane.releaseRead.bind(lane)
+    lane.releaseRead = () => {
+      originalReleaseRead()
+      runner.abort()
+    }
+
+    try {
+      const first = runner.callTool('AbortLaneRaceFixture', { value: 'one' })
+      const second = runner.callTool('AbortLaneRaceFixture', { value: 'two' })
+      await waitFor(() => events.includes('start:one'))
+      await waitFor(() => lane.waiters.some(waiter => waiter.kind === 'write'))
+      releaseFirst()
+
+      await first.catch(() => {})
+      await expect(second).rejects.toThrow('REPL execution aborted')
+      expect(events).not.toContain('start:two')
+    } finally {
+      lane.releaseRead = originalReleaseRead
       runner.dispose()
     }
   })

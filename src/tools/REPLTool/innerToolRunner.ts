@@ -469,6 +469,7 @@ export class ReplInnerToolRunner {
   private agentCalls = 0
   private aborted = false
   private terminalError: Error | undefined
+  private abortError: Error | undefined
 
   constructor(private readonly options: ReplInnerToolRunnerOptions) {
     for (const tool of options.inventory) this.inventoryByName.set(tool.name, tool)
@@ -578,6 +579,7 @@ export class ReplInnerToolRunner {
     if (this.aborted) return
     this.aborted = true
     const error = this.terminalError ?? (reason instanceof Error ? reason : new Error('REPL execution aborted'))
+    this.abortError ??= error
     this.concurrency.rejectPending(error)
     this.executionLane.rejectPending(error)
     for (const controller of this.childControllers) controller.abort(reason)
@@ -586,6 +588,10 @@ export class ReplInnerToolRunner {
   dispose(): void {
     this.options.abortSignal?.removeEventListener('abort', this.abortListener)
     this.abort('REPL execution disposed')
+  }
+
+  private cancellationError(): Error {
+    return this.terminalError ?? this.abortError ?? new Error('REPL execution aborted')
   }
 
   private failTerminally(error: Error): Error {
@@ -674,6 +680,7 @@ export class ReplInnerToolRunner {
       this.executionLane.releaseRead()
       await this.executionLane.acquireWrite()
       laneState.lane = 'write'
+      if (this.terminalError || this.aborted) throw this.cancellationError()
     }
   }
 
