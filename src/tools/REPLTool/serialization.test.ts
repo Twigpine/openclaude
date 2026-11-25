@@ -107,6 +107,20 @@ describe('serializeBridgeValue', () => {
     expect(output.__truncated__).toBe('1 properties omitted')
   })
 
+  test('preserves an own __proto__ entry as a data property', () => {
+    const input: Record<string, unknown> = {}
+    Object.defineProperty(input, '__proto__', {
+      value: 'kept',
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+    const output = serializeBridgeValue(input) as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(output, '__proto__')).toBe(true)
+    expect(Object.getOwnPropertyDescriptor(output, '__proto__')?.value).toBe('kept')
+    expect(Object.getPrototypeOf(output)).toBe(Object.prototype)
+  })
+
   test('checks node budget before reading object children and emits one omission marker', () => {
     const input: Record<string, unknown> = { first: 'x' }
     Object.defineProperty(input, 'explosive', {

@@ -24,7 +24,7 @@ import {
   getActiveSessionPlanFilePath,
   getScratchpadDir,
 } from './filesystem.js'
-import { hasPermissionsToUseTool } from './permissions.js'
+import { hasPermissionsToUseTool, replClassifierAppliesForMode } from './permissions.js'
 
 const emptyInputSchema = z.object({})
 const assistantMessage = {} as Parameters<typeof hasPermissionsToUseTool>[3]
@@ -289,6 +289,13 @@ describe('auto mode REPL classifier bounds', () => {
     }
     expect(result.message).toContain('require manual approval')
     expect(result.message).toContain('32,000')
+  })
+
+  test('applies the REPL classifier budget in every mode that can enter classification', () => {
+    expect(replClassifierAppliesForMode('auto', false)).toBe(true)
+    expect(replClassifierAppliesForMode('plan', true)).toBe(true)
+    expect(replClassifierAppliesForMode('plan', false)).toBe(false)
+    expect(replClassifierAppliesForMode('default', true)).toBe(false)
   })
 
   test('measures the serialized legacy representation rather than the raw script length', async () => {

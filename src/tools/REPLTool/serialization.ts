@@ -178,7 +178,12 @@ export function serializeBridgeValue(
           omittedProperties += 1
           continue
         }
-        out[serializedKey] = serializeInner(input[key], depth + 1)
+        Object.defineProperty(out, serializedKey, {
+          value: serializeInner(input[key], depth + 1),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        })
       }
       if (omittedProperties > 0) {
         writePropertiesOmission(out, omittedProperties)

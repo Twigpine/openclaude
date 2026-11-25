@@ -938,6 +938,31 @@ export class ReplInnerToolRunner {
     this.childControllers.add(childController)
     if (this.aborted) childController.abort(this.terminalError ?? 'REPL execution aborted')
 
+    const runner = this
+    const executionTool = new Proxy(tool, {
+      get(target, property, receiver) {
+        if (property !== 'call') return Reflect.get(target, property, receiver)
+        const originalCall = target.call.bind(target)
+        return async (
+          finalInput: unknown,
+          context: ToolUseContext,
+          canUseTool: CanUseToolFn,
+          parentMessage: typeof assistantMessage,
+          onProgress?: Parameters<Tool['call']>[4],
+        ) => {
+          validateForegroundOnlyInput(target, finalInput)
+          await runner.reconcileFinalInputClassification(target, input, finalInput, laneState)
+          return originalCall(
+            finalInput as never,
+            context,
+            canUseTool,
+            parentMessage,
+            onProgress,
+          )
+        }
+      },
+    }) as Tool
+
     const childContext: ToolUseContext = {
       ...this.options.toolUseContext,
       abortController: childController,
@@ -945,7 +970,7 @@ export class ReplInnerToolRunner {
       replPromptWaitTracker: this.options.promptWaitTracker,
       options: {
         ...this.options.toolUseContext.options,
-        tools: this.options.inventory,
+        tools: this.options.inventory.map(candidate => candidate === tool ? executionTool : candidate),
       },
     }
 

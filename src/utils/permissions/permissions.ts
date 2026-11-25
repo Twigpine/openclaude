@@ -853,6 +853,13 @@ function isClassifierJsonlTranscriptEnabled(): boolean {
 // guard trips exactly when the classifier input budget is exceeded. Because
 // escaping only inflates, any script passing this guard is also short enough
 // that truncateClassifierValue never truncates it before classification.
+export function replClassifierAppliesForMode(
+  mode: PermissionMode,
+  autoModeActive: boolean,
+): boolean {
+  return mode === 'auto' || (mode === 'plan' && autoModeActive)
+}
+
 function measureReplClassifierRepresentation(code: string): number {
   if (isClassifierJsonlTranscriptEnabled()) {
     return jsonStringify({ [REPL_TOOL_NAME]: code }).length + 1
@@ -904,8 +911,12 @@ async function hasPermissionsToUseToolWithModeHandling(
         message: DONT_ASK_REJECT_MESSAGE(tool.name),
       }
     }
+    const replClassifierApplies = replClassifierAppliesForMode(
+      appState.toolPermissionContext.mode,
+      autoModeStateModule?.isAutoModeActive() ?? false,
+    )
     if (
-      appState.toolPermissionContext.mode === 'auto' &&
+      replClassifierApplies &&
       tool.name === REPL_TOOL_NAME &&
       typeof input.code === 'string' &&
       measureReplClassifierRepresentation(input.code) > MAX_CLASSIFIER_BLOCK_VALUE_CHARS
@@ -923,9 +934,7 @@ async function hasPermissionsToUseToolWithModeHandling(
     // Check this BEFORE shouldAvoidPermissionPrompts so classifiers work in headless mode
     if (
       feature('TRANSCRIPT_CLASSIFIER') &&
-      (appState.toolPermissionContext.mode === 'auto' ||
-        (appState.toolPermissionContext.mode === 'plan' &&
-          (autoModeStateModule?.isAutoModeActive() ?? false)))
+      replClassifierApplies
     ) {
       // Non-classifier-approvable safetyCheck decisions stay immune to ALL
       // auto-approve paths: the acceptEdits fast-path, the safe-tool allowlist,

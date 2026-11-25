@@ -4867,9 +4867,11 @@ function recoverOrphanedParallelToolResults(
     if (a.message.id) anchorByMsgId.set(a.message.id, a)
   }
 
-  // O(n) precompute: sibling groups and TR index.
-  // TRs indexed by parentUuid — insertMessageChain:~894 already wrote that
-  // as the srcUUID, and --fork-session strips srcUUID but keeps parentUuid.
+  // O(n) precompute: sibling groups and TR index. Prefer the result's
+  // sourceToolAssistantUUID over its write parent: a late parallel result can be
+  // parented to another result or an intermediate non-virtual message when the
+  // linear write chain has already moved past its assistant. The source uuid is
+  // the pairing authority; parentUuid is only the legacy/fork fallback.
   const siblingsByMsgId = new Map<string, TranscriptMessage[]>()
   const toolResultsByAsst = new Map<UUID, TranscriptMessage[]>()
   for (const m of messages.values()) {
@@ -4879,13 +4881,16 @@ function recoverOrphanedParallelToolResults(
       else siblingsByMsgId.set(m.message.id, [m])
     } else if (
       m.type === 'user' &&
-      m.parentUuid &&
       Array.isArray(m.message.content) &&
       m.message.content.some(b => b.type === 'tool_result')
     ) {
-      const group = toolResultsByAsst.get(m.parentUuid)
+      const ownerUuid = 'sourceToolAssistantUUID' in m && m.sourceToolAssistantUUID
+        ? m.sourceToolAssistantUUID
+        : m.parentUuid
+      if (!ownerUuid) continue
+      const group = toolResultsByAsst.get(ownerUuid)
       if (group) group.push(m)
-      else toolResultsByAsst.set(m.parentUuid, [m])
+      else toolResultsByAsst.set(ownerUuid, [m])
     }
   }
 

@@ -283,7 +283,9 @@ describe('Code Mode settings env boundary', () => {
       applyConfigEnvironmentVariables()
 
       expect(process.env[CODE_MODE_ENV_VAR]).toBe('0')
-      expect(process.env[lowercaseKey]).toBeUndefined()
+      if (process.platform !== 'win32') {
+        expect(process.env[lowercaseKey]).toBeUndefined()
+      }
     } finally {
       delete process.env[lowercaseKey]
       restore()

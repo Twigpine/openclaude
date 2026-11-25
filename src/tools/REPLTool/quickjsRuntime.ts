@@ -132,11 +132,53 @@ const BOUNDED_GUEST_SERIALIZER_SOURCE = `
   const maxObjectProperties = 200
   const maxTotalNodes = 2000
   const maxTotalStringChars = 128000
+  const truncationMarkerPrefix = '... [truncated '
+  const truncationMarkerSuffix = ' chars]'
+  const compactTruncationMarker = '...'
+  const objectHasOwn = Object.prototype.hasOwnProperty
+
+  function truncationMarker(omittedChars) {
+    return truncationMarkerPrefix + omittedChars + truncationMarkerSuffix
+  }
+
   function truncateString(value, remaining) {
     const maxLength = Math.min(maxStringLength, Math.max(0, remaining))
     if (value.length <= maxLength) return value
-    return value.slice(0, maxLength) + '... [truncated ' + (value.length - maxLength) + ' chars]'
+    if (maxLength <= 0) return ''
+    const markerBaseLength = truncationMarkerPrefix.length + truncationMarkerSuffix.length
+    const maxDigits = String(value.length).length
+    for (let digits = 1; digits <= maxDigits; digits += 1) {
+      const payloadLength = maxLength - markerBaseLength - digits
+      if (payloadLength < 0) continue
+      const omittedChars = value.length - payloadLength
+      if (String(omittedChars).length !== digits) continue
+      return value.slice(0, payloadLength) + truncationMarker(omittedChars)
+    }
+    if (maxLength <= compactTruncationMarker.length) {
+      return compactTruncationMarker.slice(0, maxLength)
+    }
+    return value.slice(0, maxLength - compactTruncationMarker.length) + compactTruncationMarker
   }
+
+  function writeDataProperty(out, key, value) {
+    Object.defineProperty(out, key, {
+      value: value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+  }
+
+  function writePropertiesOmission(out, omittedProperties) {
+    let markerKey = '__truncated__'
+    let collision = 0
+    while (objectHasOwn.call(out, markerKey)) {
+      collision += 1
+      markerKey = '__truncated_' + collision + '__'
+    }
+    writeDataProperty(out, markerKey, omittedProperties + ' properties omitted')
+  }
+
   return function serializeReplValue(value) {
     let nodes = 0
     let stringChars = 0
@@ -184,11 +226,20 @@ const BOUNDED_GUEST_SERIALIZER_SOURCE = `
       }
       const out = {}
       const entries = Object.entries(current)
-      for (const entry of entries.slice(0, maxObjectProperties)) {
+      let omittedProperties = 0
+      const entryLimit = Math.min(entries.length, maxObjectProperties)
+      for (let index = 0; index < entryLimit; index += 1) {
+        const entry = entries[index]
         const serializedKey = capString(entry[0])
-        out[serializedKey] = serializeInner(entry[1], depth + 1)
+        const serializedValue = serializeInner(entry[1], depth + 1)
+        if (objectHasOwn.call(out, serializedKey)) {
+          omittedProperties += 1
+          continue
+        }
+        writeDataProperty(out, serializedKey, serializedValue)
       }
-      if (entries.length > maxObjectProperties) out.__truncated__ = (entries.length - maxObjectProperties) + ' properties omitted'
+      if (entries.length > maxObjectProperties) omittedProperties += entries.length - maxObjectProperties
+      if (omittedProperties > 0) writePropertiesOmission(out, omittedProperties)
       return out
     }
     return serializeInner(value, 0)
@@ -751,13 +802,6 @@ export async function executeQuickJSScript(
       }
     }
 
-    const pendingHostFunctionNames = [...new Set(
-      [...hostPromiseObservations.values()]
-        .filter(observation => !observation.settled)
-        .map(observation => observation.functionName),
-    )]
-    options.onScriptCompletion?.({ pendingHostFunctionNames })
-
     const unobservedSettled = [...hostPromiseObservations.values()].filter(observation =>
       observation.settled && !observation.observed,
     )
@@ -776,6 +820,13 @@ export async function executeQuickJSScript(
         durationMs: Date.now() - startedAt,
       }
     }
+
+    const pendingHostFunctionNames = [...new Set(
+      [...hostPromiseObservations.values()]
+        .filter(observation => !observation.settled)
+        .map(observation => observation.functionName),
+    )]
+    options.onScriptCompletion?.({ pendingHostFunctionNames })
 
     const valueHandle = settlementResultValueHandle
     const projected = valueHandle ? dumpBoundedGuestValue(valueHandle) : undefined

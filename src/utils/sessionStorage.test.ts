@@ -38,7 +38,7 @@ import {
   switchSession,
 } from '../bootstrap/state.js'
 import type { GoalState } from '../services/goal/types.js'
-import type { SessionBranchEntry } from '../types/logs.js'
+import type { SessionBranchEntry, TranscriptMessage } from '../types/logs.js'
 import {
   getClaudeConfigHomeDir,
   setClaudeConfigHomeDirForTesting,
@@ -1421,6 +1421,55 @@ test('insertMessageChain keeps REPL virtual rows linear across separate writes',
       setReplModeEnabledForSession(false)
     }
   })
+})
+
+test('buildConversationChain recovers a parallel result parented behind another result', () => {
+  const parallelAssistant = (uuid: UUID, toolUseId: string): TranscriptMessage => {
+    const baseMessage = assistant(uuid, null, '')
+    return {
+      ...baseMessage,
+      message: {
+        ...baseMessage.message,
+        id: 'parallel-recovery-message',
+        content: [
+          { type: 'tool_use', id: toolUseId, name: 'Read', input: {} },
+        ],
+      },
+    } as unknown as TranscriptMessage
+  }
+  const parallelResult = (uuid: UUID, parentUuid: UUID, toolUseId: string, source: UUID) => ({
+    ...user(uuid, parentUuid, [
+      {
+        type: 'tool_result',
+        tool_use_id: toolUseId,
+        content: 'ok',
+        is_error: false,
+      } as ToolResultBlockParam,
+    ]),
+    sourceToolAssistantUUID: source,
+  })
+
+  const prompt = user(id(930), null, 'run parallel reads')
+  const asstA = { ...parallelAssistant(id(931), 'tu-a'), parentUuid: id(930) }
+  const asstB = { ...parallelAssistant(id(932), 'tu-b'), parentUuid: id(931) }
+  const resultA = parallelResult(id(933), id(932), 'tu-a', id(931))
+  const interleavingMessage = user(id(934), id(933), 'leaf-selected followup')
+  const resultB = parallelResult(id(935), id(933), 'tu-b', id(932))
+  const entries = [prompt, asstA, asstB, resultA, interleavingMessage, resultB] as unknown as TranscriptMessage[]
+  const messages = new Map(entries.map(message => [message.uuid, message]))
+
+  const chain = buildConversationChain(messages, interleavingMessage as never)
+  const uuids = chain.map(message => message.uuid)
+  expect(uuids).toContain(id(935))
+  expect(uuids.indexOf(id(935))).toBeGreaterThan(uuids.indexOf(id(932)))
+  const recoveredResultIds = new Set<string>()
+  for (const message of chain) {
+    if (message.type !== 'user' || !Array.isArray(message.message.content)) continue
+    for (const block of message.message.content) {
+      if (block.type === 'tool_result') recoveredResultIds.add(block.tool_use_id)
+    }
+  }
+  expect(recoveredResultIds).toEqual(new Set(['tu-a', 'tu-b']))
 })
 
 test('insertMessageChain preserves parallel tool result pairing across interleaved batches', async () => {

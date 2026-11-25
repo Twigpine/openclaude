@@ -3,6 +3,21 @@ import { executeQuickJSScript, PromptWaitTracker } from './quickjsRuntime.js'
 
 const TEST_TIMEOUT = 10_000
 
+
+function totalSerializedStringChars(value: unknown): number {
+  if (typeof value === 'string') return value.length
+  if (Array.isArray(value)) {
+    return value.reduce((total, item) => total + totalSerializedStringChars(item), 0)
+  }
+  if (typeof value === 'object' && value !== null) {
+    return Object.entries(value as Record<string, unknown>).reduce(
+      (total, [key, item]) => total + key.length + totalSerializedStringChars(item),
+      0,
+    )
+  }
+  return 0
+}
+
 describe('executeQuickJSScript', () => {
   test('returns arithmetic and object completion values', async () => {
     const numeric = await executeQuickJSScript({ code: 'return 1 + 1' })
@@ -48,9 +63,40 @@ describe('executeQuickJSScript', () => {
       string,
     ]
     expect(symbolText).toBe(`Symbol(${'d'.repeat(15_000)})`)
-    expect(Object.values(collision)).toEqual(['visible'])
+    const collisionEntries = Object.entries(collision).filter(([key]) => !key.startsWith('__truncated'))
+    expect(collisionEntries).toHaveLength(1)
+    expect(Array.isArray(collisionEntries[0]?.[1])).toBe(true)
+    expect(collision.__truncated__).toBe('1 properties omitted')
     expect(marker).toContain('truncated')
     expect(marker.length).toBeLessThan(7_000)
+  }, TEST_TIMEOUT)
+
+  test('keeps the aggregate guest string output within the total string budget', async () => {
+    const result = await executeQuickJSScript({
+      code: "return Array.from({ length: 10 }, () => 'x'.repeat(20000))",
+    })
+    expect(result.status).toBe('completed')
+    expect(totalSerializedStringChars(result.result)).toBeLessThanOrEqual(128_000)
+  }, TEST_TIMEOUT)
+
+  test('omits colliding truncated object keys instead of overwriting them', async () => {
+    const result = await executeQuickJSScript({
+      code: [
+        "const prefix = 'k'.repeat(16000)",
+        "const firstKey = prefix + 'a'.repeat(100)",
+        "const secondKey = prefix + 'b'.repeat(100)",
+        'const value = {}',
+        "value[firstKey] = 'first'",
+        "value[secondKey] = 'second'",
+        'return value',
+      ].join('\n'),
+    })
+    expect(result.status).toBe('completed')
+    const output = result.result as Record<string, unknown>
+    const serializedEntries = Object.entries(output).filter(([key]) => !key.startsWith('__truncated'))
+    expect(serializedEntries).toHaveLength(1)
+    expect(serializedEntries[0]?.[1]).toBe('first')
+    expect(output.__truncated__).toBe('1 properties omitted')
   }, TEST_TIMEOUT)
 
   test('preserves generated representations within the string budget', async () => {
@@ -209,6 +255,26 @@ describe('executeQuickJSScript', () => {
     } finally {
       actualCore.QuickJSContext.prototype.getPromiseState = originalGetPromiseState
     }
+  }, TEST_TIMEOUT)
+
+  test('does not invoke the completion dispatcher when settled host results are unobserved', async () => {
+    let completionCalls = 0
+    const result = await executeQuickJSScript({
+      code: "hostFast(); await hostSlow(); return 'done'",
+      hostFunctions: {
+        hostFast: async () => 'fast-result',
+        hostSlow: async () => {
+          await new Promise(resolve => setTimeout(resolve, 25))
+          return 'slow-result'
+        },
+      },
+      onScriptCompletion: () => {
+        completionCalls += 1
+      },
+    })
+    expect(result.status).toBe('error')
+    expect(result.error?.message).toContain('without observing settled inner tool results')
+    expect(completionCalls).toBe(0)
   }, TEST_TIMEOUT)
 
   test('rejects a rejected host call that settles before completion without observation', async () => {

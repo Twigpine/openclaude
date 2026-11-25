@@ -89,6 +89,25 @@ describe('REPL resume rollback wiring', () => {
     expect(catchBody).not.toContain('clearSessionMetadata()')
   })
 
+  test('captures and restores the prior agent publication on failure', () => {
+    const body = getResumeBody()
+    const activationIndex = body.indexOf('await withCodeModeResumeActivation(')
+    expect(body.indexOf('preResumeMainThreadAgentDefinition')).toBeGreaterThan(-1)
+    expect(body.indexOf('preResumeMainThreadAgentDefinition')).toBeLessThan(activationIndex)
+    expect(body.indexOf('preResumeStandaloneAgentContext')).toBeGreaterThan(-1)
+    expect(body.indexOf('preResumeStandaloneAgentContext')).toBeLessThan(activationIndex)
+
+    const catchBody = getResumeCatchBody()
+    const agentRestoreIndex = catchBody.indexOf('setMainThreadAgentDefinition(preResumeMainThreadAgentDefinition)')
+    const messageRestoreIndex = catchBody.indexOf('setMessages(() => preResumeMessages)')
+    const throwIndex = catchBody.indexOf('throw error')
+    expect(agentRestoreIndex).toBeGreaterThan(-1)
+    expect(agentRestoreIndex).toBeLessThan(messageRestoreIndex)
+    expect(agentRestoreIndex).toBeLessThan(throwIndex)
+    expect(catchBody).toContain('agent: preResumeAgentState')
+    expect(catchBody).toContain('standaloneAgentContext: preResumeStandaloneAgentContext')
+  })
+
   test('restores prior messages unconditionally because React updates may still be queued', () => {
     const catchBody = getResumeCatchBody()
     expect(catchBody).toContain('setMessages(() => preResumeMessages)')

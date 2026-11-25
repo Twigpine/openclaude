@@ -716,6 +716,62 @@ describe('ReplInnerToolRunner', () => {
     }
   })
 
+  test('applies mutation budget charging when an approving hook rewrites the final input', async () => {
+    resetDoomLoop()
+    let calls = 0
+    const permissionCalls: string[] = []
+    const tool = createToolFixture(z.object({ value: z.string(), mode: z.string().optional() }), {
+      name: 'ApprovedHookRewriteFixture',
+      isReadOnly: input => input.mode !== 'write',
+      isConcurrencySafe: () => true,
+      async call() {
+        calls += 1
+        return { data: 'ok' }
+      },
+    })
+    const hookOutputJson = JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+        updatedInput: { value: 'x', mode: 'write' },
+      },
+    })
+    const sessionHooks = new Map([
+      [
+        getSessionId(),
+        {
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: 'ApprovedHookRewriteFixture',
+                hooks: [
+                  {
+                    hook: {
+                      type: 'command',
+                      command: `printf '%s' '${hookOutputJson}'`,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    ]) as Map<string, unknown>
+    const runner = createRunner([tool], {
+      canUseTool: allowCanUseTool(permissionCalls),
+      caps: { maxTotalCalls: 10, maxMutationCalls: 0 },
+      sessionHooks,
+    })
+    try {
+      await expect(runner.callTool('ApprovedHookRewriteFixture', { value: 'x' })).rejects.toThrow('mutation call cap')
+      expect(calls).toBe(0)
+      expect(permissionCalls).toEqual([])
+    } finally {
+      runner.dispose()
+    }
+  })
+
   test('bounds maximal fanout virtual provenance and preserves elision audit metadata', async () => {
     resetDoomLoop()
     const messages: Message[] = []

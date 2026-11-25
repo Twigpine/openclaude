@@ -711,6 +711,10 @@ export function REPL({
 
   // Agent definition is state so /resume can update it mid-session
   const [mainThreadAgentDefinition, setMainThreadAgentDefinition] = useState(initialMainThreadAgentDefinition);
+  const mainThreadAgentDefinitionRef = useRef(mainThreadAgentDefinition);
+  useEffect(() => {
+    mainThreadAgentDefinitionRef.current = mainThreadAgentDefinition;
+  }, [mainThreadAgentDefinition]);
   const toolPermissionContext = useAppState(s => s.toolPermissionContext);
   const verbose = useAppState(s => s.verbose);
   const mcp = useAppState(s => s.mcp);
@@ -2062,6 +2066,9 @@ export function REPL({
     const preResumeSessionId = getSessionId();
     const preResumeSessionProjectDir = getSessionProjectDir();
     const preResumeMessages = messagesRef.current;
+    const preResumeMainThreadAgentDefinition = mainThreadAgentDefinitionRef.current;
+    const preResumeAgentState = store.getState().agent;
+    const preResumeStandaloneAgentContext = store.getState().standaloneAgentContext;
     try {
       // Validate and activate the transcript's conversation mode around the
       // fallible resume work. The helper restores the prior mode override if
@@ -2121,7 +2128,7 @@ export function REPL({
         // Process session start hooks for resume
         const hookMessages = await processSessionStartHooks('resume', {
           sessionId,
-          agentType: mainThreadAgentDefinition?.agentType,
+          agentType: mainThreadAgentDefinitionRef.current?.agentType,
           model: mainLoopModel
         });
 
@@ -2312,6 +2319,16 @@ export function REPL({
           // Best-effort rollback; the original error is the one that matters.
         }
       }
+      // Agent state is published before the later fallible work as well. Restore
+      // the prior definition and app-state projection synchronously so a failed
+      // resume cannot leave the target agent governing the prior transcript.
+      mainThreadAgentDefinitionRef.current = preResumeMainThreadAgentDefinition;
+      setMainThreadAgentDefinition(preResumeMainThreadAgentDefinition);
+      setAppState(prev => ({
+        ...prev,
+        agent: preResumeAgentState,
+        standaloneAgentContext: preResumeStandaloneAgentContext
+      }));
       // Restore unconditionally: React may not have rendered the forward
       // setMessages yet, so messagesRef can still hold the prior array while
       // the target transcript update is already queued. A conditional rollback
