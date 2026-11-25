@@ -14,9 +14,39 @@ const DEFAULT_MAX_OBJECT_PROPERTIES = 200
 const DEFAULT_MAX_TOTAL_NODES = 2_000
 const DEFAULT_MAX_TOTAL_STRING_LENGTH = 128_000
 
+const TRUNCATION_MARKER_PREFIX = '... [truncated '
+const TRUNCATION_MARKER_SUFFIX = ' chars]'
+const COMPACT_TRUNCATION_MARKER = '...'
+
+function truncationMarker(omittedChars: number): string {
+  return `${TRUNCATION_MARKER_PREFIX}${omittedChars}${TRUNCATION_MARKER_SUFFIX}`
+}
+
 function truncateString(value: string, maxLength: number): string {
   if (value.length <= maxLength) return value
-  return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`
+  if (maxLength <= 0) return ''
+  const markerBaseLength = TRUNCATION_MARKER_PREFIX.length + TRUNCATION_MARKER_SUFFIX.length
+  for (let digits = 1; digits <= String(value.length).length; digits += 1) {
+    const payloadLength = maxLength - markerBaseLength - digits
+    if (payloadLength < 0) continue
+    const omittedChars = value.length - payloadLength
+    if (String(omittedChars).length !== digits) continue
+    return `${value.slice(0, payloadLength)}${truncationMarker(omittedChars)}`
+  }
+  if (maxLength <= COMPACT_TRUNCATION_MARKER.length) {
+    return COMPACT_TRUNCATION_MARKER.slice(0, maxLength)
+  }
+  return `${value.slice(0, maxLength - COMPACT_TRUNCATION_MARKER.length)}${COMPACT_TRUNCATION_MARKER}`
+}
+
+function writePropertiesOmission(out: Record<string, unknown>, omittedProperties: number): void {
+  let markerKey = '__truncated__'
+  let collision = 0
+  while (Object.prototype.hasOwnProperty.call(out, markerKey)) {
+    collision += 1
+    markerKey = `__truncated_${collision}__`
+  }
+  out[markerKey] = `${omittedProperties} properties omitted`
 }
 
 function errorStringField(error: Error, key: 'name' | 'message' | 'stack'): string | undefined {
@@ -56,8 +86,12 @@ export function serializeBridgeValue(
     return serialized
   }
 
+  function hasNodeBudget(): boolean {
+    return nodes < maxTotalNodes
+  }
+
   function consumeNode(): boolean {
-    if (nodes >= maxTotalNodes) return false
+    if (!hasNodeBudget()) return false
     nodes += 1
     return true
   }
@@ -85,11 +119,11 @@ export function serializeBridgeValue(
     }
     if (typeof current === 'number' || typeof current === 'boolean') return current
     if (typeof current === 'undefined') return '[undefined]'
-    if (typeof current === 'bigint') return `${current.toString()}n`
-    if (typeof current === 'symbol') return String(current)
+    if (typeof current === 'bigint') return capString(`${current.toString()}n`)
+    if (typeof current === 'symbol') return capString(String(current))
     if (typeof current === 'function') {
       const fn = current as { name?: string }
-      return `[function${fn.name ? ` ${fn.name}` : ''}]`
+      return capString(`[function${fn.name ? ` ${fn.name}` : ''}]`)
     }
     if (current instanceof Date) return current.toISOString()
     if (current instanceof Error) return serializeErrorValue(current)
@@ -109,28 +143,49 @@ export function serializeBridgeValue(
     if (seen.has(current)) return '[Circular]'
     if (depth >= maxDepth) return '[MaxDepth]'
     seen.add(current)
-    {
+    try {
       if (Array.isArray(current)) {
-        const items = current.slice(0, maxArrayLength).map(item => serializeInner(item, depth + 1))
-        if (current.length > maxArrayLength) {
-          items.push(`[truncated ${current.length - maxArrayLength} items]`)
+        const items: unknown[] = []
+        const itemLimit = Math.min(current.length, maxArrayLength)
+        let serializedItems = 0
+        while (serializedItems < itemLimit) {
+          if (!hasNodeBudget()) break
+          items.push(serializeInner(current[serializedItems], depth + 1))
+          serializedItems += 1
+        }
+        if (serializedItems < current.length) {
+          items.push(`[truncated ${current.length - serializedItems} items]`)
         }
         return items
       }
+      const input = current as Record<string, unknown>
       const out: Record<string, unknown> = {}
-      let propertyCount = 0
-      let serializedProperties = 0
-      for (const key in current as Record<string, unknown>) {
-        if (!Object.prototype.hasOwnProperty.call(current, key)) continue
-        propertyCount += 1
-        if (serializedProperties >= maxObjectProperties) continue
-        serializedProperties += 1
-        out[capString(key)] = serializeInner((current as Record<string, unknown>)[key], depth + 1)
+      let consideredProperties = 0
+      let omittedProperties = 0
+      for (const key in input) {
+        if (!Object.prototype.hasOwnProperty.call(input, key)) continue
+        if (consideredProperties >= maxObjectProperties) {
+          omittedProperties += 1
+          continue
+        }
+        consideredProperties += 1
+        if (!hasNodeBudget()) {
+          omittedProperties += 1
+          continue
+        }
+        const serializedKey = capString(key)
+        if (Object.prototype.hasOwnProperty.call(out, serializedKey)) {
+          omittedProperties += 1
+          continue
+        }
+        out[serializedKey] = serializeInner(input[key], depth + 1)
       }
-      if (propertyCount > maxObjectProperties) {
-        out.__truncated__ = `${propertyCount - maxObjectProperties} properties omitted`
+      if (omittedProperties > 0) {
+        writePropertiesOmission(out, omittedProperties)
       }
       return out
+    } finally {
+      seen.delete(current)
     }
   }
 

@@ -2909,6 +2909,9 @@ class Project {
       // override would fork a sibling branch off a chain this batch already
       // extended past the assistant (REPL virtual inner provenance).
       const resolvedParentByUuid = new Map<UUID, UUID | null>()
+      const persistedParentByUuid = isSidechain
+        ? undefined
+        : (await getSessionMessageIndex(sessionId as UUID)).parents
 
       for (const message of messages) {
         const isCompactBoundary = isCompactBoundaryMessage(message)
@@ -2925,27 +2928,29 @@ class Project {
           effectiveParentUuid = sourceUuid
           // The override exists for late-arriving parallel tool results that
           // must attach back to their own assistant across separate inserts.
-          // Within one batch it can instead fork a sibling branch: a Code
-          // Mode REPL batch writes the virtual inner provenance chain off the
-          // outer assistant first, then the outer tool_result last. Pointing
-          // the outer result back at the outer assistant makes it a sibling
-          // of the virtual chain root, and buildConversationChain's single
-          // parent walk drops the entire virtual branch on resume. When the
-          // sequential parent already descends from the source assistant
-          // within this batch, the linear write-order parent preserves both
-          // the pairing (carried by tool_use_id) and every intermediate
-          // message, so keep it.
+          // Across one batch or earlier persisted writes it can instead fork
+          // a sibling branch: a Code Mode REPL turn writes the virtual inner
+          // provenance chain off the outer assistant first, then the outer
+          // tool_result last. Pointing the outer result back at the outer
+          // assistant makes it a sibling of the virtual chain root, and
+          // buildConversationChain's single parent walk drops the entire
+          // virtual branch on resume. When the sequential parent already
+          // descends from the source assistant, the linear write-order parent
+          // preserves both the pairing (carried by tool_use_id) and every
+          // intermediate message, so keep it.
           let cursor: UUID | null = parentUuid
-          let hops = resolvedParentByUuid.size + 1
-          while (cursor !== null && hops > 0) {
+          const ancestrySeen = new Set<UUID>()
+          while (cursor !== null && !ancestrySeen.has(cursor)) {
             if (cursor === sourceUuid) {
               effectiveParentUuid = parentUuid
               break
             }
-            const next = resolvedParentByUuid.get(cursor)
+            ancestrySeen.add(cursor)
+            const next = resolvedParentByUuid.has(cursor)
+              ? resolvedParentByUuid.get(cursor)
+              : persistedParentByUuid?.get(cursor)
             if (next === undefined) break
             cursor = next
-            hops--
           }
         }
 
@@ -3252,7 +3257,8 @@ class Project {
       // Always append. Last-wins on restore — later entries supersede.
       void this.enqueueWrite(sessionFile, entry)
     } else {
-      const messageSet = await getSessionMessages(sessionId)
+      const messageIndex = await getSessionMessageIndex(sessionId)
+      const messageSet = messageIndex.uuids
       if (entry.type === 'queue-operation') {
         // Queue operations are always appended to the session file
         void this.enqueueWrite(sessionFile, entry)
@@ -3297,6 +3303,7 @@ class Project {
             // Same constraint for remote (inc-4718 above): sidechain persisting a
             // UUID the main thread hasn't written yet → 409 when main writes it.
             messageSet.add(entry.uuid)
+            messageIndex.parents.set(entry.uuid, entry.parentUuid ?? null)
 
             if (isTranscriptMessage(entry)) {
               await this.persistToRemote(sessionId, entry)
@@ -6555,7 +6562,7 @@ export async function loadTranscriptFile(
     // (these are mid-conversation nodes, not dead ends)
     const hasUserAssistantChild = new Set<UUID>()
     for (const msg of allMessages) {
-      if (msg.parentUuid && (msg.type === 'user' || msg.type === 'assistant')) {
+      if (msg.parentUuid && isResumeLeafCandidate(msg)) {
         hasUserAssistantChild.add(msg.parentUuid)
       }
     }
@@ -6685,26 +6692,49 @@ async function loadSessionFile(
   return loadTranscriptFile(destination)
 }
 
+type SessionMessageIndex = {
+  uuids: Set<UUID>
+  parents: Map<UUID, UUID | null>
+}
+
+function buildSessionMessageIndex(
+  messages: Map<UUID, TranscriptMessage>,
+): SessionMessageIndex {
+  const index: SessionMessageIndex = {
+    uuids: new Set(messages.keys()),
+    parents: new Map(),
+  }
+  for (const [uuid, message] of messages) {
+    index.parents.set(uuid, message.parentUuid ?? null)
+  }
+  return index
+}
+
 /**
- * Gets message UUIDs for a specific session without loading all sessions.
- * Memoized per resolved transcript destination — not per session id — to
- * avoid re-reading the same session file multiple times. The same id in
- * two project directories is two destinations, so each keeps its own set.
+ * Gets message UUIDs and persisted parents for a specific session without
+ * loading all sessions. Memoized per resolved transcript destination, not
+ * per session id, to avoid re-reading the same session file multiple times.
+ * The same id in two project directories is two destinations, so each keeps
+ * its own index.
  */
-const getSessionMessages = memoize(
-  async (sessionId: UUID): Promise<Set<UUID>> => {
+const getSessionMessageIndex = memoize(
+  async (sessionId: UUID): Promise<SessionMessageIndex> => {
     const { messages } = await loadSessionFile(sessionId)
-    return new Set(messages.keys())
+    return buildSessionMessageIndex(messages)
   },
   (sessionId: UUID) => sessionMessagesDestination(sessionId),
 )
+
+async function getSessionMessages(sessionId: UUID): Promise<Set<UUID>> {
+  return (await getSessionMessageIndex(sessionId)).uuids
+}
 
 /**
  * Clear the memoized session messages cache.
  * Call after compaction when old message UUIDs are no longer valid.
  */
 export function clearSessionMessagesCache(): void {
-  getSessionMessages.cache.clear?.()
+  getSessionMessageIndex.cache.clear?.()
 }
 
 /**
@@ -6754,10 +6784,10 @@ export async function getLastSessionLog(
   // with a stale disk snapshot would lose unflushed UUIDs and break dedup.
   // The cache is keyed by resolved transcript destination, so prime under
   // the same destination the load read from.
-  if (!getSessionMessages.cache.has(destination)) {
-    getSessionMessages.cache.set(
+  if (!getSessionMessageIndex.cache.has(destination)) {
+    getSessionMessageIndex.cache.set(
       destination,
-      Promise.resolve(new Set(messages.keys())),
+      Promise.resolve(buildSessionMessageIndex(messages)),
     )
   }
 

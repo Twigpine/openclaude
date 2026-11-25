@@ -34,14 +34,102 @@ describe('serializeBridgeValue', () => {
       maxTotalStringLength: 30,
     }) as Record<string, unknown>
     expect(JSON.stringify(output).length).toBeLessThan(500)
-    expect(JSON.stringify(output)).toContain('truncated')
+    expect(JSON.stringify(output)).toContain('...')
 
     const wide = serializeBridgeValue({
       a: 'x'.repeat(100),
       b: 'y'.repeat(100),
       c: 'z'.repeat(100),
     }, { maxTotalStringLength: 25 }) as Record<string, unknown>
-    expect(String(wide.a).length + String(wide.b).length + String(wide.c).length).toBeLessThan(180)
+    const retainedPayloadChars =
+      (String(wide.a).match(/^x*/)?.[0].length ?? 0) +
+      (String(wide.b).match(/^y*/)?.[0].length ?? 0) +
+      (String(wide.c).match(/^z*/)?.[0].length ?? 0)
+    expect(retainedPayloadChars).toBeLessThanOrEqual(25)
+  })
+
+  test('applies aggregate string budgets to generated primitive representations', () => {
+    const values = [
+      Symbol('s'.repeat(200)),
+      BigInt(`1${'0'.repeat(200)}`),
+      function generatedPrimitiveBudgetProbe() {},
+    ]
+    for (const value of values) {
+      const serialized = serializeBridgeValue(value, {
+        maxStringLength: 1_000,
+        maxTotalStringLength: 40,
+      })
+      expect(typeof serialized).toBe('string')
+      expect(String(serialized).length).toBeLessThanOrEqual(40)
+    }
+  })
+
+  test('keeps truncation markers within the configured string length', () => {
+    const output = serializeBridgeError(new Error('x'.repeat(100)), { maxStringLength: 30 })
+    expect(output.message.length).toBeLessThanOrEqual(30)
+    expect(output.message).toMatch(/^x+\.\.\. \[truncated \d+ chars\]$/)
+
+    const compact = serializeBridgeError(new Error('x'.repeat(100)), { maxStringLength: 10 })
+    expect(compact.message.length).toBeLessThanOrEqual(10)
+  })
+
+  test('does not emit a truncation marker after the aggregate string budget is exhausted', () => {
+    const output = serializeBridgeValue(['x'.repeat(100), 'y'.repeat(100)], {
+      maxTotalStringLength: 10,
+    }) as string[]
+    expect(output[0].length).toBeLessThanOrEqual(10)
+    expect(output[1]).toBe('')
+  })
+
+  test('serializes shared siblings while preserving ancestor cycle detection', () => {
+    const shared = { text: 'shared' }
+    const value: { self?: unknown; first?: unknown; second?: unknown } = {
+      first: shared,
+      second: shared,
+    }
+    value.self = value
+    expect(serializeBridgeValue(value)).toEqual({
+      first: { text: 'shared' },
+      second: { text: 'shared' },
+      self: '[Circular]',
+    })
+  })
+
+  test('omits colliding truncated object keys instead of overwriting them', () => {
+    const commonPrefix = 'k'.repeat(100)
+    const output = serializeBridgeValue({
+      [`${commonPrefix}${'a'.repeat(20)}`]: 'first',
+      [`${commonPrefix}${'b'.repeat(20)}`]: 'second',
+    }, { maxStringLength: 40 }) as Record<string, unknown>
+    const serializedEntries = Object.entries(output).filter(([key]) => key !== '__truncated__')
+    expect(serializedEntries).toHaveLength(1)
+    expect(serializedEntries[0]?.[1]).toBe('first')
+    expect(output.__truncated__).toBe('1 properties omitted')
+  })
+
+  test('checks node budget before reading object children and emits one omission marker', () => {
+    const input: Record<string, unknown> = { first: 'x' }
+    Object.defineProperty(input, 'explosive', {
+      enumerable: true,
+      get() {
+        throw new Error('should not be read')
+      },
+    })
+    const output = serializeBridgeValue(input, { maxTotalNodes: 2 }) as Record<string, unknown>
+    expect(output.first).toBe('x')
+    expect(output.__truncated__).toBe('1 properties omitted')
+  })
+
+  test('checks node budget before reading array children and emits one omission marker', () => {
+    const input: unknown[] = ['x']
+    Object.defineProperty(input, '1', {
+      enumerable: true,
+      get() {
+        throw new Error('should not be read')
+      },
+    })
+    const output = serializeBridgeValue(input, { maxTotalNodes: 2 })
+    expect(output).toEqual(['x', '[truncated 1 items]'])
   })
 
   test('applies string budgets to object keys as well as values', () => {
@@ -74,9 +162,11 @@ describe('serializeBridgeValue', () => {
     error.stack = 'stack'
     const output = serializeBridgeValue({ error, after: 'x' }, {
       maxTotalNodes: 4,
-    }) as { error: { message: string }; after: string }
+    }) as { error: { message: string; stack?: string }; after?: string; __truncated__?: string }
     expect(output.error.message).toBe('message')
-    expect(output.after).toBe('[SerializationBudget]')
+    expect(output.error.stack).toBe('[SerializationBudget]')
+    expect(output.after).toBeUndefined()
+    expect(output.__truncated__).toBe('1 properties omitted')
   })
 
   test('bounds strings, arrays, objects, and depth', () => {
@@ -92,7 +182,8 @@ describe('serializeBridgeValue', () => {
       object: Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`k${i}`, i])),
       deep,
     }, { maxStringLength: 10, maxArrayLength: 3, maxObjectProperties: 2, maxDepth: 3 }) as Record<string, unknown>
-    expect(String(output.string)).toContain('truncated')
+    expect(String(output.string).length).toBeLessThanOrEqual(10)
+    expect(String(output.string)).toEndWith('...')
     expect(output.array).toEqual([0, 1, 2, '[truncated 5 items]'])
     const nestedObject = serializeBridgeValue(
       Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`k${i}`, i])),
@@ -108,7 +199,8 @@ describe('serializeBridgeError', () => {
   test('serializes Error objects with bounded message and stack', () => {
     const output = serializeBridgeError(new Error('x'.repeat(100)), { maxStringLength: 20 })
     expect(output.name).toBe('Error')
-    expect(output.message).toContain('truncated')
+    expect(output.message.length).toBeLessThanOrEqual(20)
+    expect(output.message).toEndWith('...')
   })
 
   test('preserves already serialized guest error identity', () => {

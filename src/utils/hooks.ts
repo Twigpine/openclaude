@@ -3025,7 +3025,10 @@ async function* executeHooks({
         updatedToolOutput: result.updatedToolOutput,
       }
     }
-    if (result.updatedMCPToolOutput !== undefined) {
+    if (
+      result.updatedToolOutput === undefined &&
+      result.updatedMCPToolOutput !== undefined
+    ) {
       logForDebugging(
         `Hook ${hookEvent} (${getHookDisplayText(result.hook)}) replaced MCP tool output`,
       )

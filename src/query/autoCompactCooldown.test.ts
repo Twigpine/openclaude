@@ -124,6 +124,22 @@ function manySmallMessages(count: number): Message[] {
   return Array.from({ length: count }, (_, index) => userMessage(`small-${index}`))
 }
 
+function virtualUserMessage(content: string): Message {
+  return { ...userMessage(content), isVirtual: true }
+}
+
+function manySmallMessagesWithVirtualTail(
+  nonVirtualCount: number,
+  virtualCount: number,
+): Message[] {
+  return [
+    ...manySmallMessages(nonVirtualCount),
+    ...Array.from({ length: virtualCount }, (_, index) =>
+      virtualUserMessage(`virtual-${index}`),
+    ),
+  ]
+}
+
 function compactedResult() {
   return {
     wasCompacted: true,
@@ -982,4 +998,151 @@ test('breaker metadata tracking callback publishes a fresh object', async () => 
   expect(initialTracking.consecutiveFailures).toBe(2)
   expect(initialTracking.nextRetryAtMs).toBe(10_000)
   expect(initialTracking.lastFailureAtMs).toBe(5_000)
+})
+test('virtual messages do not count toward the active-message hard cap', async () => {
+  // With auto-compact disabled and no message-count override, the hard cap is
+  // the only enforcement path. 1000 nonvirtual rows sit exactly at the default
+  // cap; virtual padding must not push the count over it.
+  process.env.DISABLE_AUTO_COMPACT = '1'
+  const messages = manySmallMessagesWithVirtualTail(1000, 5)
+  const callModel = mock(async function* () {
+    yield assistantToolUseMessage()
+  })
+  const deps: QueryDeps = {
+    callModel: callModel as QueryDeps['callModel'],
+    microcompact: mock(async (input: Message[]) => ({
+      messages: input,
+    })) as QueryDeps['microcompact'],
+    autocompact: mock(async () => ({
+      wasCompacted: false,
+    })) as QueryDeps['autocompact'],
+    uuid: () => 'test-uuid',
+  }
+
+  const { query } = await loadQuery()
+  const { yielded, terminal } = await drain(
+    query({
+      messages,
+      systemPrompt: asSystemPrompt([]),
+      userContext: {},
+      systemContext: {},
+      canUseTool,
+      toolUseContext: toolUseContext(),
+      querySource: 'repl_main_thread',
+      maxTurns: 1,
+      deps,
+    }),
+  )
+
+  expect(callModel).toHaveBeenCalledTimes(1)
+  expect(terminal.reason).toBe('max_turns')
+  expect(
+    yielded.some(
+      message =>
+        (message as { isApiErrorMessage?: boolean }).isApiErrorMessage === true,
+    ),
+  ).toBe(false)
+})
+
+test('virtual messages do not count toward the breaker safety message limit', async () => {
+  // Explicit 100-message threshold with the hard cap moved out of the way.
+  // 100 nonvirtual rows sit exactly at the threshold; virtual padding must not
+  // trip the circuit-breaker safety limit.
+  saveGlobalConfig(current => ({
+    ...current,
+    maxMessagesCompactionThreshold: '100',
+  }))
+  process.env.OPENCLAUDE_MAX_ACTIVE_MESSAGES_HARD_CAP = '5000'
+  const messages = manySmallMessagesWithVirtualTail(100, 5)
+  const nextRetryAtMs = Date.now() + 60_000
+  const callModel = mock(async function* () {
+    yield assistantToolUseMessage()
+  })
+  const deps: QueryDeps = {
+    callModel: callModel as QueryDeps['callModel'],
+    microcompact: mock(async (input: Message[]) => ({
+      messages: input,
+    })) as QueryDeps['microcompact'],
+    autocompact: mock(async () => ({
+      wasCompacted: false,
+      consecutiveFailures: MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
+      nextRetryAtMs,
+      circuitBreakerActive: true,
+      circuitBreakerTripped: false,
+    })) as QueryDeps['autocompact'],
+    uuid: () => 'test-uuid',
+  }
+
+  const { query } = await loadQuery()
+  const { yielded, terminal } = await drain(
+    query({
+      messages,
+      systemPrompt: asSystemPrompt([]),
+      userContext: {},
+      systemContext: {},
+      canUseTool,
+      toolUseContext: toolUseContext(),
+      querySource: 'repl_main_thread',
+      maxTurns: 1,
+      deps,
+    }),
+  )
+
+  expect(callModel).toHaveBeenCalledTimes(1)
+  expect(terminal.reason).toBe('max_turns')
+  expect(
+    yielded.some(
+      message =>
+        (message as { isApiErrorMessage?: boolean }).isApiErrorMessage === true,
+    ),
+  ).toBe(false)
+})
+
+test('virtual messages do not count toward the final active-message blocking limit', async () => {
+  // Same 100-message threshold without breaker failures, so only the final
+  // blocking check can stop the query. 100 nonvirtual rows sit exactly at the
+  // threshold; virtual padding must not trigger the blocking limit.
+  saveGlobalConfig(current => ({
+    ...current,
+    maxMessagesCompactionThreshold: '100',
+  }))
+  process.env.OPENCLAUDE_MAX_ACTIVE_MESSAGES_HARD_CAP = '5000'
+  const messages = manySmallMessagesWithVirtualTail(100, 5)
+  const callModel = mock(async function* () {
+    yield assistantToolUseMessage()
+  })
+  const deps: QueryDeps = {
+    callModel: callModel as QueryDeps['callModel'],
+    microcompact: mock(async (input: Message[]) => ({
+      messages: input,
+    })) as QueryDeps['microcompact'],
+    autocompact: mock(async () => ({
+      wasCompacted: false,
+    })) as QueryDeps['autocompact'],
+    uuid: () => 'test-uuid',
+  }
+
+  const { query } = await loadQuery()
+  const { yielded, terminal } = await drain(
+    query({
+      messages,
+      systemPrompt: asSystemPrompt([]),
+      userContext: {},
+      systemContext: {},
+      canUseTool,
+      toolUseContext: toolUseContext(),
+      querySource: 'repl_main_thread',
+      maxTurns: 1,
+      deps,
+    }),
+  )
+
+  expect(callModel).toHaveBeenCalledTimes(1)
+  expect(terminal.reason).toBe('max_turns')
+  expect(
+    yielded.some(
+      message =>
+        (message as { isApiErrorMessage?: boolean }).isApiErrorMessage === true,
+    ),
+  ).toBe(false)
 })

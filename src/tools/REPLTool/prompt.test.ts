@@ -243,4 +243,30 @@ describe("getReplToolPrompt", () => {
     expect(contract.omittedToolCount).toBeGreaterThan(0)
     expect(contract.nonPrimitiveInputSchemasOmitted).toBeGreaterThanOrEqual(0)
   })
+
+  test("preserves own __proto__ schema keys in the compact input contract", async () => {
+    // JSON.parse produces genuine own __proto__ properties; object literals
+    // cannot express them. A schema author can require such a parameter, and
+    // dropping it from the compact contract hides the schema without an
+    // omission notice.
+    const schema = JSON.parse(
+      '{"type":"object","properties":{"__proto__":{"type":"string"},"plain":{"type":"number"}},"required":["__proto__","plain"],"$defs":{"__proto__":{"type":"object","properties":{"x":{"type":"string"}}}}}',
+    )
+    const tool = createToolFixture(z.object({ ok: z.string() }), {
+      name: "mcp__proto__keytool",
+      isMcp: true,
+      inputJSONSchema: schema,
+    })
+    const prompt = await getReplToolPrompt(makeOptions({ tools: [tool] }))
+    const contract = extractContract(prompt)
+    const compact = contract.inputSchemas["mcp__proto__keytool"] as {
+      properties?: Record<string, unknown>
+      $defs?: Record<string, unknown>
+    }
+
+    expect(Object.prototype.hasOwnProperty.call(compact.properties ?? {}, "__proto__")).toBe(true)
+    expect(Object.prototype.hasOwnProperty.call(compact.properties ?? {}, "plain")).toBe(true)
+    expect(Object.prototype.hasOwnProperty.call(compact.$defs ?? {}, "__proto__")).toBe(true)
+    expect((compact.properties?.__proto__ as { type?: string })?.type).toBe("string")
+  })
 })

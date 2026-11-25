@@ -359,8 +359,8 @@ const SYSTEM_PROVENANCE_METADATA_KEYS = new Set([
 ])
 
 function redactPayloadValue(value: unknown, depth = 0): unknown {
-  if (typeof value === 'string') return REPL_HOOK_REDACTED_TEXT
-  if (value === null || typeof value !== 'object') return value
+  if (value === null) return value
+  if (typeof value !== 'object') return REPL_HOOK_REDACTED_TEXT
   if (depth >= 5) return REPL_HOOK_REDACTED_TEXT
   if (Array.isArray(value)) {
     const items = value.slice(0, 10).map(item => redactPayloadValue(item, depth + 1))
@@ -1488,7 +1488,6 @@ export async function checkPermissionsAndCallTool(
 
   const startTime = Date.now()
 
-  startSessionActivity('tool_exec')
   // If processedInput still points at the backfill clone, no hook/permission
   // replaced it — pass the pre-backfill callInput so call() sees the model's
   // original field values. Otherwise converge on the hook-supplied input.
@@ -1501,6 +1500,10 @@ export async function checkPermissionsAndCallTool(
   if (toolUseContext.replInnerExecution === true) {
     validateReplForegroundOnlyInput(tool.name, callInput)
   }
+
+  // Activity tracking starts only after validation passes: a foreground
+  // rejection throws here and must not leave the refcount unbalanced.
+  startSessionActivity('tool_exec')
 
   let queryActivityLease: { release(): void } | undefined
 
@@ -1752,9 +1755,11 @@ export async function checkPermissionsAndCallTool(
     }
 
     // TODO(hackyon): refactor so we don't have different experiences for MCP tools
-    const committedToolResultIndex = !isMcpTool(tool)
-      ? await addToolResult(toolOutput, mappedToolResultBlock)
-      : undefined
+    // PostToolUse hooks may replace the tool output, so the tool result is
+    // committed only after hooks finish: persisting large output now would
+    // write the pre-hook payload to the artifact store. Remember where the
+    // committed result belongs so hook messages still order after it.
+    const toolResultInsertionIndex = resultingMessages.length
 
     const postToolHookInfos: StopHookInfo[] = []
     const postToolHookStart = Date.now()
@@ -1773,10 +1778,6 @@ export async function checkPermissionsAndCallTool(
         toolOutput = hookResult.updatedToolOutput
         if (tool.name === REPL_TOOL_NAME) {
           redactReplInnerProvenance(result.newMessages)
-        }
-        if (!isMcpTool(tool) && committedToolResultIndex !== undefined) {
-          resultingMessages[committedToolResultIndex] =
-            await createToolResultUpdate(toolOutput)
         }
       } else if (isMcpTool(tool)) {
         hookResults.push(hookResult)
@@ -1820,13 +1821,27 @@ export async function checkPermissionsAndCallTool(
       )
     }
 
+    // Commit the tool result only after hooks finish. Large results spill to
+    // the artifact store here, exactly once, so a hook replacement never
+    // leaves the original pre-hook payload on disk.
+    let committedToolResultIndex: number | undefined
     if (isMcpTool(tool)) {
       await addToolResult(toolOutput)
+    } else {
+      resultingMessages.splice(
+        toolResultInsertionIndex,
+        0,
+        await createToolResultUpdate(
+          toolOutput,
+          toolOutput === result.data ? mappedToolResultBlock : undefined,
+        ),
+      )
+      committedToolResultIndex = toolResultInsertionIndex
     }
 
-    // REPL output is committed optimistically before hooks so replacement hooks
-    // can redact it. Spill only the final post-hook output, never the original
-    // pre-hook payload, then replace the committed message in place.
+    // The REPL tool result is committed after hooks above. Spill only the
+    // final post-hook output, never the original pre-hook payload, then
+    // replace the committed message in place.
     if (tool.name === REPL_TOOL_NAME && committedToolResultIndex !== undefined) {
       const committedUpdate = resultingMessages[committedToolResultIndex]
       if (committedUpdate?.message.type === 'user') {

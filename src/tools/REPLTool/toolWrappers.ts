@@ -65,7 +65,9 @@ export function buildReplToolInventory(input: {
     if (!tool.isEnabled() || REPL_EXCLUDED_TOOLS.has(tool.name)) continue
     if (
       REPL_NON_PRIMITIVE_ALLOWLIST.has(tool.name) ||
-      tool.name === POWERSHELL_TOOL_NAME ||
+      (tool.name === POWERSHELL_TOOL_NAME &&
+        (allowedPrimitiveNames === undefined ||
+          allowedPrimitiveNames.has(POWERSHELL_TOOL_NAME))) ||
       tool.isMcp === true
     ) {
       addToolOnce(inventory, seen, tool)

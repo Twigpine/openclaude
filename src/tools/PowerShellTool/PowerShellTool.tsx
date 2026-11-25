@@ -1302,7 +1302,7 @@ async function* runPowerShellCommand({
       // User submitted a new message - background instead of killing
       if (abortController.signal.aborted && abortController.signal.reason === 'interrupt' && !interruptBackgroundingStarted) {
         interruptBackgroundingStarted = true;
-        if (!isBackgroundTasksDisabled) {
+        if (foregroundOnly !== true && !isBackgroundTasksDisabled) {
           startBackgrounding('tengu_powershell_command_interrupt_backgrounded');
           // Reloop so the backgroundShellId check (above) catches the sync
           // foregroundTaskId→background path. Without this, we fall through

@@ -215,6 +215,74 @@ function clearProviderEnv(): void {
   }
 }
 
+test('interruption detection ignores completed virtual REPL rows but keeps them', async () => {
+  const prompt = user(id(70), 'run a script')
+  const replUse = {
+    ...assistant(id(71), '', id(70)),
+    message: {
+      ...assistant(id(71), '', id(70)).message,
+      content: [
+        {
+          type: 'tool_use',
+          id: 'repl-use-interrupted',
+          name: 'REPL',
+          input: { code: 'await Read({file_path:"a.ts"})' },
+        },
+      ],
+    },
+  }
+  const innerUse = {
+    ...assistant(id(72), '', id(71)),
+    isVirtual: true,
+    message: {
+      ...assistant(id(72), '', id(71)).message,
+      content: [
+        {
+          type: 'tool_use',
+          id: 'inner-use-completed',
+          name: 'Read',
+          input: { file_path: 'a.ts' },
+        },
+      ],
+    },
+  }
+  const innerResult = {
+    ...user(id(73), '', id(72)),
+    isVirtual: true,
+    message: {
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'inner-use-completed',
+          content: 'inner output',
+          is_error: false,
+        },
+      ],
+    },
+  }
+  const { deserializeMessagesWithInterruptDetection } =
+    await importFreshConversationRecovery()
+
+  const result = deserializeMessagesWithInterruptDetection([
+    prompt,
+    replUse,
+    innerUse,
+    innerResult,
+  ] as never)
+
+  expect(
+    result.messages.some(m => m.uuid === id(72) && m.isVirtual === true),
+  ).toBe(true)
+  expect(
+    result.messages.some(m => m.uuid === id(73) && m.isVirtual === true),
+  ).toBe(true)
+  expect(result.turnInterruptionState.kind).toBe('interrupted_prompt')
+  if (result.turnInterruptionState.kind === 'interrupted_prompt') {
+    expect(result.turnInterruptionState.message.uuid).toBe(id(70))
+  }
+})
+
 test('loadConversationForResume accepts a small transcript from jsonl path', async () => {
   process.env.CLAUDE_CODE_SIMPLE = '1'
   const path = await writeJsonl(user(id(1), 'hello'))

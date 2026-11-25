@@ -147,6 +147,7 @@ export const REPLTool = buildTool({
     const scriptController = new AbortController()
     const abortFromOuter = () => scriptController.abort(context.abortController.signal.reason)
     context.abortController.signal.addEventListener('abort', abortFromOuter, { once: true })
+    if (context.abortController.signal.aborted) abortFromOuter()
     const progressToolUseID = context.toolUseId ?? 'unknown'
     const runner = new ReplInnerToolRunner({
       inventory,

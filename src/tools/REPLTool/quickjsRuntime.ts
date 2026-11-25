@@ -69,6 +69,10 @@ const DEFAULT_INPUT_BYTES_PER_CALL = 1024 * 1024
 // charged when the input crosses the host boundary, before any queueing in the
 // inner tool runner, so queued fanout cannot multiply host memory without bound.
 const DEFAULT_INPUT_BYTES_PER_SCRIPT = 8 * 1024 * 1024
+// Input conversion failures never reach the inner tool runner, so the bridge
+// keeps its own finite count of attempted host crossings. Keep this aligned
+// with DEFAULT_REPL_RESOURCE_CAPS.maxTotalCalls.
+const MAX_HOST_CALL_ATTEMPTS = 100
 
 
 // Native promise awaiting uses internal promise slots and does not call the
@@ -137,35 +141,37 @@ const BOUNDED_GUEST_SERIALIZER_SOURCE = `
     let nodes = 0
     let stringChars = 0
     const seen = new WeakSet()
+    function capString(value) {
+      const stringValue = String(value)
+      const serialized = truncateString(stringValue, maxTotalStringChars - stringChars)
+      stringChars += serialized.length
+      return serialized
+    }
     function serializeInner(current, depth) {
       if (nodes >= maxTotalNodes) return '[SerializationBudget]'
       nodes += 1
       if (current === null) return null
       const type = typeof current
-      if (type === 'string') {
-        const serialized = truncateString(current, maxTotalStringChars - stringChars)
-        stringChars += serialized.length
-        return serialized
-      }
+      if (type === 'string') return capString(current)
       if (type === 'number' || type === 'boolean') return current
       if (type === 'undefined') return '[undefined]'
-      if (type === 'bigint') return current.toString() + 'n'
-      if (type === 'symbol') return String(current)
-      if (type === 'function') return '[function' + (current.name ? ' ' + current.name : '') + ']'
-      if (type !== 'object') return String(current)
+      if (type === 'bigint') return capString(current.toString() + 'n')
+      if (type === 'symbol') return capString(String(current))
+      if (type === 'function') return capString('[function' + (current.name ? ' ' + current.name : '') + ']')
+      if (type !== 'object') return capString(String(current))
       if (seen.has(current)) return '[Circular]'
       if (depth >= maxDepth) return '[MaxDepth]'
       seen.add(current)
       if (current instanceof Date) return current.toISOString()
       if (current instanceof Error) {
         return {
-          name: current.name || 'Error',
+          name: capString(current.name || 'Error'),
           message: serializeInner(current.message || String(current), depth + 1),
           ...(current.stack ? { stack: serializeInner(current.stack, depth + 1) } : {}),
         }
       }
       if (ArrayBuffer.isView(current)) {
-        return { type: current.constructor && current.constructor.name || 'TypedArray', byteLength: current.byteLength || 0, note: 'binary data omitted' }
+        return { type: capString(current.constructor && current.constructor.name || 'TypedArray'), byteLength: current.byteLength || 0, note: 'binary data omitted' }
       }
       if (current instanceof ArrayBuffer) {
         return { type: 'ArrayBuffer', byteLength: current.byteLength, note: 'binary data omitted' }
@@ -179,8 +185,7 @@ const BOUNDED_GUEST_SERIALIZER_SOURCE = `
       const out = {}
       const entries = Object.entries(current)
       for (const entry of entries.slice(0, maxObjectProperties)) {
-        const serializedKey = truncateString(entry[0], maxTotalStringChars - stringChars)
-        stringChars += serializedKey.length
+        const serializedKey = capString(entry[0])
         out[serializedKey] = serializeInner(entry[1], depth + 1)
       }
       if (entries.length > maxObjectProperties) out.__truncated__ = (entries.length - maxObjectProperties) + ' properties omitted'
@@ -219,6 +224,10 @@ export class PromptWaitTracker {
 
   currentExcludedMs(now = Date.now()): number {
     return this.excludedMs + (this.startedAt === undefined ? 0 : now - this.startedAt)
+  }
+
+  isActive(): boolean {
+    return this.activeWaits > 0
   }
 }
 
@@ -287,7 +296,41 @@ export async function executeQuickJSScript(
   let aborted = false
   let tornDown = false
 
-  const executionMs = () => Date.now() - startedAt - promptWaitTracker.currentExcludedMs()
+  let hostCallAttempts = 0
+  let hostCallAttemptFailure: Error | undefined
+  let promptWaitGuestExecutionMs = 0
+  let activeGuestExecution: { startedAt: number; duringPromptWait: boolean } | undefined
+
+  const currentPromptWaitGuestExecutionMs = (now: number): number => {
+    const activeExecution = activeGuestExecution
+    const active = activeExecution?.duringPromptWait
+      ? now - activeExecution.startedAt
+      : 0
+    return promptWaitGuestExecutionMs + active
+  }
+  // Prompt wait time is excluded as host think time, but any guest jobs that
+  // run during that wait still consume the execution budget.
+  const executionMs = () => {
+    const now = Date.now()
+    return now - startedAt - promptWaitTracker.currentExcludedMs(now) + currentPromptWaitGuestExecutionMs(now)
+  }
+  const runGuest = <T>(operation: () => T): T => {
+    if (activeGuestExecution) return operation()
+    const execution = {
+      startedAt: Date.now(),
+      duringPromptWait: promptWaitTracker.isActive(),
+    }
+    activeGuestExecution = execution
+    try {
+      return operation()
+    } finally {
+      const endedAt = Date.now()
+      if (execution.duringPromptWait) {
+        promptWaitGuestExecutionMs += endedAt - execution.startedAt
+      }
+      activeGuestExecution = undefined
+    }
+  }
   const appendOutput = (chunks: string[], currentLength: number, chunk: string, maxLength: number): number => {
     if (currentLength >= maxLength) return currentLength
     const remaining = maxLength - currentLength
@@ -305,6 +348,9 @@ export async function executeQuickJSScript(
       aborted = true
       return true
     }
+    if (hostCallAttemptFailure) {
+      return true
+    }
     if (executionMs() > timeoutMs) {
       timedOut = true
       return true
@@ -315,7 +361,7 @@ export async function executeQuickJSScript(
   const context = runtime.newContext()
   const activeDisposables = new Set<{ dispose: () => void }>()
   const activeDeferreds = new Set<{ reject: (value: QuickJSHandle) => void }>()
-  const serializerResult = context.evalCode(BOUNDED_GUEST_SERIALIZER_SOURCE, 'repl-serializer.js', { type: 'global', strict: true })
+  const serializerResult = runGuest(() => context.evalCode(BOUNDED_GUEST_SERIALIZER_SOURCE, 'repl-serializer.js', { type: 'global', strict: true }))
   if (serializerResult.error) {
     const error = errorHandleToSerializedUnbounded(context, serializerResult.error)
     disposeQuietly(serializerResult.error)
@@ -343,15 +389,27 @@ export async function executeQuickJSScript(
   }
 
   const hostPromiseObservations = new Map<number, HostPromiseObservation>()
+  // Retire entries once settlement and observation both happened. Entries that
+  // settle before observation stay addressable so a later await can still clear
+  // the completion-time violation; the host attempt budget bounds their count.
+  const retireObservedSettlement = (observation: HostPromiseObservation): void => {
+    if (observation.settled && observation.observed) {
+      hostPromiseObservations.delete(observation.token)
+    }
+  }
+  const markHostPromiseSettled = (observation: HostPromiseObservation): void => {
+    observation.settled = true
+    retireObservedSettlement(observation)
+  }
   let nextHostPromiseToken = 1
   let observableFactoryHandle: QuickJSHandle | undefined
   let observeHostPromiseHandle: QuickJSHandle | undefined
   if (Object.keys(options.hostFunctions ?? {}).length > 0) {
-    const observableFactoryResult = context.evalCode(
+    const observableFactoryResult = runGuest(() => context.evalCode(
       OBSERVABLE_HOST_PROMISE_FACTORY_SOURCE,
       'repl-observable-host-promise.js',
       { type: 'global', strict: true },
-    )
+    ))
     if (observableFactoryResult.error) {
       const error = errorHandleToSerialized(observableFactoryResult.error)
       disposeQuietly(observableFactoryResult.error)
@@ -366,7 +424,10 @@ export async function executeQuickJSScript(
       const tokenHandle = args[0]
       if (!tokenHandle || context.typeof(tokenHandle) !== 'number') return context.undefined
       const observation = hostPromiseObservations.get(context.getNumber(tokenHandle))
-      if (observation) observation.observed = true
+      if (observation) {
+        observation.observed = true
+        retireObservedSettlement(observation)
+      }
       return context.undefined
     })
     activeDisposables.add(observeHostPromiseHandle)
@@ -392,16 +453,21 @@ export async function executeQuickJSScript(
       throw new Error('REPL host promise observer is not installed')
     }
     const tokenHandle = context.newNumber(observation.token)
-    const wrapped = context.callFunction(observableFactoryHandle, context.undefined, [
-      promiseHandle,
-      tokenHandle,
-      observeHostPromiseHandle,
-    ])
-    disposeQuietly(tokenHandle)
-    // The wrapper closure now owns the guest-side promise reference. Since the
-    // raw promise handle is not the host function return value, release this
-    // host reference; resolver handles stay alive until settlement.
-    disposeQuietly(promiseHandle)
+    const wrapped = (() => {
+      try {
+        return runGuest(() => context.callFunction(observableFactoryHandle, context.undefined, [
+          promiseHandle,
+          tokenHandle,
+          observeHostPromiseHandle,
+        ]))
+      } finally {
+        disposeQuietly(tokenHandle)
+        // The wrapper closure now owns the guest-side promise reference. Since the
+        // raw promise handle is not the host function return value, release this
+        // host reference; resolver handles stay alive until settlement.
+        disposeQuietly(promiseHandle)
+      }
+    })()
     if (wrapped.error) {
       const serialized = errorHandleToSerialized(wrapped.error)
       disposeQuietly(wrapped.error)
@@ -416,7 +482,7 @@ export async function executeQuickJSScript(
   activeDisposables.add(jsonStringifyHandle)
 
   function dumpBoundedGuestValue(handle: QuickJSHandle): unknown {
-    const serialized = context.callFunction(serializerHandle, context.undefined, [handle])
+    const serialized = runGuest(() => context.callFunction(serializerHandle, context.undefined, [handle]))
     if (serialized.error) {
       disposeQuietly(serialized.error)
       return { serializationError: 'QuickJS guest value could not be serialized' }
@@ -432,7 +498,7 @@ export async function executeQuickJSScript(
     const jsonTexts: Array<string | undefined> = []
     let inputBytes = 0
     for (const handle of handles) {
-      const stringified = context.callFunction(jsonStringifyHandle, context.undefined, [handle])
+      const stringified = runGuest(() => context.callFunction(jsonStringifyHandle, context.undefined, [handle]))
       if (stringified.error) {
         const serialized = errorHandleToSerialized(stringified.error)
         disposeQuietly(stringified.error)
@@ -526,6 +592,11 @@ export async function executeQuickJSScript(
       throw new Error(`Invalid QuickJS host function name: ${name}`)
     }
     const fn = context.newFunction(name, (...argHandles) => {
+      hostCallAttempts += 1
+      if (hostCallAttempts > MAX_HOST_CALL_ATTEMPTS) {
+        hostCallAttemptFailure ??= new Error(`REPL host call attempt budget exceeded (${MAX_HOST_CALL_ATTEMPTS})`)
+        throw hostCallAttemptFailure
+      }
       let args: unknown[]
       try {
         args = guestInputsFromHandles(name, argHandles)
@@ -538,7 +609,6 @@ export async function executeQuickJSScript(
           message: inputError.message,
         })
         const rejectedInput = context.newPromise()
-        activeDisposables.add(rejectedInput)
         rejectedInput.reject(inputErrorHandle)
         disposeQuietly(inputErrorHandle)
         return wrapHostPromise(rejectedInput.handle, beginHostPromiseObservation(name, true))
@@ -550,7 +620,7 @@ export async function executeQuickJSScript(
         .then(() => implementation(args))
         .then(value => {
           if (tornDown) return
-          observation.settled = true
+          markHostPromiseSettled(observation)
           const serialized = serializeBridgeValue(value)
           const resultHandle = hostValueToQuickJS(context, serialized)
           deferred.resolve(resultHandle)
@@ -558,7 +628,7 @@ export async function executeQuickJSScript(
         })
         .catch((error: unknown) => {
           if (tornDown) return
-          observation.settled = true
+          markHostPromiseSettled(observation)
           const serialized = serializeBridgeError(error)
           const errorHandle = context.newError({
             name: serialized.name,
@@ -576,6 +646,10 @@ export async function executeQuickJSScript(
     disposeQuietly(fn)
   }
 
+  let settlementResultValueHandle: QuickJSHandle | undefined
+  let settlementErrorHandle: QuickJSHandle | undefined
+  let scriptPromiseHandle: QuickJSHandle | undefined
+
   try {
     installConsole()
     for (const [name, implementation] of Object.entries(options.hostFunctions ?? {})) {
@@ -583,36 +657,35 @@ export async function executeQuickJSScript(
     }
 
     const wrappedCode = `(async function() {\n${options.code}\n})()`
-    const evalResult = context.evalCode(wrappedCode, 'repl.js', { type: 'global', strict: true })
+    const evalResult = runGuest(() => context.evalCode(wrappedCode, 'repl.js', { type: 'global', strict: true }))
     if (evalResult.error) {
       const serializedEvalError = errorHandleToSerialized(evalResult.error)
       disposeQuietly(evalResult.error)
       return {
         status: timedOut ? 'timeout' : aborted ? 'aborted' : 'error',
-        error: serializedEvalError,
+        error: hostCallAttemptFailure ? serializeBridgeError(hostCallAttemptFailure) : serializedEvalError,
         stdout: stdoutText(),
         stderr: stderrText(),
         durationMs: Date.now() - startedAt,
       }
     }
 
-    const promiseHandle = evalResult.value
-    const settlement = context.resolvePromise(promiseHandle)
-    disposeQuietly(promiseHandle)
+    scriptPromiseHandle = evalResult.value
 
     let settled = false
-    let settlementValue: Awaited<typeof settlement> | undefined
     let settlementFailure: unknown
-    void settlement.then(
-      value => {
-        settlementValue = value
-        settled = true
-      },
-      failure => {
-        settlementFailure = failure
-        settled = true
-      },
-    )
+    const readPromiseSettlement = (): boolean => {
+      const promiseHandle = scriptPromiseHandle
+      if (!promiseHandle) return false
+      const state = context.getPromiseState(promiseHandle)
+      if (state.type === 'pending') return false
+      if (state.type === 'fulfilled') {
+        settlementResultValueHandle = state.notAPromise ? state.value.dup() : state.value
+      } else {
+        settlementErrorHandle = state.error
+      }
+      return true
+    }
 
     while (!settled) {
       if (options.abortSignal?.aborted) {
@@ -623,14 +696,24 @@ export async function executeQuickJSScript(
         timedOut = true
         break
       }
-      const jobs = runtime.executePendingJobs()
+      const jobs = runGuest(() => runtime.executePendingJobs())
       if (jobs.error) {
-        settlementFailure = errorHandleToSerialized(jobs.error)
+        settlementFailure = hostCallAttemptFailure ?? errorHandleToSerialized(jobs.error)
         disposeQuietly(jobs.error)
         settled = true
         break
       }
+      if (hostCallAttemptFailure) {
+        settlementFailure = hostCallAttemptFailure
+        settled = true
+        break
+      }
       await sleep(1)
+      settled = readPromiseSettlement()
+    }
+
+    if (hostCallAttemptFailure) {
+      settlementFailure ??= hostCallAttemptFailure
     }
 
     if (timedOut || aborted) {
@@ -653,15 +736,20 @@ export async function executeQuickJSScript(
       }
     }
 
-    if (settlementValue?.error) {
-      const serialized = errorHandleToSerialized(settlementValue.error)
-      disposeQuietly(settlementValue.error)
-      return {
-        status: 'error',
-        error: serialized,
-        stdout: stdoutText(),
-        stderr: stderrText(),
-        durationMs: Date.now() - startedAt,
+    if (settlementErrorHandle) {
+      const errorHandle = settlementErrorHandle
+      settlementErrorHandle = undefined
+      try {
+        const serialized = errorHandleToSerialized(errorHandle)
+        return {
+          status: 'error',
+          error: serialized,
+          stdout: stdoutText(),
+          stderr: stderrText(),
+          durationMs: Date.now() - startedAt,
+        }
+      } finally {
+        disposeQuietly(errorHandle)
       }
     }
 
@@ -691,9 +779,18 @@ export async function executeQuickJSScript(
       }
     }
 
-    const valueHandle = settlementValue?.value
-    const result = valueHandle ? serializeBridgeValue(dumpBoundedGuestValue(valueHandle)) : undefined
-    disposeQuietly(valueHandle)
+    const valueHandle = settlementResultValueHandle
+    const projected = valueHandle ? dumpBoundedGuestValue(valueHandle) : undefined
+    if (timedOut || aborted) {
+      return {
+        status: timedOut ? 'timeout' : 'aborted',
+        error: serializeBridgeError(new Error(timedOut ? 'Script execution timed out' : 'Script execution aborted')),
+        stdout: stdoutText(),
+        stderr: stderrText(),
+        durationMs: Date.now() - startedAt,
+      }
+    }
+    const result = valueHandle ? serializeBridgeValue(projected) : undefined
     return {
       status: 'completed',
       result,
@@ -710,6 +807,9 @@ export async function executeQuickJSScript(
       durationMs: Date.now() - startedAt,
     }
   } finally {
+    disposeQuietly(scriptPromiseHandle)
+    disposeQuietly(settlementErrorHandle)
+    disposeQuietly(settlementResultValueHandle)
     tornDown = true
     for (const deferred of activeDeferreds) {
       try {

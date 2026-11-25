@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { z } from 'zod/v4'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
+import { getSessionId } from '../../bootstrap/state.js'
 import { getDefaultAppState } from '../../state/AppStateStore.js'
 import { createToolFixture } from '../../test/toolFixtures.js'
 import { getEmptyToolPermissionContext, type Tool, type ToolUseContext } from '../../Tool.js'
@@ -13,7 +14,10 @@ import {
 } from './innerToolRunner.js'
 import { executeQuickJSScript, PromptWaitTracker } from './quickjsRuntime.js'
 
-function createContext(tools: readonly Tool[]): ToolUseContext {
+function createContext(
+  tools: readonly Tool[],
+  sessionHooks: Map<string, unknown> = new Map(),
+): ToolUseContext {
   const appState = getDefaultAppState()
   return {
     options: {
@@ -32,7 +36,7 @@ function createContext(tools: readonly Tool[]): ToolUseContext {
     readFileState: {},
     getAppState: () => ({
       ...appState,
-      sessionHooks: new Map(),
+      sessionHooks,
       toolPermissionContext: getEmptyToolPermissionContext(),
     }),
     setAppState: () => {},
@@ -57,8 +61,9 @@ function createRunner(tools: readonly Tool[], options: {
   onProgress?: (message: Message) => void
   canUseTool?: CanUseToolFn
   abortSignal?: AbortSignal
+  sessionHooks?: Map<string, unknown>
 } = {}) {
-  const context = createContext(tools)
+  const context = createContext(tools, options.sessionHooks ?? new Map())
   return new ReplInnerToolRunner({
     inventory: tools,
     toolUseContext: context,
@@ -286,6 +291,10 @@ describe('ReplInnerToolRunner', () => {
   test('aborts the in-flight canonical tool when REPL execution is interrupted', async () => {
     resetDoomLoop()
     let sawAbort = false
+    let signalListenerInstalled!: () => void
+    const listenerReady = new Promise<void>(resolve => {
+      signalListenerInstalled = resolve
+    })
     const tool = createToolFixture(z.object({}), {
       name: 'CancellableFixture',
       isReadOnly: () => true,
@@ -298,6 +307,7 @@ describe('ReplInnerToolRunner', () => {
             clearTimeout(timer)
             reject(new Error('cancelled by abort signal'))
           }, { once: true })
+          signalListenerInstalled()
         })
         return { data: 'done' }
       },
@@ -305,22 +315,32 @@ describe('ReplInnerToolRunner', () => {
     const controller = new AbortController()
     const runner = createRunner([tool], { abortSignal: controller.signal })
     const pending = runner.callTool('CancellableFixture', {})
-    setTimeout(() => controller.abort(), 10)
+    await listenerReady
+    controller.abort()
     await expect(pending).rejects.toThrow()
     expect(sawAbort).toBe(true)
   })
 
   test('rejects queued semaphore acquisitions when the runner aborts', async () => {
     resetDoomLoop()
+    let startedCalls = 0
+    let sawAbort = false
+    let signalListenerInstalled!: () => void
+    const listenerReady = new Promise<void>(resolve => {
+      signalListenerInstalled = resolve
+    })
     const tool = createToolFixture(z.object({}), {
       name: 'AbortSemaphoreFixture',
       isReadOnly: () => true,
       isConcurrencySafe: () => true,
       async call(_input, context) {
+        startedCalls += 1
         await new Promise<void>((_resolve, reject) => {
           context.abortController.signal.addEventListener('abort', () => {
+            sawAbort = true
             reject(new Error('cancelled by abort signal'))
           }, { once: true })
+          signalListenerInstalled()
         })
         return { data: 'done' }
       },
@@ -332,26 +352,37 @@ describe('ReplInnerToolRunner', () => {
     })
     const first = runner.callTool('AbortSemaphoreFixture', {})
     const second = runner.callTool('AbortSemaphoreFixture', {})
-    await new Promise(resolve => setTimeout(resolve, 10))
+    await listenerReady
     controller.abort()
     const results = await Promise.allSettled([first, second])
     expect(results[0]?.status).toBe('rejected')
     expect(results[1]?.status).toBe('rejected')
     const secondReason = results[1]?.status === 'rejected' ? results[1].reason : undefined
     expect((secondReason as Error).message).toContain('aborted')
+    expect(sawAbort).toBe(true)
+    expect(startedCalls).toBe(1)
   })
 
   test('rejects queued read-write lane acquisitions when the runner aborts', async () => {
     resetDoomLoop()
+    let startedCalls = 0
+    let sawAbort = false
+    let signalListenerInstalled!: () => void
+    const listenerReady = new Promise<void>(resolve => {
+      signalListenerInstalled = resolve
+    })
     const tool = createToolFixture(z.object({}), {
       name: 'AbortWriteLaneFixture',
       isReadOnly: () => false,
       isConcurrencySafe: () => false,
       async call(_input, context) {
+        startedCalls += 1
         await new Promise<void>((_resolve, reject) => {
           context.abortController.signal.addEventListener('abort', () => {
+            sawAbort = true
             reject(new Error('cancelled by abort signal'))
           }, { once: true })
+          signalListenerInstalled()
         })
         return { data: 'done' }
       },
@@ -363,13 +394,15 @@ describe('ReplInnerToolRunner', () => {
     })
     const first = runner.callTool('AbortWriteLaneFixture', {})
     const second = runner.callTool('AbortWriteLaneFixture', {})
-    await new Promise(resolve => setTimeout(resolve, 10))
+    await listenerReady
     controller.abort()
     const results = await Promise.allSettled([first, second])
     expect(results[0]?.status).toBe('rejected')
     expect(results[1]?.status).toBe('rejected')
     const secondReason = results[1]?.status === 'rejected' ? results[1].reason : undefined
     expect((secondReason as Error).message).toContain('aborted')
+    expect(sawAbort).toBe(true)
+    expect(startedCalls).toBe(1)
   })
 
   test('omits binary attachment payloads from guest results', async () => {
@@ -569,6 +602,120 @@ describe('ReplInnerToolRunner', () => {
     expect(called).toBe(false)
   })
 
+  test('serializes execution when permission input rewriting escalates the lane requirement', async () => {
+    resetDoomLoop()
+    let active = 0
+    let maxActive = 0
+    const tool = createToolFixture(z.object({ value: z.string(), mode: z.string().optional() }), {
+      name: 'LaneEscalationFixture',
+      isReadOnly: () => true,
+      isConcurrencySafe: input => input.mode !== 'write',
+      async call(input) {
+        active += 1
+        maxActive = Math.max(maxActive, active)
+        await new Promise(resolve => setTimeout(resolve, 10))
+        active -= 1
+        return { data: input.mode ?? 'none' }
+      },
+    })
+    const rewriteCanUseTool: CanUseToolFn = async (_tool, input) => ({
+      behavior: 'allow',
+      updatedInput: { ...(input as Record<string, unknown>), mode: 'write' },
+    })
+    const runner = createRunner([tool], { canUseTool: rewriteCanUseTool })
+    try {
+      await expect(Promise.all([
+        runner.callTool('LaneEscalationFixture', { value: 'one' }),
+        runner.callTool('LaneEscalationFixture', { value: 'two' }),
+      ])).resolves.toEqual(['write', 'write'])
+      expect(maxActive).toBe(1)
+    } finally {
+      runner.dispose()
+    }
+  })
+
+  test('charges the mutation budget when permission input rewriting escalates a read-only call', async () => {
+    resetDoomLoop()
+    const tool = createToolFixture(z.object({ mode: z.string().optional() }), {
+      name: 'MutationEscalationFixture',
+      isReadOnly: input => input.mode !== 'write',
+      isConcurrencySafe: () => true,
+      async call() {
+        return { data: 'ok' }
+      },
+    })
+    const rewriteCanUseTool: CanUseToolFn = async (_tool, input) => ({
+      behavior: 'allow',
+      updatedInput: { ...(input as Record<string, unknown>), mode: 'write' },
+    })
+    const runner = createRunner([tool], {
+      canUseTool: rewriteCanUseTool,
+      caps: { maxTotalCalls: 10, maxMutationCalls: 1 },
+    })
+    try {
+      await expect(runner.callTool('MutationEscalationFixture', {})).resolves.toBe('ok')
+      // The rewritten first call must have consumed the single mutation slot,
+      // so this direct mutation exceeds the cap before it can execute.
+      await expect(runner.callTool('MutationEscalationFixture', { mode: 'write' })).rejects.toThrow('mutation call cap')
+    } finally {
+      runner.dispose()
+    }
+  })
+
+  test('applies mutation budget charging to passthrough hook input rewrites', async () => {
+    resetDoomLoop()
+    let calls = 0
+    const tool = createToolFixture(z.object({ value: z.string(), mode: z.string().optional() }), {
+      name: 'PassthroughRewriteFixture',
+      isReadOnly: input => input.mode !== 'write',
+      isConcurrencySafe: () => true,
+      async call() {
+        calls += 1
+        return { data: 'ok' }
+      },
+    })
+    const hookOutputJson = JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        updatedInput: { value: 'x', mode: 'write' },
+      },
+    })
+    const sessionHooks = new Map([
+      [
+        getSessionId(),
+        {
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: 'PassthroughRewriteFixture',
+                hooks: [
+                  {
+                    hook: {
+                      type: 'command',
+                      command: `printf '%s' '${hookOutputJson}'`,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    ]) as Map<string, unknown>
+    const runner = createRunner([tool], {
+      caps: { maxTotalCalls: 10, maxMutationCalls: 0 },
+      sessionHooks,
+    })
+    try {
+      // The passthrough rewrite escalates the call to a mutation; with zero
+      // mutation budget the call must be rejected before executing.
+      await expect(runner.callTool('PassthroughRewriteFixture', { value: 'x' })).rejects.toThrow('mutation call cap')
+      expect(calls).toBe(0)
+    } finally {
+      runner.dispose()
+    }
+  })
+
   test('bounds maximal fanout virtual provenance and preserves elision audit metadata', async () => {
     resetDoomLoop()
     const messages: Message[] = []
@@ -633,6 +780,123 @@ describe('ReplInnerToolRunner', () => {
     expect(content).toMatch(/repl_tool_[0-9a-f-]+ use FanoutMutation mutation/)
     expect(content).toMatch(/repl_tool_[0-9a-f-]+ result FanoutMutation mutation error/)
     expect(content).toContain('input=')
+  })
+
+  test('releases the concurrency slot when concurrency safety classification throws', async () => {
+    resetDoomLoop()
+    let classifications = 0
+    const tool = createToolFixture(z.object({}), {
+      name: 'ThrowingClassificationFixture',
+      isReadOnly: () => true,
+      isConcurrencySafe: () => {
+        classifications += 1
+        if (classifications === 1) throw new Error('classification exploded')
+        return true
+      },
+      async call() { return { data: 'ok' } },
+    })
+    const runner = createRunner([tool], { caps: { maxConcurrentCalls: 1 } })
+    try {
+      await expect(runner.callTool('ThrowingClassificationFixture', {})).rejects.toThrow('classification exploded')
+      const second = runner.callTool('ThrowingClassificationFixture', {})
+      const outcome = await Promise.race([
+        second.then(() => 'resolved', () => 'rejected'),
+        new Promise(resolve => setTimeout(() => resolve('timeout'), 500)),
+      ])
+      expect(outcome).toBe('resolved')
+    } finally {
+      runner.dispose()
+    }
+  })
+
+  test('publishes a complete provenance elision marker on the first elision', async () => {
+    resetDoomLoop()
+    const snapshots: Array<Record<string, unknown>> = []
+    const tool = createToolFixture(z.object({ value: z.string() }), {
+      name: 'ElisionPublishFixture',
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      async call(input) { return { data: `result:${input.value.length}` } },
+    })
+    const runner = createRunner([tool], {
+      caps: { maxProvenanceBytes: 4_096 },
+      onVirtualMessage: message => snapshots.push(JSON.parse(JSON.stringify(message)) as Record<string, unknown>),
+    })
+    try {
+      await runner.callTool('ElisionPublishFixture', { value: 'x'.repeat(4_000) })
+    } finally {
+      runner.dispose()
+    }
+    const marker = snapshots.find(snapshot => snapshot.type === 'system')
+    expect(marker).toBeDefined()
+    if (!marker) throw new Error('Expected published elision marker snapshot')
+    expect(String(marker.content)).toContain('REPL virtual provenance elided')
+    expect(marker.replProvenanceElision).toBeDefined()
+  })
+
+  test('keeps the encoded elision marker within the summary reserve or omits it', async () => {
+    resetDoomLoop()
+    const messages: Message[] = []
+    const tool = createToolFixture(z.object({ value: z.string() }), {
+      name: 'ElisionSizeFixture',
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      async call(input) { return { data: `result:${input.value.length}` } },
+    })
+    const budgetBytes = 4_096
+    // Mirror of the budget split contract: the summary reserve is one eighth
+    // of the budget, floored at 256 and capped at 32k (and at the budget).
+    const reserveBytes = Math.min(
+      budgetBytes,
+      Math.min(32 * 1024, Math.max(256, Math.floor(budgetBytes / 8))),
+    )
+    const runner = createRunner([tool], {
+      caps: { maxProvenanceBytes: budgetBytes },
+      onVirtualMessage: message => messages.push(message),
+    })
+    try {
+      await Promise.allSettled(Array.from({ length: 4 }, (_, index) =>
+        runner.callTool('ElisionSizeFixture', { value: `${index}:${'x'.repeat(4_000)}` }),
+      ))
+    } finally {
+      runner.dispose()
+    }
+    const marker = messages.find(message => message.type === 'system')
+    if (marker) {
+      const markerBytes = Buffer.byteLength(JSON.stringify(marker), 'utf8')
+      expect(markerBytes).toBeLessThanOrEqual(reserveBytes)
+    }
+    const serializedBytes = messages.reduce(
+      (sum, message) => sum + Buffer.byteLength(JSON.stringify(message), 'utf8'),
+      0,
+    )
+    expect(serializedBytes).toBeLessThanOrEqual(budgetBytes)
+  })
+
+  test('omits the elision marker entirely when even a minimal marker cannot fit the budget', async () => {
+    resetDoomLoop()
+    const messages: Message[] = []
+    const tool = createToolFixture(z.object({ value: z.string() }), {
+      name: 'ElisionOmitFixture',
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      async call(input) { return { data: `result:${input.value.length}` } },
+    })
+    const runner = createRunner([tool], {
+      caps: { maxProvenanceBytes: 256 },
+      onVirtualMessage: message => messages.push(message),
+    })
+    try {
+      await runner.callTool('ElisionOmitFixture', { value: 'x'.repeat(4_000) })
+    } finally {
+      runner.dispose()
+    }
+    const marker = messages.find(message =>
+      message.type === 'system' ||
+      (message as { replProvenanceElision?: unknown }).replProvenanceElision !== undefined,
+    )
+    expect(marker).toBeUndefined()
+    expect(JSON.stringify(messages)).not.toContain('REPL virtual provenance elided')
   })
 
 })

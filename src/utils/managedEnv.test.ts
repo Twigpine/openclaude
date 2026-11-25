@@ -233,6 +233,78 @@ describe('Code Mode settings env boundary', () => {
       restore()
     }
   })
+
+  it('filters project settings under alternate casing before trust', () => {
+    const lowercaseKey = CODE_MODE_ENV_VAR.toLowerCase()
+    const { restore } = writeSettingsFiles({
+      project: { env: { [lowercaseKey]: '1' } },
+    })
+    try {
+      delete process.env[lowercaseKey]
+      applySafeConfigEnvironmentVariables()
+
+      expect(process.env[lowercaseKey]).toBeUndefined()
+    } finally {
+      delete process.env[lowercaseKey]
+      restore()
+    }
+  })
+
+  it('filters project and local settings under alternate casing after trust', () => {
+    const lowercaseKey = CODE_MODE_ENV_VAR.toLowerCase()
+    const mixedCaseKey = 'Claude_Code_Experimental_Code_Mode'
+    const { restore } = writeSettingsFiles({
+      project: { env: { [lowercaseKey]: '1' } },
+      local: { env: { [mixedCaseKey]: '1' } },
+    })
+    try {
+      delete process.env[lowercaseKey]
+      delete process.env[mixedCaseKey]
+      applyConfigEnvironmentVariables()
+
+      expect(process.env[lowercaseKey]).toBeUndefined()
+      expect(process.env[mixedCaseKey]).toBeUndefined()
+    } finally {
+      delete process.env[lowercaseKey]
+      delete process.env[mixedCaseKey]
+      restore()
+    }
+  })
+
+  it('does not let project alternate-casing truthy values override trusted user falsy settings', () => {
+    const lowercaseKey = CODE_MODE_ENV_VAR.toLowerCase()
+    const { restore } = writeSettingsFiles({
+      user: { env: { [CODE_MODE_ENV_VAR]: '0' } },
+      project: { env: { [lowercaseKey]: '1' } },
+    })
+    try {
+      delete process.env[CODE_MODE_ENV_VAR]
+      delete process.env[lowercaseKey]
+      applyConfigEnvironmentVariables()
+
+      expect(process.env[CODE_MODE_ENV_VAR]).toBe('0')
+      expect(process.env[lowercaseKey]).toBeUndefined()
+    } finally {
+      delete process.env[lowercaseKey]
+      restore()
+    }
+  })
+
+  it('preserves trusted user settings supplied under alternate casing', () => {
+    const lowercaseKey = CODE_MODE_ENV_VAR.toLowerCase()
+    const { restore } = writeSettingsFiles({
+      user: { env: { [lowercaseKey]: '1' } },
+    })
+    try {
+      delete process.env[lowercaseKey]
+      applyConfigEnvironmentVariables()
+
+      expect(process.env[lowercaseKey]).toBe('1')
+    } finally {
+      delete process.env[lowercaseKey]
+      restore()
+    }
+  })
 })
 
 describe('host-managed API Route settings boundary', () => {

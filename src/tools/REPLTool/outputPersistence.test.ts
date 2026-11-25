@@ -166,6 +166,9 @@ describe('boundReplToolUseResultForPersistence', () => {
     )
     expect(String(bounded.result)).toContain('truncated')
     expect(String(bounded.stdout)).toContain('truncated')
+    // Uniform content does not escape in JSON, so the excerpt must keep its
+    // full per-field cap rather than being shrunk by the inline budget pass.
+    expect(String(bounded.stdout).length).toBeGreaterThan(3_900)
 
     const inlineSize = Buffer.byteLength(JSON.stringify(bounded), 'utf8')
     expect(inlineSize).toBeLessThan(REPL_OUTPUT_ARTIFACT_THRESHOLD_CHARS)
@@ -174,6 +177,56 @@ describe('boundReplToolUseResultForPersistence', () => {
     expect(artifact).toContain('y'.repeat(1_000))
     expect(artifact).toContain('x'.repeat(1_000))
     expect(Buffer.byteLength(artifact, 'utf8')).toBe(Number(bounded.persistedOutputSize))
+  })
+
+  test('keeps the serialized inline result under the threshold when excerpts escape heavily', async () => {
+    const output = {
+      status: 'completed',
+      code: `return { big: '${'"'.repeat(20_000)}' }`,
+      result: '"'.repeat(20_000),
+      stdout: '\\'.repeat(20_000),
+      stderr: '\n'.repeat(20_000),
+      error: {
+        name: 'Error',
+        message: '"'.repeat(20_000),
+        stack: '\t'.repeat(20_000),
+      },
+      durationMs: 5,
+      toolsUsed: ['Read'],
+    }
+    const bounded = await boundReplToolUseResultForPersistence(output, 'escaping-large-repl-output') as Record<string, unknown>
+
+    expect(bounded).not.toBe(output)
+    expect(bounded.persistedOutputPath).toBeString()
+    expect(String(bounded.result)).toContain('truncated')
+    // JSON escaping roughly doubles these excerpts, so the per-field caps
+    // alone cannot keep the serialized inline result under the threshold.
+    expect(Buffer.byteLength(JSON.stringify(bounded), 'utf8')).toBeLessThan(
+      REPL_OUTPUT_ARTIFACT_THRESHOLD_CHARS,
+    )
+
+    const artifact = await readFile(String(bounded.persistedOutputPath), 'utf8')
+    expect(Buffer.byteLength(artifact, 'utf8')).toBe(Number(bounded.persistedOutputSize))
+    // The artifact is JSON, so the escaped form is what proves the full
+    // quote-heavy content was spilled rather than dropped.
+    expect(artifact).toContain('\\"'.repeat(1_000))
+  })
+
+  test('keeps the serialized inline spill representation within the reserved budget', async () => {
+    const output = {
+      status: 'completed',
+      code: 'c'.repeat(1_100),
+      result: 'r'.repeat(16_100),
+      stdout: 'o'.repeat(4_100),
+      stderr: 'e'.repeat(4_100),
+    }
+    const bounded = await boundReplToolUseResultForPersistence(output, 'inline-reserve-budget') as Record<string, unknown>
+
+    // The inline representation must leave the full 1,000-byte metadata and
+    // artifact-preview reserve rather than depending on almost all of it.
+    expect(Buffer.byteLength(JSON.stringify(bounded), 'utf8')).toBeLessThanOrEqual(
+      REPL_OUTPUT_ARTIFACT_THRESHOLD_CHARS - 1_000,
+    )
   })
 
   test('canonical execution stores bounded raw output with the full artifact', async () => {
@@ -236,7 +289,10 @@ describe('boundReplToolUseResultForPersistence', () => {
     const updates = await runCanonicalRepl(code, toolUseID, sessionHooks)
     const message = outerReplUserMessage(updates)
     expect(message.toolUseResult).toEqual(replacement)
-    expect(JSON.stringify(message)).not.toContain(secret)
+    // The unique short prefix is what truncation would retain if the
+    // original output leaked into the serialized message; the full 20k
+    // secret can never fit a bounded excerpt, so checking it asserts nothing.
+    expect(JSON.stringify(message)).not.toContain('original-secret-')
     await expect(access(getToolResultPath(`${toolUseID}-repl-output`, false))).rejects.toThrow()
   })
 

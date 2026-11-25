@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test'
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
+import { readFile, rm } from 'fs/promises'
 import { z } from 'zod/v4'
 
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
@@ -17,6 +18,7 @@ import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
 import { FILE_EDIT_TOOL_NAME } from '../../tools/FileEditTool/constants.js'
 import { FILE_WRITE_TOOL_NAME } from '../../tools/FileWriteTool/constants.js'
 import { NOTEBOOK_EDIT_TOOL_NAME } from '../../tools/NotebookEditTool/constants.js'
+import { REPL_TOOL_NAME } from '../../tools/REPLTool/constants.js'
 import { asAgentId } from '../../types/ids.js'
 import { AbortError } from '../../utils/errors.js'
 import { getDoomLoopState, resetDoomLoop } from '../../utils/doomLoop.js'
@@ -26,6 +28,9 @@ import {
   QueryLifecycleOperationTracker,
 } from '../../utils/queryLifecycle.js'
 import { ReplayIndexBuilder } from '../../utils/replayIndexBuilder.js'
+import type { UserMessage } from '../../types/message.js'
+import * as sessionActivity from '../../utils/sessionActivity.js'
+import { getToolResultPath } from '../../utils/toolResultStorage.js'
 import {
   getReplayResultStatusForError,
   getReplayModifiedFiles,
@@ -130,12 +135,13 @@ async function collectRunToolUse(
     behavior: 'allow',
     updatedInput: toolInput,
   }),
+  toolUseId = 'toolu_lifecycle',
 ) {
   const updates: MessageUpdateLazy[] = []
   for await (const update of runToolUse(
     {
       type: 'tool_use',
-      id: 'toolu_lifecycle',
+      id: toolUseId,
       name: tool.name,
       input,
     } as ToolUseBlock,
@@ -1048,5 +1054,208 @@ describe('normalizeToolInputForValidation', () => {
     }
 
     expect(normalizeToolInputForValidation({ name: 'Read' } as never, input)).toBe(input)
+  })
+})
+
+describe('REPL foreground validation session activity balance', () => {
+  function createForegroundBashTool(capture: { called: boolean }) {
+    return createToolFixture(
+      z.object({ command: z.string(), run_in_background: z.boolean().optional() }),
+      {
+        name: BASH_TOOL_NAME,
+        async call() {
+          capture.called = true
+          return { data: 'bad' }
+        },
+      },
+    )
+  }
+
+  function createReplInnerContext(tool: Tool) {
+    return {
+      ...createLifecycleToolUseContext([tool], new CountingQueryLifecycleTracker()),
+      replInnerExecution: true,
+    } as ToolUseContext
+  }
+
+  function spyOnSessionActivityBalance() {
+    const starts: string[] = []
+    const stops: string[] = []
+    const startSpy = spyOn(sessionActivity, 'startSessionActivity').mockImplementation(reason => {
+      starts.push(reason)
+    })
+    const stopSpy = spyOn(sessionActivity, 'stopSessionActivity').mockImplementation(reason => {
+      stops.push(reason)
+    })
+    return {
+      starts,
+      stops,
+      restore() {
+        startSpy.mockRestore()
+        stopSpy.mockRestore()
+      },
+    }
+  }
+
+  test('rejected background input never starts unbalanced session activity', async () => {
+    const activity = spyOnSessionActivityBalance()
+    try {
+      const capture = { called: false }
+      const tool = createForegroundBashTool(capture)
+      const context = createReplInnerContext(tool)
+
+      const updates = await collectRunToolUse(
+        tool,
+        { command: 'sleep 10', run_in_background: true },
+        context,
+      )
+
+      expect(capture.called).toBe(false)
+      expect(firstToolResultText(updates.at(-1)?.message)).toContain('run_in_background is unavailable')
+      expect(activity.starts).toEqual([])
+      expect(activity.stops).toEqual([])
+    } finally {
+      activity.restore()
+    }
+  })
+
+  test('valid foreground input starts and stops session activity exactly once', async () => {
+    const activity = spyOnSessionActivityBalance()
+    try {
+      const capture = { called: false }
+      const tool = createForegroundBashTool(capture)
+      const context = createReplInnerContext(tool)
+
+      const updates = await collectRunToolUse(
+        tool,
+        { command: 'echo ok' },
+        context,
+      )
+
+      expect(capture.called).toBe(true)
+      expect(updates.length).toBeGreaterThan(0)
+      expect(activity.starts).toEqual(['tool_exec'])
+      expect(activity.stops).toEqual(['tool_exec'])
+    } finally {
+      activity.restore()
+    }
+  })
+})
+
+describe('REPL PostToolUse provenance redaction', () => {
+  test('redacts non-null primitives in inner toolUseResult and content blocks', async () => {
+    const innerMessage = {
+      type: 'user',
+      isVirtual: true,
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'inner-secret-text' },
+        ],
+      },
+      toolUseResult: {
+        tokenCount: 13371337,
+        successFlag: true,
+        missingValue: null,
+        nested: { secretNote: 'inner-secret-note' },
+      },
+    } as unknown as UserMessage
+    const tool = createToolFixture(z.object({ value: z.string() }), {
+      name: REPL_TOOL_NAME,
+      async call() {
+        return { data: 'repl-inner-output', newMessages: [innerMessage] }
+      },
+    })
+    const context = createLifecycleToolUseContext(
+      [tool],
+      new CountingQueryLifecycleTracker(),
+      new AbortController(),
+      postToolOutputHookSession(tool.name, { updatedToolOutput: 'redacted-repl-output' }),
+    )
+
+    const updates = await collectRunToolUse(tool, { value: 'x' }, context)
+    const redacted = updates
+      .map(update => update.message)
+      .find(message => (message as { isVirtual?: boolean }).isVirtual === true) as
+      | {
+          message?: { content?: unknown }
+          toolUseResult?: Record<string, unknown>
+        }
+      | undefined
+
+    const REDACTED = '[inner tool output redacted by REPL PostToolUse hook]'
+    expect(redacted).toBeDefined()
+    const toolUseResult = redacted?.toolUseResult as Record<string, unknown>
+    expect(toolUseResult.tokenCount).toBe(REDACTED)
+    expect(toolUseResult.successFlag).toBe(REDACTED)
+    expect(toolUseResult.missingValue).toBeNull()
+    expect((toolUseResult.nested as Record<string, unknown>).secretNote).toBe(REDACTED)
+    const content = redacted?.message?.content as Array<Record<string, unknown>>
+    expect(content[0]?.type).toBe('text')
+    expect(content[0]?.text).toBe(REDACTED)
+    expect(JSON.stringify(redacted)).not.toContain('13371337')
+    expect(JSON.stringify(redacted)).not.toContain('inner-secret-note')
+    expect(JSON.stringify(redacted)).not.toContain('inner-secret-text')
+  })
+})
+
+describe('tool result artifact persistence around PostToolUse hooks', () => {
+  test('hook replacement does not leave the pre-hook payload in the artifact store', async () => {
+    const toolUseId = 'toolu_persist_hook_replace'
+    const artifactPath = getToolResultPath(toolUseId, false)
+    await rm(artifactPath, { force: true })
+    const originalPayload = `original-sensitive-payload-${'x'.repeat(4000)}`
+    const tool = createToolFixture(z.object({ value: z.string() }), {
+      name: 'PersistHookReplaceTool',
+      async call() {
+        return { data: originalPayload }
+      },
+    })
+    const context = createLifecycleToolUseContext(
+      [tool],
+      new CountingQueryLifecycleTracker(),
+      new AbortController(),
+      postToolOutputHookSession(tool.name, { updatedToolOutput: 'redacted-final-output' }),
+    )
+
+    try {
+      await collectRunToolUse(tool, { value: 'x' }, context, undefined, toolUseId)
+
+      const artifact = await readFile(artifactPath, 'utf8').catch(() => null)
+      expect(artifact).not.toBeNull()
+      expect(artifact).toContain('redacted-final-output')
+      expect(artifact).not.toContain('original-sensitive-payload')
+    } finally {
+      await rm(artifactPath, { force: true })
+    }
+  })
+
+  test('oversized output is still persisted when no hook replaces it', async () => {
+    const toolUseId = 'toolu_persist_no_hook'
+    const artifactPath = getToolResultPath(toolUseId, false)
+    await rm(artifactPath, { force: true })
+    const payload = `${'a'.repeat(1500)}middle-marker-${'b'.repeat(1500)}`
+    const tool = createToolFixture(z.object({ value: z.string() }), {
+      name: 'PersistNoHookTool',
+      async call() {
+        return { data: payload }
+      },
+    })
+    const context = createLifecycleToolUseContext(
+      [tool],
+      new CountingQueryLifecycleTracker(),
+    )
+
+    try {
+      const updates = await collectRunToolUse(tool, { value: 'x' }, context, undefined, toolUseId)
+
+      const artifact = await readFile(artifactPath, 'utf8').catch(() => null)
+      expect(artifact).toBe(payload)
+      const toolResult = updates.find(update => update.message.type === 'user')?.message
+      expect(firstToolResultText(toolResult)).toContain('<persisted-output>')
+      expect(firstToolResultText(toolResult)).not.toContain('middle-marker')
+    } finally {
+      await rm(artifactPath, { force: true })
+    }
   })
 })

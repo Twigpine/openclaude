@@ -382,7 +382,14 @@ export function deserializeMessagesWithInterruptDetection(
       thinkingStripped,
     ) as NormalizedMessage[]
 
-    const internalState = detectTurnInterruption(filteredMessages)
+    // Virtual rows are audit provenance for inner REPL tool calls. They are
+    // stripped before the outer conversation reaches the model, so they must
+    // not decide whether the outer turn was interrupted. Keep them in
+    // filteredMessages for transcript restoration; only detection uses the
+    // outer view.
+    const internalState = detectTurnInterruption(
+      filteredMessages.filter(message => message.isVirtual !== true),
+    )
 
     // Transform mid-turn interruptions into interrupted_prompt by appending
     // a synthetic continuation message. This unifies both interruption kinds

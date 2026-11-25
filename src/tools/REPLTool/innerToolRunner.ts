@@ -408,6 +408,15 @@ function compactEvidenceText(value: unknown, maxChars = PROVENANCE_EVIDENCE_CHAR
     : `${compact.slice(0, maxChars)}... [truncated ${compact.length - maxChars} chars]`
 }
 
+interface ReplProvenanceElisionDetail {
+  marker: 'repl-provenance-elision-v1'
+  budgetBytes: number
+  retainedBytes: number
+  elidedMessages: number
+  elidedBytes: number
+  omittedEntries: number
+}
+
 interface ReplProvenanceElisionState {
   elidedMessages: number
   elidedBytes: number
@@ -428,6 +437,11 @@ function extractTextFromToolResultContent(content: unknown): string {
       return String(serializeBridgeValue(block))
     })
     .join('\n')
+}
+
+interface ReplInvocationLaneState {
+  lane: 'read' | 'write' | undefined
+  lateMutationCharged: boolean
 }
 
 export class ReplInnerToolRunner {
@@ -531,25 +545,31 @@ export class ReplInnerToolRunner {
     if (this.terminalError) throw this.terminalError
     if (this.aborted) throw new Error('REPL execution aborted')
     await this.concurrency.acquire()
-    const needsExclusiveLane = !tool.isConcurrencySafe(isObjectInput(input) ? input : {})
-    let acquiredLane: 'read' | 'write' | undefined
+    // Lane state is per-invocation and mutable: permission decisions and
+    // passthrough hooks can rewrite the input into one that needs the
+    // exclusive lane, and wrapCanUseTool upgrades this lane before execution.
+    const laneState: ReplInvocationLaneState = { lane: undefined, lateMutationCharged: false }
     try {
+      // Classification can throw for provider or MCP tools; keep it inside the
+      // try so the concurrency slot acquired above is always released.
+      const needsExclusiveLane = !tool.isConcurrencySafe(isObjectInput(input) ? input : {})
       if (needsExclusiveLane) {
         await this.executionLane.acquireWrite()
-        acquiredLane = 'write'
+        laneState.lane = 'write'
       } else {
         await this.executionLane.acquireRead()
-        acquiredLane = 'read'
+        laneState.lane = 'read'
       }
       if (this.terminalError) throw this.terminalError
       if (this.aborted) throw new Error('REPL execution aborted')
-      return await this.executeCanonical(tool, input)
+      return await this.executeCanonical(tool, input, laneState)
     } finally {
-      if (acquiredLane === 'write') {
+      if (laneState.lane === 'write') {
         this.executionLane.releaseWrite()
-      } else if (acquiredLane === 'read') {
+      } else if (laneState.lane === 'read') {
         this.executionLane.releaseRead()
       }
+      laneState.lane = undefined
       this.concurrency.release()
     }
   }
@@ -600,17 +620,60 @@ export class ReplInnerToolRunner {
     }
   }
 
-  private wrapCanUseTool(): CanUseToolFn {
+  private wrapCanUseTool(
+    originalInput: unknown,
+    laneState: ReplInvocationLaneState,
+  ): CanUseToolFn {
     const canUseTool = this.options.canUseTool
     return async (tool, input, context, assistantMessage, toolUseID, forceDecision) => {
       const decision = await canUseTool(tool, input, context, assistantMessage, toolUseID, forceDecision)
-      validateForegroundOnlyInput(tool, decision.behavior === 'deny' ? input : (decision.updatedInput ?? input))
+      const finalInput = decision.behavior === 'deny' ? input : (decision.updatedInput ?? input)
+      validateForegroundOnlyInput(tool, finalInput)
+      if (decision.behavior !== 'deny') {
+        // `input` already carries passthrough-hook rewrites and
+        // `decision.updatedInput` carries permission rewrites, so the final
+        // input the tool will execute with can differ from the input the lane
+        // reservation and mutation charge were based on.
+        await this.reconcileFinalInputClassification(tool, originalInput, finalInput, laneState)
+      }
       if (decision.behavior === 'ask' && !decision.rejectFeedback) {
         const error = new Error(`Permission for ${tool.name} was denied without feedback; terminating REPL script`)
         this.terminalError ??= error
         queueMicrotask(() => this.options.onTerminalFailure?.(error))
       }
       return decision
+    }
+  }
+
+  private async reconcileFinalInputClassification(
+    tool: Tool,
+    originalInput: unknown,
+    finalInput: unknown,
+    laneState: ReplInvocationLaneState,
+  ): Promise<void> {
+    const normalizedOriginal = isObjectInput(originalInput) ? originalInput : {}
+    const normalizedFinal = isObjectInput(finalInput) ? finalInput : {}
+    const wasMutation = !tool.isReadOnly(normalizedOriginal)
+    const isMutation = !tool.isReadOnly(normalizedFinal)
+    if (isMutation && !wasMutation && !laneState.lateMutationCharged) {
+      laneState.lateMutationCharged = true
+      this.mutationCalls += 1
+      if (this.mutationCalls > this.caps.maxMutationCalls) {
+        throw this.failTerminally(new ReplResourceCapError(`REPL mutation call cap exceeded (${this.caps.maxMutationCalls})`))
+      }
+    }
+    const wasConcurrencySafe = tool.isConcurrencySafe(normalizedOriginal)
+    const isConcurrencySafe = tool.isConcurrencySafe(normalizedFinal)
+    if (!isConcurrencySafe && wasConcurrencySafe && laneState.lane === 'read') {
+      // Upgrade the lane before execution. The read lane is released before
+      // waiting for write access so concurrent readers upgrading at the same
+      // time cannot deadlock; the tool has not executed yet, so no execution
+      // escapes serialization. Downgrades are not applied: holding the write
+      // lane for a concurrency-safe final input is conservative.
+      laneState.lane = undefined
+      this.executionLane.releaseRead()
+      await this.executionLane.acquireWrite()
+      laneState.lane = 'write'
     }
   }
 
@@ -665,10 +728,27 @@ export class ReplInnerToolRunner {
     return `${message.type}${subtype}${toolUseID} content=${content} (${bytes} bytes)`
   }
 
-  private rebuildProvenanceElisionSummary(): void {
-    const summaryMessage = this.provenanceElision.summaryMessage
-    if (!summaryMessage) return
+  private measureElisionMarkerBytes(content: string, detail: ReplProvenanceElisionDetail): number {
+    // UUID and ISO timestamp strings are fixed length, so measuring a
+    // fixed-shape template matches the encoded size of the published message.
+    const template = {
+      type: 'system',
+      subtype: 'informational',
+      content,
+      level: 'warning',
+      isMeta: false,
+      isVirtual: true,
+      timestamp: '0000-00-00T00:00:00.000Z',
+      uuid: '00000000-0000-0000-0000-000000000000',
+      replProvenanceElision: detail,
+    } as unknown as Message
+    return provenanceMessageBytes(template)
+  }
 
+  private buildProvenanceElisionMarker(): {
+    content: string
+    detail: ReplProvenanceElisionDetail
+  } | undefined {
     const prefix = [
       `REPL virtual provenance elided: ${this.provenanceElision.elidedMessages} messages `,
       `(${this.provenanceElision.elidedBytes} bytes) exceeded the aggregate budget `,
@@ -703,6 +783,26 @@ export class ReplInnerToolRunner {
         escapedJsonStringBytes(suffix)
     }
 
+    const omittedEntriesFor = (entryCount: number): number =>
+      this.provenanceElision.entriesNotStored + orderedEntries.length - entryCount
+    const buildContent = (entryCount: number): string => {
+      const omittedEntries = omittedEntriesFor(entryCount)
+      const suffix = omittedEntries > 0
+        ? `\n${omittedEntries} additional compact audit entries omitted to keep this marker bounded.`
+        : ''
+      return `${prefix}\n${orderedEntries.slice(0, entryCount).map(entry => entry.text).join('\n')}${suffix}`
+    }
+    const buildDetail = (entryCount: number): ReplProvenanceElisionDetail => ({
+      marker: 'repl-provenance-elision-v1',
+      budgetBytes: this.caps.maxProvenanceBytes,
+      retainedBytes: this.provenanceBytesUsed,
+      elidedMessages: this.provenanceElision.elidedMessages,
+      elidedBytes: this.provenanceElision.elidedBytes,
+      omittedEntries: omittedEntriesFor(entryCount),
+    })
+    const encodedBytes = (entryCount: number): number =>
+      this.measureElisionMarkerBytes(buildContent(entryCount), buildDetail(entryCount))
+
     // Entry strings are immutable once stored, so their escaped sizes can be
     // reused. The fixed envelope reserve covers message metadata and numeric
     // count growth while avoiding repeated serialization of the whole marker.
@@ -719,21 +819,41 @@ export class ReplInnerToolRunner {
       }
     }
 
-    const omittedEntries = this.provenanceElision.entriesNotStored +
-      orderedEntries.length - bestEntryCount
-    const suffix = omittedEntries > 0
-      ? `\n${omittedEntries} additional compact audit entries omitted to keep this marker bounded.`
-      : ''
-    const mutableSummary = summaryMessage as unknown as Record<string, unknown>
-    mutableSummary.content = `${prefix}\n${orderedEntries.slice(0, bestEntryCount).map(entry => entry.text).join('\n')}${suffix}`
-    mutableSummary.replProvenanceElision = {
-      marker: 'repl-provenance-elision-v1',
-      budgetBytes: this.caps.maxProvenanceBytes,
-      retainedBytes: this.provenanceBytesUsed,
-      elidedMessages: this.provenanceElision.elidedMessages,
-      elidedBytes: this.provenanceElision.elidedBytes,
-      omittedEntries,
+    // The estimator prices the envelope with a fixed structure reserve, so
+    // verify the real encoded marker size and trim any entries that push it
+    // over the summary budget.
+    while (bestEntryCount > 0 && encodedBytes(bestEntryCount) > this.provenanceSummaryReserveBytes) {
+      bestEntryCount -= 1
     }
+    if (encodedBytes(bestEntryCount) <= this.provenanceSummaryReserveBytes) {
+      return { content: buildContent(bestEntryCount), detail: buildDetail(bestEntryCount) }
+    }
+
+    // Even an empty full marker exceeds the reserve. Fall back to a minimal
+    // single-line representation, or omit the marker entirely when the
+    // configured budget cannot hold even that.
+    const compactContent = [
+      `REPL virtual provenance elided: ${this.provenanceElision.elidedMessages} messages `,
+      `(${this.provenanceElision.elidedBytes} bytes) exceeded the aggregate budget `,
+      `of ${this.caps.maxProvenanceBytes} bytes.`,
+    ].join('')
+    const compactDetail = buildDetail(0)
+    if (this.measureElisionMarkerBytes(compactContent, compactDetail) <= this.provenanceSummaryReserveBytes) {
+      return { content: compactContent, detail: compactDetail }
+    }
+    return undefined
+  }
+
+  private rebuildProvenanceElisionSummary(): void {
+    const summaryMessage = this.provenanceElision.summaryMessage
+    if (!summaryMessage) return
+    // Counts only grow after publication; when the marker no longer fits, the
+    // last bounded content is kept rather than exceeding the reserve.
+    const marker = this.buildProvenanceElisionMarker()
+    if (!marker) return
+    const mutableSummary = summaryMessage as unknown as Record<string, unknown>
+    mutableSummary.content = marker.content
+    mutableSummary.replProvenanceElision = marker.detail
   }
 
   private recordProvenanceElision(message: Message, bytes: number): void {
@@ -757,17 +877,24 @@ export class ReplInnerToolRunner {
     }
 
     if (!this.provenanceElision.summaryMessage) {
-      this.provenanceElision.summaryMessage = {
+      // Build the complete marker before publishing so consumers that copy or
+      // serialize the message at emission time never see a partial record.
+      const marker = this.buildProvenanceElisionMarker()
+      if (!marker) return
+      const summaryMessage = {
         type: 'system',
         subtype: 'informational',
-        content: '',
+        content: marker.content,
         level: 'warning',
         isMeta: false,
         isVirtual: true,
         timestamp: new Date().toISOString(),
         uuid: randomUUID(),
+        replProvenanceElision: marker.detail,
       } as Message
-      this.options.onVirtualMessage?.(this.provenanceElision.summaryMessage)
+      this.provenanceElision.summaryMessage = summaryMessage
+      this.options.onVirtualMessage?.(summaryMessage)
+      return
     }
     this.rebuildProvenanceElisionSummary()
   }
@@ -786,7 +913,11 @@ export class ReplInnerToolRunner {
     this.recordProvenanceElision(capped, bytes)
   }
 
-  private async executeCanonical(tool: Tool, input: unknown): Promise<unknown> {
+  private async executeCanonical(
+    tool: Tool,
+    input: unknown,
+    laneState: ReplInvocationLaneState,
+  ): Promise<unknown> {
     const toolUse: ToolUseBlock = {
       type: 'tool_use',
       id: `repl_tool_${randomUUID()}`,
@@ -825,7 +956,7 @@ export class ReplInnerToolRunner {
       for await (const update of runToolUse(
         toolUse,
         assistantMessage,
-        this.wrapCanUseTool(),
+        this.wrapCanUseTool(input, laneState),
         childContext,
       )) {
         const message = update.message

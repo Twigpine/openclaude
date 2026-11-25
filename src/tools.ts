@@ -129,7 +129,7 @@ const WorkflowTool = feature('WORKFLOW_SCRIPTS')
   : null
 /* eslint-enable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
 import type { ToolPermissionContext } from './Tool.js'
-import { getDenyRuleForTool, toolAlwaysAllowedRule } from './utils/permissions/permissions.js'
+import { getAskRuleForTool, getDenyRuleForTool, toolAlwaysAllowedRule } from './utils/permissions/permissions.js'
 import { hasEmbeddedSearchTools } from './utils/embeddedTools.js'
 import { isEnvTruthy } from './utils/envUtils.js'
 import { isPowerShellToolEnabled } from './utils/shell/shellToolUtils.js'
@@ -271,9 +271,19 @@ type GetToolsOptions = {
 function isReplUsableInPermissionContext(
   permissionContext: ToolPermissionContext,
 ): boolean {
+  if (permissionContext.mode !== 'dontAsk') {
+    return true
+  }
+  // dontAsk converts the wrapper's mandatory script approval into a denial,
+  // so an allow rule is the only thing keeping REPL usable. The allow rule is
+  // effective only when no ask rule matches the tool: the runtime permission
+  // pipeline evaluates blanket ask rules (step 1b) before blanket allow rules
+  // (step 2b), and the resulting ask is converted into a denial in dontAsk
+  // mode. When the ask rule wins, direct primitives must remain available.
+  const replToolRef = { name: REPL_TOOL_NAME }
   return (
-    permissionContext.mode !== 'dontAsk' ||
-    toolAlwaysAllowedRule(permissionContext, { name: REPL_TOOL_NAME }) !== null
+    toolAlwaysAllowedRule(permissionContext, replToolRef) !== null &&
+    getAskRuleForTool(permissionContext, replToolRef) === null
   )
 }
 
@@ -289,7 +299,18 @@ export const getTools = (
     // return REPL instead of the raw primitives. Matches the non-bare path
     // below which also hides REPL_ONLY_TOOLS when REPL is enabled.
     const activeREPLTool = getREPLTool()
-    if (replModeActive && activeREPLTool && isReplUsableInPermissionContext(permissionContext)) {
+    // Check the deny rule before selecting the wrapper branch: the deny filter
+    // below would strip REPL from the wrapper-only inventory and leave no
+    // primitives at all, so a denied REPL must fall through to direct tools.
+    const replDenied =
+      activeREPLTool != null &&
+      getDenyRuleForTool(permissionContext, activeREPLTool) !== null
+    if (
+      replModeActive &&
+      activeREPLTool &&
+      !replDenied &&
+      isReplUsableInPermissionContext(permissionContext)
+    ) {
       const replSimple: Tool[] = [activeREPLTool]
       if (
         feature('COORDINATOR_MODE') &&

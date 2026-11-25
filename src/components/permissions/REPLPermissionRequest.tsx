@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 import { stripVTControlCharacters } from 'node:util'
 import { useAppState } from 'src/state/AppState.js'
 import { getOriginalCwd } from '../../bootstrap/state.js'
@@ -9,7 +9,12 @@ import type { PermissionRequestProps } from './PermissionRequest.js'
 import { PermissionPrompt, type PermissionPromptOption } from './PermissionPrompt.js'
 import { createSimplePermissionHandlers } from './simplePermissionActions.js'
 
-type ReplOptionValue = 'yes' | 'yes-dont-ask-again' | 'yes-full-access' | 'no'
+type ReplOptionValue =
+  | 'yes'
+  | 'yes-dont-ask-again'
+  | 'yes-full-access'
+  | 'no'
+  | 'toggle-full-script'
 
 const PERMISSION_PREVIEW_BUDGET_CHARS = 8_000
 const PERMISSION_PREVIEW_HEAD_CHARS = 6_000
@@ -24,6 +29,7 @@ function stripUnsafeControlCharacters(value: string): string {
 
 export function formatReplPermissionPreview(code: string): {
   text: string
+  fullText: string
   lineCount: number
   characterCount: number
   omittedCharacters: number
@@ -33,6 +39,7 @@ export function formatReplPermissionPreview(code: string): {
   if (sanitized.length <= PERMISSION_PREVIEW_BUDGET_CHARS) {
     return {
       text: sanitized,
+      fullText: sanitized,
       lineCount,
       characterCount: code.length,
       omittedCharacters: 0,
@@ -43,6 +50,7 @@ export function formatReplPermissionPreview(code: string): {
   const omittedCharacters = sanitized.length - head.length - tail.length
   return {
     text: `${head}\n... [omitted ${omittedCharacters} middle characters] ...\n${tail}`,
+    fullText: sanitized,
     lineCount,
     characterCount: code.length,
     omittedCharacters,
@@ -61,6 +69,7 @@ export function REPLPermissionRequest({
   const input = toolUseConfirm.input as { code?: unknown }
   const code = typeof input.code === 'string' ? input.code : ''
   const preview = useMemo(() => formatReplPermissionPreview(code), [code])
+  const [showFullScript, setShowFullScript] = useState(false)
   const userFacingName = toolUseConfirm.tool.userFacingName(toolUseConfirm.input as never)
 
   const { onSelect, onCancel } = createSimplePermissionHandlers(
@@ -89,6 +98,14 @@ export function REPLPermissionRequest({
     },
   )
 
+  const handleSelect = (value: ReplOptionValue, feedback?: string) => {
+    if (value === 'toggle-full-script') {
+      setShowFullScript(current => !current)
+      return
+    }
+    onSelect(value, feedback)
+  }
+
   const options = useMemo(() => {
     const nextOptions: PermissionPromptOption<ReplOptionValue>[] = [
       { label: 'Yes', value: 'yes', feedbackConfig: { type: 'accept' } },
@@ -97,8 +114,8 @@ export function REPLPermissionRequest({
       nextOptions.push({
         label: (
           <Text>
-            Yes, and don&apos;t ask again for <Text bold>{userFacingName}</Text> commands in{' '}
-            <Text bold>{getOriginalCwd()}</Text>
+            Yes, and don&apos;t ask again for all future <Text bold>{userFacingName}</Text>{' '}
+            scripts in <Text bold>{getOriginalCwd()}</Text>
           </Text>
         ),
         value: 'yes-dont-ask-again',
@@ -116,8 +133,19 @@ export function REPLPermissionRequest({
       value: 'no',
       feedbackConfig: { type: 'reject' },
     })
+    if (preview.omittedCharacters > 0) {
+      nextOptions.push({
+        label: showFullScript ? 'Show truncated preview' : 'Show full script',
+        value: 'toggle-full-script',
+      })
+    }
     return nextOptions
-  }, [isDangerousModeAvailable, userFacingName])
+  }, [
+    isDangerousModeAvailable,
+    userFacingName,
+    preview.omittedCharacters,
+    showFullScript,
+  ])
 
   return (
     <PermissionPrompt
@@ -135,11 +163,11 @@ export function REPLPermissionRequest({
             {preview.lineCount} lines, {preview.characterCount} characters
             {preview.omittedCharacters > 0 ? `, preview omits ${preview.omittedCharacters} middle characters` : ''}
           </Text>
-          <Text>{preview.text}</Text>
+          <Text>{showFullScript ? preview.fullText : preview.text}</Text>
         </Box>
       }
       options={options}
-      onSelect={onSelect}
+      onSelect={handleSelect}
       onCancel={onCancel}
     />
   )

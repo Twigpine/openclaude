@@ -524,7 +524,8 @@ describe('REPLTool', () => {
 
   test('plan mode allows outer orchestration while denying an inner mutation', async () => {
     const filePath = `/tmp/openclaude-repl-plan-${randomUUID()}.txt`
-    const context = createContext()
+    const code = `try { await Write({ file_path: ${JSON.stringify(filePath)}, content: 'mutation' }); return 'write-succeeded' } catch (error) { return error instanceof Error ? error.message : String(error) }`
+    const context = createContext([REPLTool])
     const baseGetAppState = context.getAppState
     context.getAppState = () => {
       const state = baseGetAppState()
@@ -538,18 +539,28 @@ describe('REPLTool', () => {
     }
 
     try {
-      const result = await REPLTool.call(
+      const updates: MessageUpdateLazy[] = []
+      for await (const update of runToolUse(
         {
-          code: `try { await Write({ file_path: ${JSON.stringify(filePath)}, content: 'mutation' }); return 'write-succeeded' } catch (error) { return error instanceof Error ? error.message : String(error) }`,
-        },
-        context,
+          type: 'tool_use',
+          id: 'repl-plan-mode-test',
+          name: 'REPL',
+          input: { code },
+        } as ToolUseBlock,
+        parentFor(code),
         hasPermissionsToUseTool,
-        createAssistantMessage({ content: 'run repl' }),
-        undefined,
-      )
-      expect(result.data.status).toBe('completed')
-      expect(String(result.data.result)).toContain('Plan mode is read-only')
-      expect(String(result.data.result)).not.toBe('write-succeeded')
+        context,
+      )) {
+        updates.push(update)
+      }
+
+      const outerToolUseResult = (updates.find(update =>
+        update.message.type === 'user' && update.message.isVirtual !== true,
+      )?.message as { toolUseResult?: unknown } | undefined)?.toolUseResult
+      expect(outerToolUseResult).toMatchObject({ status: 'completed' })
+      const result = String((outerToolUseResult as { result?: unknown } | undefined)?.result)
+      expect(result).toContain('Plan mode is read-only')
+      expect(result).not.toBe('write-succeeded')
     } finally {
       await rm(filePath, { force: true })
     }
@@ -574,6 +585,50 @@ describe('REPLTool', () => {
     const replOnlyTools = getTools(preapprovedReplContext)
     expect(replOnlyTools.some(tool => tool.name === 'REPL')).toBe(true)
     expect(replOnlyTools.some(tool => tool.name === 'Read')).toBe(false)
+  })
+
+  test('dontAsk falls back to direct tools when an ask rule outranks the REPL allow rule', () => {
+    setReplModeEnabledForSession(true)
+    const askAndAllowContext = {
+      ...getEmptyToolPermissionContext(),
+      mode: 'dontAsk' as const,
+      alwaysAllowRules: { session: ['REPL'] },
+      alwaysAskRules: { session: ['REPL'] },
+    }
+    const fallbackTools = getTools(askAndAllowContext)
+    expect(fallbackTools.some(tool => tool.name === 'REPL')).toBe(false)
+    expect(fallbackTools.some(tool => tool.name === 'Read')).toBe(true)
+    expect(fallbackTools.some(tool => tool.name === 'Bash')).toBe(true)
+
+    const allowOnlyTools = getTools({
+      ...askAndAllowContext,
+      alwaysAskRules: {},
+    })
+    expect(allowOnlyTools.some(tool => tool.name === 'REPL')).toBe(true)
+    expect(allowOnlyTools.some(tool => tool.name === 'Read')).toBe(false)
+  })
+
+  test('simple mode with a REPL deny rule keeps direct primitives available', () => {
+    setReplModeEnabledForSession(true)
+    const previousSimple = process.env.CLAUDE_CODE_SIMPLE
+    process.env.CLAUDE_CODE_SIMPLE = '1'
+    try {
+      const denyContext = {
+        ...getEmptyToolPermissionContext(),
+        alwaysDenyRules: { session: ['REPL'] },
+      }
+      const tools = getTools(denyContext)
+      expect(tools.some(tool => tool.name === 'REPL')).toBe(false)
+      expect(tools.some(tool => tool.name === 'Bash')).toBe(true)
+      expect(tools.some(tool => tool.name === 'Read')).toBe(true)
+      expect(tools.some(tool => tool.name === 'Edit')).toBe(true)
+    } finally {
+      if (previousSimple === undefined) {
+        delete process.env.CLAUDE_CODE_SIMPLE
+      } else {
+        process.env.CLAUDE_CODE_SIMPLE = previousSimple
+      }
+    }
   })
 
   test('marks runtime failure as a protocol tool error and exposes the full script to classifiers', () => {
@@ -701,6 +756,33 @@ return 1`
       expect(String(block.content)).toContain('Do not retry')
     })
     expect(fixture.state.sawAbort).toBe(true)
+  })
+
+  test('pre-aborted outer signal prevents inner Bash from running', async () => {
+    const fixtures = createWriteBashFixtures(() => ({ data: 'written' }))
+    const code = "await Bash({command: 'echo should-not-run'}); return 'done'"
+    const context = createFixtureReplContext([fixtures.bashTool])
+    context.abortController.abort(new Error('outer cancellation'))
+
+    let status: string | undefined
+    let thrownMessage: string | undefined
+    try {
+      const result = await REPLTool.call(
+        { code },
+        context,
+        allow,
+        parentFor(code),
+        undefined,
+      )
+      status = result.data.status
+    } catch (error) {
+      thrownMessage = error instanceof Error ? error.message : String(error)
+    }
+
+    // Immediate abort can interrupt QuickJS setup before a structured result exists.
+    const abortedDuringSetup = thrownMessage?.includes('interrupted') === true
+    expect(status === 'aborted' || abortedDuringSetup).toBe(true)
+    expect(fixtures.calls.bash).toBe(0)
   })
 
   test('reports residual inner work after outer abort when a tool ignores abort', async () => {

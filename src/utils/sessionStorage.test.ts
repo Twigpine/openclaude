@@ -44,6 +44,7 @@ import {
   setClaudeConfigHomeDirForTesting,
 } from './envUtils.js'
 import { resetSettingsCache } from './settings/settingsCache.js'
+import { resetGrowthBook } from '../services/analytics/growthbook.js'
 import { SKIP_PRECOMPACT_THRESHOLD } from './sessionStoragePortable.js'
 import {
   setReplModeEnabledForSession,
@@ -153,6 +154,26 @@ async function writeJsonl(entries: unknown[]): Promise<string> {
   const filePath = join(dir, 'session.jsonl')
   await writeFile(filePath, `${entries.map(e => JSON.stringify(e)).join('\n')}\n`)
   return filePath
+}
+
+async function withLeafPruneEnabled<T>(fn: () => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), 'openclaude-feature-flags-'))
+  tempDirs.push(dir)
+  const flagsPath = join(dir, 'feature-flags.json')
+  await writeFile(flagsPath, JSON.stringify({ tengu_pebble_leaf_prune: true }))
+  const originalFlagsFile = process.env.OPENCLAUDE_FEATURE_FLAGS_FILE
+  process.env.OPENCLAUDE_FEATURE_FLAGS_FILE = flagsPath
+  resetGrowthBook()
+  try {
+    return await fn()
+  } finally {
+    if (originalFlagsFile === undefined) {
+      delete process.env.OPENCLAUDE_FEATURE_FLAGS_FILE
+    } else {
+      process.env.OPENCLAUDE_FEATURE_FLAGS_FILE = originalFlagsFile
+    }
+    resetGrowthBook()
+  }
 }
 
 function getToolResultContent(content: unknown): string | undefined {
@@ -374,6 +395,89 @@ test('virtual inner rows and unresolved REPL tool uses cannot anchor resume', as
   expect(leafUuids.has(id(833))).toBe(false)
   expect(leafUuids.has(id(831))).toBe(false)
   expect(leafUuids.has(id(830))).toBe(true)
+})
+
+test('leaf pruning keeps ordinary mid-conversation branches pruned', async () => {
+  await withLeafPruneEnabled(async () => {
+    const prompt = user(id(840), null, 'start')
+    const midTurn = assistant(id(841), id(840), 'working')
+    const terminalNoise = {
+      ...base(id(842), id(841)),
+      type: 'system',
+      subtype: 'informational',
+      level: 'info',
+      isMeta: false,
+      content: 'noise',
+    }
+    const continuedPrompt = user(id(843), id(841), 'continue')
+    const finalAssistant = assistant(id(844), id(843), 'done')
+
+    const filePath = await writeJsonl([
+      prompt,
+      midTurn,
+      terminalNoise,
+      continuedPrompt,
+      finalAssistant,
+    ])
+    const { leafUuids } = await loadTranscriptFile(filePath)
+
+    expect(leafUuids.has(id(841))).toBe(false)
+    expect(leafUuids.has(id(844))).toBe(true)
+  })
+})
+
+test('leaf pruning retains a resume leaf behind rejected REPL descendants', async () => {
+  await withLeafPruneEnabled(async () => {
+    const prompt = user(id(850), null, 'run a script')
+    const replUse = {
+      ...assistant(id(851), id(850), ''),
+      message: {
+        ...assistant(id(851), id(850), '').message,
+        content: [
+          {
+            type: 'tool_use',
+            id: 'repl-use-pruned',
+            name: 'REPL',
+            input: { code: 'await Read({file_path:"a.ts"})' },
+          },
+        ],
+      },
+    }
+    const innerUse = {
+      ...assistant(id(852), id(851), ''),
+      isVirtual: true,
+      message: {
+        ...assistant(id(852), id(851), '').message,
+        content: [
+          {
+            type: 'tool_use',
+            id: 'inner-use-pruned',
+            name: 'Read',
+            input: { file_path: 'a.ts' },
+          },
+        ],
+      },
+    }
+    const innerResult = {
+      ...user(id(853), id(852), [
+        {
+          type: 'tool_result',
+          tool_use_id: 'inner-use-pruned',
+          content: 'inner output',
+          is_error: false,
+        } as ToolResultBlockParam,
+      ]),
+      isVirtual: true,
+    }
+
+    const filePath = await writeJsonl([prompt, replUse, innerUse, innerResult])
+    const { leafUuids } = await loadTranscriptFile(filePath)
+
+    expect(leafUuids.has(id(852))).toBe(false)
+    expect(leafUuids.has(id(853))).toBe(false)
+    expect(leafUuids.has(id(851))).toBe(false)
+    expect(leafUuids.has(id(850))).toBe(true)
+  })
 })
 
 test('session metadata persists and reloads the Code Mode contract', async () => {
@@ -1209,6 +1313,109 @@ test('insertMessageChain keeps REPL virtual inner provenance on the resumed chai
       const outer = chain.find(m => m.uuid === id(904))
       expect(outer?.type).toBe('user')
       const inner = chain.find(m => m.uuid === id(903))
+      expect((inner as { isVirtual?: boolean })?.isVirtual).toBe(true)
+    } finally {
+      setReplModeEnabledForSession(false)
+    }
+  })
+})
+
+test('insertMessageChain keeps REPL virtual rows linear across separate writes', async () => {
+  await withSessionPersistence(async () => {
+    setReplModeEnabledForSession(true)
+    try {
+      const dir = await mkdtemp(join(tmpdir(), 'openclaude-session-storage-'))
+      tempDirs.push(dir)
+      switchSession(sessionId as never, dir)
+      await resetSessionFilePointer()
+
+      const prompt = {
+        uuid: id(920),
+        type: 'user',
+        message: { role: 'user', content: 'run the script' },
+        timestamp: ts,
+        isMeta: false,
+      } as never
+      const outerUse = {
+        ...assistant(id(921), null, ''),
+        message: {
+          ...assistant(id(921), null, '').message,
+          content: [
+            {
+              type: 'tool_use',
+              id: 'repl-use-separate',
+              name: 'REPL',
+              input: { code: "await Write({file_path:'a.txt',content:'x'})" },
+            },
+          ],
+        },
+      } as never
+      const innerUse = {
+        ...assistant(id(922), null, ''),
+        isVirtual: true,
+        message: {
+          ...assistant(id(922), null, '').message,
+          id: 'inner-msg-separate',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'inner-use-separate',
+              name: 'Write',
+              input: { file_path: 'a.txt', content: 'x' },
+            },
+          ],
+        },
+      } as never
+      const innerResult = {
+        ...user(id(923), null, [
+          {
+            type: 'tool_result',
+            tool_use_id: 'inner-use-separate',
+            content: 'file written',
+            is_error: false,
+          } as ToolResultBlockParam,
+        ]),
+        isVirtual: true,
+        sourceToolAssistantUUID: id(922),
+      } as never
+      const outerResult = {
+        ...user(id(924), null, [
+          {
+            type: 'tool_result',
+            tool_use_id: 'repl-use-separate',
+            content: 'REPL completed',
+            is_error: false,
+          } as ToolResultBlockParam,
+        ]),
+        sourceToolAssistantUUID: id(921),
+      } as never
+      const followUp = assistant(id(925), null, 'done') as never
+      const asRuntime = (messages: never[]) =>
+        messages.map(m =>
+          runtimeMessage(m as unknown as Record<string, unknown>),
+        ) as never
+
+      await recordTranscript(asRuntime([prompt, outerUse]))
+      await recordTranscript(asRuntime([prompt, outerUse, innerUse, innerResult]))
+      await recordTranscript(
+        asRuntime([prompt, outerUse, innerUse, innerResult, outerResult, followUp]),
+      )
+      await flushSessionStorage()
+
+      const filePath = join(dir, `${sessionId}.jsonl`)
+      const { messages } = await loadTranscriptFile(filePath)
+      const leaf = messages.get(id(925))!
+      expect(leaf).toBeDefined()
+      const chain = buildConversationChain(messages, leaf)
+      expect(chain.map(m => m.uuid)).toEqual([
+        id(920),
+        id(921),
+        id(922),
+        id(923),
+        id(924),
+        id(925),
+      ])
+      const inner = chain.find(m => m.uuid === id(923))
       expect((inner as { isVirtual?: boolean })?.isVirtual).toBe(true)
     } finally {
       setReplModeEnabledForSession(false)

@@ -18,6 +18,8 @@ const REPL_OUTPUT_PERSISTED_CODE_CHARS = 1_000
 const REPL_OUTPUT_ARTIFACT_ID_SUFFIX = '-repl-output'
 const REPL_OUTPUT_ERROR_FIELD_CHARS = 2_000
 const REPL_OUTPUT_TOOLS_USED_CHARS = 1_800
+const REPL_OUTPUT_INLINE_OVERHEAD_RESERVE_CHARS = 1_000
+const REPL_OUTPUT_INLINE_MIN_EXCERPT_CHARS = 200
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -116,6 +118,97 @@ function copyBoundedResidualInnerWork(value: unknown): unknown {
   }
 }
 
+const TRAILING_TRUNCATION_MARKER_PATTERN = /\n\.\.\. \[truncated (\d+) chars\]$/
+
+function serializedInlineBytes(value: unknown): number {
+  return Buffer.byteLength(jsonStringify(value) ?? '', 'utf8')
+}
+
+type InlineExcerptRef = {
+  read: () => string
+  write: (next: string) => void
+}
+
+function collectInlineExcerpts(bounded: Record<string, unknown>): InlineExcerptRef[] {
+  const refs: InlineExcerptRef[] = []
+  for (const key of ['code', 'result', 'stdout', 'stderr']) {
+    if (typeof bounded[key] === 'string') {
+      refs.push({
+        read: () => bounded[key] as string,
+        write: next => {
+          bounded[key] = next
+        },
+      })
+    }
+  }
+  if (isRecord(bounded.error)) {
+    const error = bounded.error
+    for (const key of ['message', 'stack']) {
+      if (typeof error[key] === 'string') {
+        refs.push({
+          read: () => error[key] as string,
+          write: next => {
+            error[key] = next
+          },
+        })
+      }
+    }
+  }
+  return refs
+}
+
+function shrinkExcerpt(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value
+  const existingMarker = value.match(TRAILING_TRUNCATION_MARKER_PATTERN)
+  const base = value.replace(TRAILING_TRUNCATION_MARKER_PATTERN, '')
+  // A previously truncated excerpt's marker records how much of the original
+  // field was omitted. Recover that original length so further shrinking does
+  // not under-report the total omission.
+  const originalLength = base.length + (existingMarker ? Number(existingMarker[1]) : 0)
+
+  // Fit the marker inside maxChars. The marker length depends on the omitted
+  // digit count, which itself depends on the retained length, so iterate to a
+  // fixed point. If even the shortest useful marker cannot fit, fall back to a
+  // plain bounded slice rather than exceeding the reserve.
+  let retained = maxChars
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const marker = `\n${truncationMarker(originalLength, retained)}`
+    const nextRetained = Math.max(0, maxChars - marker.length)
+    if (nextRetained === retained) {
+      if (retained === 0 && marker.length > maxChars) return base.slice(0, maxChars)
+      return `${base.slice(0, retained)}${marker}`
+    }
+    retained = nextRetained
+  }
+  return base.slice(0, maxChars)
+}
+
+/**
+ * The per-field caps bound raw characters, but the inline result is consumed
+ * as serialized JSON: escaping can double a field, and the truncation
+ * markers, metadata, and artifact preview add overhead the caps never
+ * account for. Measure the serialized inline result and shrink the largest
+ * excerpts until the total fits under the artifact threshold with headroom.
+ */
+function enforceInlineSizeBudget(bounded: Record<string, unknown>): void {
+  const budget = REPL_OUTPUT_ARTIFACT_THRESHOLD_CHARS - REPL_OUTPUT_INLINE_OVERHEAD_RESERVE_CHARS
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const excess = serializedInlineBytes(bounded) - budget
+    if (excess <= 0) return
+    const largest = collectInlineExcerpts(bounded)
+      .filter(ref => ref.read().length > REPL_OUTPUT_INLINE_MIN_EXCERPT_CHARS)
+      .sort((a, b) => b.read().length - a.read().length)[0]
+    if (!largest) return
+    const current = largest.read()
+    const nextLength = Math.max(
+      REPL_OUTPUT_INLINE_MIN_EXCERPT_CHARS,
+      current.length - excess,
+    )
+    if (nextLength >= current.length) return
+    largest.write(shrinkExcerpt(current, nextLength))
+  }
+}
+
 /**
  * Return a bounded representation suitable for live state and transcript
  * persistence. The input object remains unchanged for model mapping, hooks,
@@ -189,5 +282,6 @@ export async function boundReplToolUseResultForPersistence(
     bounded.persistedOutputPreview = persisted.preview
     if (persisted.truncated === true) bounded.persistedOutputTruncated = true
   }
+  enforceInlineSizeBudget(bounded)
   return bounded
 }

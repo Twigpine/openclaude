@@ -1430,8 +1430,14 @@ async function* queryLoop(
     // cooling down or otherwise exhausted and context or message count is still
     // over the safety threshold, block immediately with a clear message instead
     // of burning an oversized API call.
+    // Virtual rows are excluded from API/compaction/token accounting, so they
+    // must not count toward active-message limits either. Matches the forcing
+    // check near the top of this loop iteration.
+    const nonVirtualMessageCount = messagesForQuery.filter(
+      message => message.isVirtual !== true,
+    ).length
     const isAboveActiveMessageHardCap = isAboveMaxActiveMessagesLimit(
-      messagesForQuery.length,
+      nonVirtualMessageCount,
       getMaxActiveMessagesHardCap(),
     )
     const shouldEnforceActiveMessageLimit =
@@ -1454,7 +1460,7 @@ async function* queryLoop(
       )
       const isAboveActiveMessageSafetyLimit =
         isAboveMaxActiveMessagesLimit(
-          messagesForQuery.length,
+          nonVirtualMessageCount,
           activeMessageLimit,
         ) && shouldEnforceActiveMessageLimit
       const isAboveBreakerThreshold =
@@ -1486,7 +1492,7 @@ async function* queryLoop(
     if (
       shouldEnforceActiveMessageLimit &&
       isAboveMaxActiveMessagesLimit(
-        messagesForQuery.length,
+        nonVirtualMessageCount,
         activeMessageLimit,
       )
     ) {

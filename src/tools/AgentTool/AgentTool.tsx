@@ -1113,10 +1113,11 @@ export const AgentTool = buildTool({
             const elapsed = Date.now() - agentStartTime;
 
             // Show background hint after threshold (but task is already registered)
-            // Skip if background tasks are disabled or if Copilot mode is
-            // forcing synchronous execution (no foreground registration, so
-            // the hint would advertise a non-existent affordance).
-            if (!isBackgroundTasksDisabled && !forceSyncCopilot && !forcePlanModeSync && !backgroundHintShown && elapsed >= PROGRESS_THRESHOLD_MS && toolUseContext.setToolJSX) {
+            // Skip if background tasks are disabled, if Copilot/plan mode is
+            // forcing synchronous execution, or inside REPL inner agents
+            // (no foreground registration in any of these cases, so the hint
+            // would advertise a non-existent affordance).
+            if (!isBackgroundTasksDisabled && !forceSyncCopilot && !forcePlanModeSync && !replInnerExecution && !backgroundHintShown && elapsed >= PROGRESS_THRESHOLD_MS && toolUseContext.setToolJSX) {
               backgroundHintShown = true;
               toolUseContext.setToolJSX({
                 jsx: <BackgroundHint />,

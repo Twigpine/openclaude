@@ -47,4 +47,22 @@ describe('buildReplToolInventory', () => {
     })
     expect(inventory.map(tool => tool.name)).toEqual(['Read', 'Bash'])
   })
+
+  test('applies the primitive allowlist to session PowerShell tools', () => {
+    const powerShell = createToolFixture(z.object({}), { name: 'PowerShell' })
+    const inventory = buildReplToolInventory({
+      sessionTools: [powerShell],
+      allowedPrimitiveNames: ['Read', 'Bash'],
+    })
+    expect(inventory.map(tool => tool.name)).not.toContain('PowerShell')
+  })
+
+  test('keeps session PowerShell when the primitive allowlist includes it', () => {
+    const powerShell = createToolFixture(z.object({}), { name: 'PowerShell' })
+    const inventory = buildReplToolInventory({
+      sessionTools: [powerShell],
+      allowedPrimitiveNames: ['Read', 'Bash', 'PowerShell'],
+    })
+    expect(inventory.map(tool => tool.name)).toContain('PowerShell')
+  })
 })

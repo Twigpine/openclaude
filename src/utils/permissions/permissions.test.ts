@@ -290,6 +290,61 @@ describe('auto mode REPL classifier bounds', () => {
     expect(result.message).toContain('require manual approval')
     expect(result.message).toContain('32,000')
   })
+
+  test('measures the serialized legacy representation rather than the raw script length', async () => {
+    // Legacy classifier lines are `REPL <code>\n`: a 31,996-char script
+    // serializes to 32,002 chars even though the raw string passes a
+    // raw-length guard at 32,000.
+    const result = await hasPermissionsToUseTool(
+      REPLTool,
+      { code: 'x'.repeat(31_996) },
+      contextFor('auto'),
+      assistantMessage,
+      'repl-tool-use-id',
+    )
+
+    expect(result.behavior).toBe('ask')
+    if (result.behavior !== 'ask') {
+      throw new Error(`Expected ask decision, received ${result.behavior}`)
+    }
+    expect(result.message).toContain('require manual approval')
+  })
+
+  test('measures the JSON-escaped representation when JSONL transcripts are enabled', async () => {
+    const originalUserType = process.env.USER_TYPE
+    const originalJsonl = process.env.CLAUDE_CODE_JSONL_TRANSCRIPT
+    process.env.USER_TYPE = 'ant'
+    process.env.CLAUDE_CODE_JSONL_TRANSCRIPT = '1'
+    try {
+      // 20,000 tabs JSON-escape to 40,000 chars inside the {"REPL":"..."}
+      // line the classifier receives, far beyond the 32,000-char budget the
+      // raw-length guard measures.
+      const result = await hasPermissionsToUseTool(
+        REPLTool,
+        { code: '\t'.repeat(20_000) },
+        contextFor('auto'),
+        assistantMessage,
+        'repl-tool-use-id',
+      )
+
+      expect(result.behavior).toBe('ask')
+      if (result.behavior !== 'ask') {
+        throw new Error(`Expected ask decision, received ${result.behavior}`)
+      }
+      expect(result.message).toContain('require manual approval')
+    } finally {
+      if (originalUserType === undefined) {
+        delete process.env.USER_TYPE
+      } else {
+        process.env.USER_TYPE = originalUserType
+      }
+      if (originalJsonl === undefined) {
+        delete process.env.CLAUDE_CODE_JSONL_TRANSCRIPT
+      } else {
+        process.env.CLAUDE_CODE_JSONL_TRANSCRIPT = originalJsonl
+      }
+    }
+  })
 })
 
 describe('plan mode mechanical read-only policy', () => {

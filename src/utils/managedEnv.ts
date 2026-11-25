@@ -104,21 +104,36 @@ function filterSettingsEnv(
  * just this key from user -> flag -> policy order. Project and local values are
  * ignored in both directions: they can neither enable nor disable the mode.
  */
+function isCodeModeEnvKey(key: string): boolean {
+  return key.toUpperCase() === CODE_MODE_ENV_VAR
+}
+
 function withoutProjectScopedCodeModeEnv(
   env: Record<string, string> | undefined,
 ): Record<string, string> {
-  if (!env || !(CODE_MODE_ENV_VAR in env)) return env || {}
-  const out = { ...env }
+  if (!env || !Object.keys(env).some(isCodeModeEnvKey)) return env || {}
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (!isCodeModeEnvKey(key)) out[key] = value
+  }
+  // Settings env keys preserve casing and Windows treats variable names
+  // case-insensitively, so reconstruction keeps the exact key casing the
+  // winning trusted source used.
+  let nonProjectKey: string | undefined
   let nonProjectValue: string | undefined
   for (const source of TRUSTED_SETTING_SOURCES) {
     if (!isSettingSourceEnabled(source)) continue
-    const value = getSettingsForSource(source)?.env?.[CODE_MODE_ENV_VAR]
-    if (value !== undefined) nonProjectValue = value
+    for (const [key, value] of Object.entries(
+      getSettingsForSource(source)?.env ?? {},
+    )) {
+      if (isCodeModeEnvKey(key)) {
+        nonProjectKey = key
+        nonProjectValue = value
+      }
+    }
   }
-  if (nonProjectValue === undefined) {
-    delete out[CODE_MODE_ENV_VAR]
-  } else {
-    out[CODE_MODE_ENV_VAR] = nonProjectValue
+  if (nonProjectKey !== undefined && nonProjectValue !== undefined) {
+    out[nonProjectKey] = nonProjectValue
   }
   return out
 }

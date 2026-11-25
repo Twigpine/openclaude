@@ -165,6 +165,7 @@ function estimateAssistantResponseOutputTokens(
 export function getUnreportedSessionUsage(
   messages: readonly Message[],
 ): SessionUsage | null {
+  messages = apiProjectedMessages(messages)
   let inputTokens = 0
   let outputTokens = 0
   const prefixTokenCounts: number[] = [0]

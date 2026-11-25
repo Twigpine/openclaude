@@ -536,6 +536,11 @@ export function reorderMessagesInUI(
       (message.attachment.hookEvent === 'PreToolUse' ||
         message.attachment.hookEvent === 'PostToolUse')
     ) {
+      const toolUseID = message.attachment.toolUseID
+      if (toolUseID && replToolUseIds.has(toolUseID)) {
+        result.push(message)
+        continue
+      }
       // Skip - already handled in tool use groups
       continue
     }

@@ -136,7 +136,9 @@ function compactJsonSchema(
 
   if (isRecord(input.properties)) {
     const keys = sortedObjectKeys(input.properties)
-    const properties: JsonObject = {}
+    // Null-prototype dictionary: a schema can carry an own __proto__ key,
+    // which plain-object assignment would redirect onto the prototype.
+    const properties: JsonObject = Object.create(null)
     for (const key of keys.slice(0, profile.maxProperties)) {
       properties[key] = compactJsonSchema(input.properties[key], profile, depth + 1, state)
     }
@@ -183,7 +185,7 @@ function compactJsonSchema(
     for (const defsKey of ["$defs", "definitions"]) {
       const defs = input[defsKey]
       if (!isRecord(defs)) continue
-      const compactDefs: JsonObject = {}
+      const compactDefs: JsonObject = Object.create(null)
       const keys = sortedObjectKeys(defs)
       for (const key of keys.slice(0, profile.maxProperties)) {
         compactDefs[key] = compactJsonSchema(defs[key], profile, depth + 1, state)

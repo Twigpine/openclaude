@@ -314,6 +314,63 @@ describe('tokens', () => {
         Math.max(1, roughTokenCountEstimationForMessage(secondAssistant)),
     })
   })
+
+  it('excludes virtual inner tool messages from unreported session usage', () => {
+    const prompt = userMessage('Run the fixture tool and summarize.')
+    const reply = assistantMessage(
+      {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+      'Reduced script result.',
+      'msg_unreported',
+    )
+    const virtualInner = {
+      ...createUserMessage({ content: 'inner payload '.repeat(2000) }),
+      isVirtual: true as const,
+    }
+    const virtualAssistant = {
+      ...createAssistantMessage({
+        content: 'inner assistant payload '.repeat(2000),
+      }),
+      isVirtual: true as const,
+    }
+
+    const withoutVirtual = getUnreportedSessionUsage([prompt, reply])
+    expect(withoutVirtual).not.toBeNull()
+    expect(withoutVirtual!.input_tokens).toBeGreaterThan(0)
+    expect(withoutVirtual!.output_tokens).toBeGreaterThan(0)
+
+    expect(
+      getUnreportedSessionUsage([prompt, virtualInner, virtualAssistant, reply]),
+    ).toEqual(withoutVirtual)
+  })
+
+  it('still counts real non-virtual messages in unreported session usage', () => {
+    const prompt = userMessage('Run the fixture tool and summarize.')
+    const realToolResult = userMessage('real tool result payload '.repeat(500))
+    const reply = assistantMessage(
+      {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+      'Reduced script result.',
+      'msg_unreported_real',
+    )
+
+    const withRealResult = getUnreportedSessionUsage([prompt, realToolResult, reply])
+    const withoutRealResult = getUnreportedSessionUsage([prompt, reply])
+
+    expect(withRealResult).not.toBeNull()
+    expect(withoutRealResult).not.toBeNull()
+    expect(withRealResult!.input_tokens).toBeGreaterThan(
+      withoutRealResult!.input_tokens,
+    )
+  })
 })
 
 describe('IncrementalTokenCounter', () => {

@@ -36,7 +36,7 @@ import { useTerminalNotification } from '../ink/useTerminalNotification.js';
 import { hasCursorUpViewportYankBug } from '../ink/terminal.js';
 import { createFileStateCacheWithSizeLimit, mergeFileStateCaches, READ_FILE_STATE_CACHE_SIZE, type FileStateCache } from '../utils/fileStateCache.js';
 import { registerPrunableCache } from '../utils/memoryPressure.js';
-import { updateLastInteractionTime, getLastInteractionTime, getOriginalCwd, getProjectRoot, getSessionId, switchSession, setCostStateForRestore, resetTurnHookDuration, resetTurnToolDuration, resetTurnClassifierDuration, setMainLoopModelOverride, setMainThreadAgentType } from '../bootstrap/state.js';
+import { updateLastInteractionTime, getLastInteractionTime, getOriginalCwd, getProjectRoot, getSessionId, getSessionProjectDir, switchSession, setCostStateForRestore, resetTurnHookDuration, resetTurnToolDuration, resetTurnClassifierDuration, setMainLoopModelOverride, setMainThreadAgentType } from '../bootstrap/state.js';
 import { asSessionId, asAgentId } from '../types/ids.js';
 import { logForDebugging } from '../utils/debug.js';
 import { QueryGuard } from '../utils/QueryGuard.js';
@@ -849,7 +849,11 @@ export function REPL({
   // /brief mid-session leaves the stale tool list (no SendUserMessage) and
   // the model emits plain text the brief filter hides.
   const isBriefOnly = useAppState(s => s.isBriefOnly);
-  const localTools = useMemo(() => getTools(toolPermissionContext), [toolPermissionContext, proactiveActive, isBriefOnly]);
+  // Code Mode lives in module state rather than AppState. Sampling it as a
+  // render-scoped dependency makes an in-place resume (which always publishes
+  // the resumed messages) rebuild the local inventory for the resumed mode.
+  const replModeActive = isReplModeEnabled();
+  const localTools = useMemo(() => getTools(toolPermissionContext), [toolPermissionContext, proactiveActive, isBriefOnly, replModeActive]);
   useKickOffCheckAndDisableBypassPermissionsIfNeeded();
   useKickOffCheckAndDisableAutoModeIfNeeded();
   const [dynamicMcpConfig, setDynamicMcpConfig] = useState<Record<string, ScopedMcpServerConfig> | undefined>(initialDynamicMcpConfig);
@@ -2048,6 +2052,16 @@ export function REPL({
   })));
   const resume = useCallback(async (sessionId: UUID, log: LogOption, entrypoint: ResumeEntrypoint) => {
     const resumeStart = performance.now();
+    // Snapshot the current conversation identity before any resume work.
+    // switchSession and setMessages publish the resumed session in the middle
+    // of the fallible work below (worktree restore, dynamic compact-prompt
+    // imports), while withCodeModeResumeActivation rolls back only the
+    // conversation mode. The catch uses these snapshots to restore the prior
+    // session id and transcript, so session id, messages, and mode describe
+    // one conversation after any failed resume.
+    const preResumeSessionId = getSessionId();
+    const preResumeSessionProjectDir = getSessionProjectDir();
+    const preResumeMessages = messagesRef.current;
     try {
       // Validate and activate the transcript's conversation mode around the
       // fallible resume work. The helper restores the prior mode override if
@@ -2278,6 +2292,31 @@ export function REPL({
         });
       });
     } catch (error) {
+      // withCodeModeResumeActivation has already restored the prior mode
+      // override. Roll the session identity and transcript back to the same
+      // prior conversation when the failure happened after they were
+      // published: without this the screen would hold the resumed session's
+      // transcript while the mode (and any later direct-tool turns) belongs
+      // to the prior conversation.
+      if (getSessionId() !== preResumeSessionId) {
+        switchSession(preResumeSessionId, preResumeSessionProjectDir);
+        // The forward flow reset the transcript file pointer and may have
+        // adopted the target session's file before the failure. Reset again
+        // so the next write re-resolves the prior session's transcript
+        // instead of appending the prior conversation's records to the
+        // target's file. Best-effort: a failure here must not mask the
+        // original error.
+        try {
+          await resetSessionFilePointer();
+        } catch {
+          // Best-effort rollback; the original error is the one that matters.
+        }
+      }
+      // Restore unconditionally: React may not have rendered the forward
+      // setMessages yet, so messagesRef can still hold the prior array while
+      // the target transcript update is already queued. A conditional rollback
+      // keyed on messagesRef would miss exactly that failure window.
+      setMessages(() => preResumeMessages);
       logEvent('tengu_session_resumed', {
         entrypoint: entrypoint as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         success: false
@@ -2811,12 +2850,13 @@ export function REPL({
     // the closure captured at render time. Also doubles as refreshTools()
     // for mid-query tool list updates.
     const computeReplPrimitiveToolNames = () => {
-      const primitives = [...getReplPrimitiveTools()];
-      if (isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)) {
-        return primitives
-          .filter(tool => tool.name === 'Bash' || tool.name === 'Read' || tool.name === 'Edit')
-          .map(tool => tool.name);
-      }
+      // Filter to the simple-mode primitives first, then apply the main-thread
+      // agent's tool resolution. Returning before resolveAgentTools would
+      // reintroduce tools the agent disallow-listed (e.g. a wildcard agent
+      // with disallowedTools: ['Edit']) into the inner inventory.
+      const simpleMode = isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE);
+      const primitives = [...getReplPrimitiveTools()].filter(tool =>
+        !simpleMode || tool.name === 'Bash' || tool.name === 'Read' || tool.name === 'Edit');
       if (!mainThreadAgentDefinition) return primitives.map(tool => tool.name);
       const primitiveSet = new Set(primitives.map(tool => tool.name));
       const resolved = resolveAgentTools(
@@ -2830,7 +2870,10 @@ export function REPL({
     const computeTools = () => {
       const state = store.getState();
       const assembled = assembleToolPool(state.toolPermissionContext, state.mcp.tools);
-      const merged = mergeAndFilterTools(combinedInitialTools, assembled, state.toolPermissionContext.mode);
+      // assembled already contains the built-ins for the current mode. Merge only
+      // the startup extras here so a stale memoized built-in from the prior
+      // conversation mode cannot survive an in-place resume.
+      const merged = mergeAndFilterTools(initialTools, assembled, state.toolPermissionContext.mode);
       if (!mainThreadAgentDefinition) return merged;
       return resolveAgentTools(mainThreadAgentDefinition, merged, false, true).resolvedTools;
     };
@@ -2977,7 +3020,7 @@ export function REPL({
       contentReplacementState: contentReplacementStateRef.current,
       syncToolResultReplacements
     };
-  }, [commands, combinedInitialTools, mainThreadAgentDefinition, debug, initialMcpClients, ideInstallationStatus, dynamicMcpConfig, theme, allowedAgentTypes, store, setAppState, reverify, addNotification, setMessages, onChangeDynamicMcpConfig, resume, requestPrompt, disabled, customSystemPrompt, appendSystemPrompt, setConversationId, syncToolResultReplacements, queryGuard]);
+  }, [commands, initialTools, mainThreadAgentDefinition, debug, initialMcpClients, ideInstallationStatus, dynamicMcpConfig, theme, allowedAgentTypes, store, setAppState, reverify, addNotification, setMessages, onChangeDynamicMcpConfig, resume, requestPrompt, disabled, customSystemPrompt, appendSystemPrompt, setConversationId, syncToolResultReplacements, queryGuard]);
 
   // Session backgrounding (Ctrl+B to background/foreground)
   const handleBackgroundQuery = useCallback(() => {

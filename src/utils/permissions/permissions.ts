@@ -326,7 +326,10 @@ import {
   getTotalInputTokens,
   getTotalOutputTokens,
 } from '../../bootstrap/state.js'
-import { getFeatureValue_CACHED_WITH_REFRESH } from '../../services/analytics/growthbook.js'
+import {
+  getFeatureValue_CACHED_MAY_BE_STALE,
+  getFeatureValue_CACHED_WITH_REFRESH,
+} from '../../services/analytics/growthbook.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -336,7 +339,11 @@ import {
   clearClassifierChecking,
   setClassifierChecking,
 } from '../classifierApprovals.js'
-import { isInProtectedNamespace } from '../envUtils.js'
+import {
+  isEnvDefinedFalsy,
+  isEnvTruthy,
+  isInProtectedNamespace,
+} from '../envUtils.js'
 import { executePermissionRequestHooks } from '../hooks.js'
 import { getInitialSettings } from '../settings/settings.js'
 import {
@@ -822,6 +829,37 @@ async function resolvePermissionRequestHooksForHeadlessAgent(
   return null
 }
 
+// Mirror of isJsonlTranscriptEnabled in yoloClassifier.ts. The oversized
+// script guard must measure the exact representation the classifier will
+// receive, so the mode check is duplicated here; keep the two in sync.
+function isClassifierJsonlTranscriptEnabled(): boolean {
+  if (process.env.USER_TYPE === 'ant') {
+    const env = process.env.CLAUDE_CODE_JSONL_TRANSCRIPT
+    if (isEnvTruthy(env)) return true
+    if (isEnvDefinedFalsy(env)) return false
+  }
+  const config = getFeatureValue_CACHED_MAY_BE_STALE(
+    'tengu_auto_mode_config',
+    {} as { jsonlTranscript?: boolean },
+  )
+  return config?.jsonlTranscript === true
+}
+
+// The classifier never receives input.code raw: toCompactBlock in
+// yoloClassifier.ts serializes the tool_use block first. JSONL mode
+// JSON-escapes the script inside a {"REPL":"..."} line, so escape-heavy
+// content inflates well beyond the raw length; legacy mode adds the
+// `REPL ` prefix and trailing newline. Measure the serialized form so the
+// guard trips exactly when the classifier input budget is exceeded. Because
+// escaping only inflates, any script passing this guard is also short enough
+// that truncateClassifierValue never truncates it before classification.
+function measureReplClassifierRepresentation(code: string): number {
+  if (isClassifierJsonlTranscriptEnabled()) {
+    return jsonStringify({ [REPL_TOOL_NAME]: code }).length + 1
+  }
+  return `${REPL_TOOL_NAME} ${code}\n`.length
+}
+
 async function hasPermissionsToUseToolWithModeHandling(
   tool: Tool,
   input: Record<string, unknown>,
@@ -870,14 +908,14 @@ async function hasPermissionsToUseToolWithModeHandling(
       appState.toolPermissionContext.mode === 'auto' &&
       tool.name === REPL_TOOL_NAME &&
       typeof input.code === 'string' &&
-      input.code.length > MAX_CLASSIFIER_BLOCK_VALUE_CHARS
+      measureReplClassifierRepresentation(input.code) > MAX_CLASSIFIER_BLOCK_VALUE_CHARS
     ) {
       logForDebugging(
         `Skipping auto mode classifier for ${tool.name}: REPL script exceeds the classifier input budget`,
       )
       return suppressPromptIfConfigured(tool, {
         ...result,
-        message: `REPL scripts longer than ${MAX_CLASSIFIER_BLOCK_VALUE_CHARS.toLocaleString('en-US')} characters require manual approval because auto mode cannot classify the complete script.`,
+        message: `REPL scripts whose serialized classifier form exceeds ${MAX_CLASSIFIER_BLOCK_VALUE_CHARS.toLocaleString('en-US')} characters require manual approval because auto mode cannot classify the complete script.`,
       })
     }
 
