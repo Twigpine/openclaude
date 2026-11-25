@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { randomUUID } from 'node:crypto'
+import { rm } from 'node:fs/promises'
 import { z } from 'zod/v4'
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { ProgressMessage } from '../../types/message.js'
@@ -10,6 +12,7 @@ import { createToolFixture } from '../../test/toolFixtures.js'
 import { getEmptyToolPermissionContext, type ToolUseContext } from '../../Tool.js'
 import { getAllBaseTools, getTools } from '../../tools.js'
 import { createAssistantMessage } from '../../utils/messages.js'
+import { hasPermissionsToUseTool } from '../../utils/permissions/permissions.js'
 import { __test as replTestHooks, REPLTool } from './REPLTool.js'
 import { isReplModeEnabled, setReplModeEnabledForSession } from './constants.js'
 import {
@@ -517,6 +520,60 @@ describe('REPLTool', () => {
     const nestedAgentTools = getTools(permissionContext, { forceDirectToolInventory: true })
     expect(nestedAgentTools.some(tool => tool.name === 'Read')).toBe(true)
     expect(nestedAgentTools.some(tool => tool.name === 'REPL')).toBe(false)
+  })
+
+  test('plan mode allows outer orchestration while denying an inner mutation', async () => {
+    const filePath = `/tmp/openclaude-repl-plan-${randomUUID()}.txt`
+    const context = createContext()
+    const baseGetAppState = context.getAppState
+    context.getAppState = () => {
+      const state = baseGetAppState()
+      return {
+        ...state,
+        toolPermissionContext: {
+          ...state.toolPermissionContext,
+          mode: 'plan' as const,
+        },
+      }
+    }
+
+    try {
+      const result = await REPLTool.call(
+        {
+          code: `try { await Write({ file_path: ${JSON.stringify(filePath)}, content: 'mutation' }); return 'write-succeeded' } catch (error) { return error instanceof Error ? error.message : String(error) }`,
+        },
+        context,
+        hasPermissionsToUseTool,
+        createAssistantMessage({ content: 'run repl' }),
+        undefined,
+      )
+      expect(result.data.status).toBe('completed')
+      expect(String(result.data.result)).toContain('Plan mode is read-only')
+      expect(String(result.data.result)).not.toBe('write-succeeded')
+    } finally {
+      await rm(filePath, { force: true })
+    }
+  })
+
+  test('dontAsk keeps direct primitives unless REPL is explicitly pre-approved', () => {
+    setReplModeEnabledForSession(true)
+    const dontAskContext = {
+      ...getEmptyToolPermissionContext(),
+      mode: 'dontAsk' as const,
+    }
+    const directFallbackTools = getTools(dontAskContext)
+    expect(directFallbackTools.some(tool => tool.name === 'REPL')).toBe(false)
+    expect(directFallbackTools.some(tool => tool.name === 'Read')).toBe(true)
+    expect(directFallbackTools.some(tool => tool.name === 'Grep')).toBe(true)
+    expect(directFallbackTools.some(tool => tool.name === 'Bash')).toBe(true)
+
+    const preapprovedReplContext = {
+      ...dontAskContext,
+      alwaysAllowRules: { session: ['REPL'] },
+    }
+    const replOnlyTools = getTools(preapprovedReplContext)
+    expect(replOnlyTools.some(tool => tool.name === 'REPL')).toBe(true)
+    expect(replOnlyTools.some(tool => tool.name === 'Read')).toBe(false)
   })
 
   test('marks runtime failure as a protocol tool error and exposes the full script to classifiers', () => {

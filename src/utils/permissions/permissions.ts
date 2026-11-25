@@ -1817,6 +1817,15 @@ export async function checkPlanModePermissions(
     return null
   }
 
+  // REPL is a transparent orchestration wrapper with no direct filesystem,
+  // process, or network capability. Every inner effect passes back through
+  // this same plan-mode guard under the inner tool identity, so the wrapper
+  // itself is safe to use for read-only planning even though a particular
+  // script may contain mutations that will be denied when reached.
+  if (tool.name === REPL_TOOL_NAME) {
+    return null
+  }
+
   // Transparent wrappers execute operations other than the action described
   // by their own input. Their inner calls remain guarded separately, but the
   // wrapper itself is not proof of a read-only invocation.

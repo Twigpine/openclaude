@@ -293,6 +293,19 @@ describe('auto mode REPL classifier bounds', () => {
 })
 
 describe('plan mode mechanical read-only policy', () => {
+  test('lets REPL orchestration continue while inner mutations remain guarded', async () => {
+    const result = await hasPermissionsToUseTool(
+      REPLTool,
+      { code: 'return 1' },
+      contextFor('plan'),
+      assistantMessage,
+      'tool-use-id',
+    )
+
+    expect(result.behavior).toBe('allow')
+    expect(result.decisionReason).toBeUndefined()
+  })
+
   test.each([
     [fileEditTool, { file_path: 'src/index.ts', old_string: 'a', new_string: 'b' }],
     [fileWriteTool, { file_path: 'src/new.ts', content: 'new' }],

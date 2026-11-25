@@ -125,7 +125,10 @@ export const REPLTool = buildTool({
   toAutoClassifierInput(input) {
     return input.code
   },
-  async checkPermissions(_input, _context): Promise<PermissionDecision> {
+  async checkPermissions(_input, context): Promise<PermissionDecision> {
+    if (context.getAppState().toolPermissionContext.mode === 'plan') {
+      return { behavior: 'allow' }
+    }
     return {
       behavior: 'ask',
       message: `${PRODUCT_DISPLAY_NAME} requested permissions to execute a JavaScript tool orchestration script with REPL. Inner tools will still use their normal permission checks.`,

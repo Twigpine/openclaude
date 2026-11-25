@@ -129,7 +129,7 @@ const WorkflowTool = feature('WORKFLOW_SCRIPTS')
   : null
 /* eslint-enable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
 import type { ToolPermissionContext } from './Tool.js'
-import { getDenyRuleForTool } from './utils/permissions/permissions.js'
+import { getDenyRuleForTool, toolAlwaysAllowedRule } from './utils/permissions/permissions.js'
 import { hasEmbeddedSearchTools } from './utils/embeddedTools.js'
 import { isEnvTruthy } from './utils/envUtils.js'
 import { isPowerShellToolEnabled } from './utils/shell/shellToolUtils.js'
@@ -268,6 +268,15 @@ type GetToolsOptions = {
   forceDirectToolInventory?: boolean
 }
 
+function isReplUsableInPermissionContext(
+  permissionContext: ToolPermissionContext,
+): boolean {
+  return (
+    permissionContext.mode !== 'dontAsk' ||
+    toolAlwaysAllowedRule(permissionContext, { name: REPL_TOOL_NAME }) !== null
+  )
+}
+
 export const getTools = (
   permissionContext: ToolPermissionContext,
   options: GetToolsOptions = {},
@@ -280,7 +289,7 @@ export const getTools = (
     // return REPL instead of the raw primitives. Matches the non-bare path
     // below which also hides REPL_ONLY_TOOLS when REPL is enabled.
     const activeREPLTool = getREPLTool()
-    if (replModeActive && activeREPLTool) {
+    if (replModeActive && activeREPLTool && isReplUsableInPermissionContext(permissionContext)) {
       const replSimple: Tool[] = [activeREPLTool]
       if (
         feature('COORDINATOR_MODE') &&
@@ -323,7 +332,16 @@ export const getTools = (
     const replEnabled = allowedTools.some(tool =>
       toolMatchesName(tool, REPL_TOOL_NAME),
     )
-    if (replEnabled) {
+    const replUsable = isReplUsableInPermissionContext(permissionContext)
+    // dontAsk converts the REPL wrapper's mandatory script approval into a
+    // denial. Unless the user explicitly pre-approved REPL, keep the direct
+    // primitive surface so pre-approved automation and read-only inspection
+    // remain usable under their normal input-specific permission checks.
+    if (replEnabled && !replUsable) {
+      allowedTools = allowedTools.filter(
+        tool => !toolMatchesName(tool, REPL_TOOL_NAME),
+      )
+    } else if (replEnabled) {
       allowedTools = allowedTools.filter(
         tool => !REPL_ONLY_TOOLS.has(tool.name),
       )
