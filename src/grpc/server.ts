@@ -8,6 +8,8 @@ import { getDefaultAppState } from '../state/AppStateStore.js'
 import { AppState } from '../state/AppState.js'
 import { FileStateCache, READ_FILE_STATE_CACHE_SIZE } from '../utils/fileStateCache.js'
 import { getBuiltInAgents } from '../tools/AgentTool/builtInAgents.js'
+import { getCombinedTools, loadReexposedMcpTools } from '../entrypoints/mcp.js'
+import { runWithCwdOverride } from '../utils/cwd.js'
 import type { Message } from '../types/message.js'
 
 const PROTO_PATH = path.resolve(import.meta.dirname, '../proto/openclaude.proto')
@@ -109,6 +111,10 @@ function toolResultContentToString(content: ToolResultBlock['content']): string 
 export class GrpcServer {
   private server: grpc.Server
   private sessions: Map<string, Message[]> = new Map()
+  // The configured MCP servers, connected once per working directory for the life of the server,
+  // as the CLI connects them once per session. Which servers apply depends on the directory
+  // (.mcp.json, project and local scopes), so each chat gets those of its working_directory.
+  private mcpByCwd = new Map<string, ReturnType<typeof loadReexposedMcpTools>>()
 
   constructor() {
     this.server = new grpc.Server()
@@ -131,6 +137,17 @@ export class GrpcServer {
     )
   }
 
+  private mcpFor(cwd: string): ReturnType<typeof loadReexposedMcpTools> {
+    let loaded = this.mcpByCwd.get(cwd)
+    if (!loaded) {
+      loaded = runWithCwdOverride(cwd, () => loadReexposedMcpTools())
+      // A failed load is tried again by the next chat in that directory.
+      loaded.catch(() => this.mcpByCwd.delete(cwd))
+      this.mcpByCwd.set(cwd, loaded)
+    }
+    return loaded
+  }
+
   private handleChat(call: grpc.ServerDuplexStream<ClientMessage, unknown>) {
     let engine: QueryEngine | null = null
     let appState: AppState = getDefaultAppState()
@@ -143,11 +160,12 @@ export class GrpcServer {
     let previousMessages: Message[] = []
     let sessionId = ''
     let interrupted = false
+    let connectingMcp = false
 
     call.on('data', async (clientMessage) => {
       try {
         if (clientMessage.request) {
-          if (engine) {
+          if (engine || connectingMcp) {
             call.write({
               error: {
                 message: 'A request is already in progress on this stream',
@@ -167,12 +185,22 @@ export class GrpcServer {
           }
 
           const toolNameById = new Map<string, string>()
+          const cwd = req.working_directory || process.cwd()
+          connectingMcp = true
+          let mcp: Awaited<ReturnType<typeof loadReexposedMcpTools>>
+          try {
+            mcp = await this.mcpFor(cwd)
+          } finally {
+            connectingMcp = false
+          }
+          // A cancel or the end of the stream while the servers were connecting.
+          if (interrupted) return
 
           engine = new QueryEngine({
-            cwd: req.working_directory || process.cwd(),
-            tools: getTools(appState.toolPermissionContext), // Gets all available tools
+            cwd,
+            tools: getCombinedTools(getTools(appState.toolPermissionContext), mcp.mcpTools),
             commands: [], // Slash commands
-            mcpClients: [],
+            mcpClients: mcp.mcpClients,
             // Register OpenClaude's built-in agents (general-purpose,
             // statusline-setup, optional code-guide). Without this the Agent
             // tool throws "Agent type 'general-purpose' not found" the moment
