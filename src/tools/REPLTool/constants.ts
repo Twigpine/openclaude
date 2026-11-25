@@ -14,14 +14,29 @@ export const CODE_MODE_STARTUP_NOTICE = `Experimental Code Mode is active. The m
  * during startup from the pre-settings process environment plus user settings.
  * Programmatic entrypoints never enable it, so the default state is direct tools.
  */
-let replModeEnabledForSession = false
+let replModeEligibleForSession = false
+let replModeConversationOverride: boolean | undefined
 
 export function setReplModeEnabledForSession(enabled: boolean): void {
-  replModeEnabledForSession = enabled
+  replModeEligibleForSession = enabled
+  replModeConversationOverride = undefined
+}
+
+export function isReplModeEligibleForSession(): boolean {
+  return replModeEligibleForSession
+}
+
+export function setReplModeForConversation(enabled: boolean): void {
+  replModeConversationOverride = enabled
+}
+
+export function resetReplModeToSessionEligibility(): boolean {
+  replModeConversationOverride = undefined
+  return replModeEligibleForSession
 }
 
 export function isReplModeEnabled(): boolean {
-  return replModeEnabledForSession
+  return replModeConversationOverride ?? replModeEligibleForSession
 }
 
 /**

@@ -605,9 +605,14 @@ export const AgentTool = buildTool({
         `or GITHUB_COPILOT_OPTIMIZATION_DISABLED=1.`,
       );
     }
-    const shouldRunAsync = forceSyncCopilot || forcePlanModeSync
+    const replInnerExecution = toolUseContext.replInnerExecution === true
+    const asyncRequiredByAgentOrRuntime = selectedAgent.background === true || isCoordinator || forceAsync || assistantForceAsync || (proactiveModule?.isProactiveActive() ?? false)
+    if (replInnerExecution && asyncRequiredByAgentOrRuntime && !forceSyncCopilot && !forcePlanModeSync && !isBackgroundTasksDisabled) {
+      throw new Error(`Agent '${selectedAgent.agentType}' requires background execution, which is unavailable inside a foreground REPL script.`)
+    }
+    const shouldRunAsync = forceSyncCopilot || forcePlanModeSync || replInnerExecution
       ? false
-      : (run_in_background === true || selectedAgent.background === true || isCoordinator || forceAsync || assistantForceAsync || (proactiveModule?.isProactiveActive() ?? false)) && !isBackgroundTasksDisabled;
+      : (run_in_background === true || asyncRequiredByAgentOrRuntime) && !isBackgroundTasksDisabled;
 
     // Resolve agent params for logging and prebuilt system prompts. runAgent
     // resolves the same settings again before the actual query.
@@ -1022,7 +1027,7 @@ export const AgentTool = buildTool({
           type: 'background';
         }> | undefined;
         let cancelAutoBackground: (() => void) | undefined;
-        if (!isBackgroundTasksDisabled && !forceSyncCopilot && !forcePlanModeSync) {
+        if (!isBackgroundTasksDisabled && !forceSyncCopilot && !forcePlanModeSync && !replInnerExecution) {
           const registration = registerAgentForeground({
             agentId: syncAgentId,
             description,

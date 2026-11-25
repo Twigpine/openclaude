@@ -33,6 +33,7 @@ import {
 } from '../../utils/hooks.js'
 import { logError } from '../../utils/log.js'
 import { clearAllPlanSlugs } from '../../utils/plans.js'
+import { resetReplModeToSessionEligibility } from '../../tools/REPLTool/constants.js'
 import { setCwd } from '../../utils/Shell.js'
 import { processSessionStartHooks } from '../../utils/sessionStart.js'
 import {
@@ -40,6 +41,7 @@ import {
   getAgentTranscriptPath,
   recordGoalState,
   resetSessionFilePointer,
+  saveCodeModeState,
   saveWorktreeState,
 } from '../../utils/sessionStorage.js'
 import {
@@ -218,6 +220,7 @@ export async function clearConversation({
     process.env.CLAUDE_CODE_SESSION_ID = getSessionId()
   }
   await resetSessionFilePointer()
+  saveCodeModeState(resetReplModeToSessionEligibility())
 
   // Preserved local_agent tasks had their TaskOutput symlink baked against the
   // old session ID at spawn time, but post-clear transcript writes land under

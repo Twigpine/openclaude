@@ -155,6 +155,44 @@ test('agent invocation leaving plan mode during MCP wait stays synchronous', asy
   expect(result.data.status).toBe('completed')
 })
 
+
+test('REPL inner execution rejects agents that require background execution', async () => {
+  const { AgentTool, getRunAgentParams } = await importAgentToolWithRoutingMocks()
+  const backgroundAgent = {
+    ...createAgentDefinition(),
+    background: true,
+  }
+
+  await expect(AgentTool.call(
+    {
+      description: 'Inspect implementation',
+      prompt: 'Find the bug',
+    },
+    createToolUseContext('parent-model', [backgroundAgent], 'default', undefined, true),
+    mock(async () => ({ behavior: 'allow' })) as never,
+    { requestId: 'req-repl-inner' } as never,
+  )).rejects.toThrow('requires background execution')
+
+  expect(getRunAgentParams()).toBeUndefined()
+})
+
+test('REPL inner execution keeps ordinary agents synchronous', async () => {
+  const { AgentTool, getRunAgentParams } = await importAgentToolWithRoutingMocks()
+
+  const result = await AgentTool.call(
+    {
+      description: 'Inspect implementation',
+      prompt: 'Find the bug',
+    },
+    createToolUseContext('parent-model', [createAgentDefinition()], 'default', undefined, true),
+    mock(async () => ({ behavior: 'allow' })) as never,
+    { requestId: 'req-repl-sync' } as never,
+  )
+
+  expect(result.data.status).toBe('completed')
+  expect(getRunAgentParams()).toBeDefined()
+})
+
 test('sync agents forward long-running tool progress to the parent tool call', async () => {
   const mcpProgress = {
     type: 'progress' as const,
@@ -323,6 +361,7 @@ function createToolUseContext(
   activeAgents: AgentDefinition[],
   mode = 'default',
   modeAfterMcpWait?: string,
+  replInnerExecution = false,
 ): ToolUseContext {
   const appState = {
     toolPermissionContext: {
@@ -359,6 +398,7 @@ function createToolUseContext(
       },
     },
     abortController: new AbortController(),
+    replInnerExecution,
     readFileState: createFileStateCacheWithSizeLimit(
       READ_FILE_STATE_CACHE_SIZE,
     ),

@@ -22,8 +22,8 @@ import {
 } from '../tools/AgentTool/loadAgentsDir.js'
 import {
   CODE_MODE_ENV_VAR,
-  isReplModeEnabled,
-  setReplModeEnabledForSession,
+  isReplModeEligibleForSession,
+  setReplModeForConversation,
 } from '../tools/REPLTool/constants.js'
 import { TODO_WRITE_TOOL_NAME } from '../tools/TodoWriteTool/constants.js'
 import { asSessionId } from '../types/ids.js'
@@ -453,14 +453,12 @@ export function enforceCodeModeResumeCompatibility(
   sessionCodeMode: boolean | undefined,
 ): void {
   const transcriptUsedCodeMode = sessionCodeMode === true
-  if (transcriptUsedCodeMode && !isReplModeEnabled()) {
+  if (transcriptUsedCodeMode && !isReplModeEligibleForSession()) {
     throw new Error(
       `This session was created in Code Mode and cannot be resumed with direct tools. Restart with ${CODE_MODE_ENV_VAR}=1 to resume it.`,
     )
   }
-  if (!transcriptUsedCodeMode) {
-    setReplModeEnabledForSession(false)
-  }
+  setReplModeForConversation(transcriptUsedCodeMode)
 }
 
 /**

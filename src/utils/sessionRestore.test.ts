@@ -36,6 +36,7 @@ import type { ContentReplacementRecord } from './toolResultStorage.js'
 import { loadConversationForResume } from './conversationRecovery.js'
 import {
   isReplModeEnabled,
+  resetReplModeToSessionEligibility,
   setReplModeEnabledForSession,
 } from '../tools/REPLTool/constants.js'
 
@@ -356,6 +357,19 @@ describe('Code Mode resume compatibility', () => {
     setReplModeEnabledForSession(true)
     enforceCodeModeResumeCompatibility(false)
     expect(isReplModeEnabled()).toBe(false)
+  })
+
+
+  test('direct resume does not consume startup eligibility for later conversations', () => {
+    setReplModeEnabledForSession(true)
+    enforceCodeModeResumeCompatibility(false)
+    expect(isReplModeEnabled()).toBe(false)
+
+    expect(resetReplModeToSessionEligibility()).toBe(true)
+    expect(isReplModeEnabled()).toBe(true)
+
+    enforceCodeModeResumeCompatibility(true)
+    expect(isReplModeEnabled()).toBe(true)
   })
 })
 
