@@ -310,10 +310,14 @@ test('cleanMessagesForLogging preserves Code Mode outer script and inner provena
     ] as never)
 
     expect(cleaned).toHaveLength(4)
-    expect(cleaned[0] as object).toBe(outerUse as object)
+    const cleanedOuterUse = cleaned[0] as typeof outerUse
+    const outerToolUse = cleanedOuterUse.message.content[0] as { input?: { code?: string } }
+    expect(outerToolUse.input?.code).toBe('await Read({file_path:"a.ts"})')
     expect((cleaned[1] as { isVirtual?: boolean }).isVirtual).toBe(true)
     expect((cleaned[2] as { isVirtual?: boolean }).isVirtual).toBe(true)
-    expect(cleaned[3] as object).toBe(outerResult as object)
+    const cleanedOuterResult = cleaned[3] as typeof outerResult
+    const outerToolResult = cleanedOuterResult.message.content[0] as { content?: string }
+    expect(outerToolResult.content).toBe('REPL completed')
   } finally {
     setReplModeEnabledForSession(false)
   }

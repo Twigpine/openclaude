@@ -319,9 +319,6 @@ export const getTools = (
   let allowedTools = filterToolsByDenyRules(tools, permissionContext)
 
   // When REPL mode is enabled, hide primitive tools from direct use.
-  // They're still accessible inside REPL via the VM context. A forced direct
-  // inventory instead removes REPL itself; nested Agent workers use that shape
-  // so recursive Code Mode cannot be re-entered from inside the guest runtime.
   if (replModeActive) {
     const replEnabled = allowedTools.some(tool =>
       toolMatchesName(tool, REPL_TOOL_NAME),

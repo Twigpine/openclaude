@@ -110,11 +110,7 @@ function withoutProjectScopedCodeModeEnv(
   if (!env || !(CODE_MODE_ENV_VAR in env)) return env || {}
   const out = { ...env }
   let nonProjectValue: string | undefined
-  for (const source of [
-    'userSettings',
-    'flagSettings',
-    'policySettings',
-  ] as const) {
+  for (const source of TRUSTED_SETTING_SOURCES) {
     if (!isSettingSourceEnabled(source)) continue
     const value = getSettingsForSource(source)?.env?.[CODE_MODE_ENV_VAR]
     if (value !== undefined) nonProjectValue = value

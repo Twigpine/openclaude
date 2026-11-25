@@ -137,7 +137,7 @@ describe('ReplInnerToolRunner', () => {
     expect(called).toBe(false)
   })
 
-  test('enforces injectable total and shell caps before host work starts', async () => {
+  test('enforces the injectable total cap before host work starts', async () => {
     resetDoomLoop()
     let calls = 0
     const tool = createToolFixture(z.object({ command: z.string() }), {
@@ -148,11 +148,52 @@ describe('ReplInnerToolRunner', () => {
       },
     })
     const runner = createRunner([tool], {
-      caps: { maxTotalCalls: 1, maxShellCalls: 1 },
+      caps: { maxTotalCalls: 1 },
     })
     await runner.callTool(BASH_TOOL_NAME, { command: 'one' })
     await expect(runner.callTool(BASH_TOOL_NAME, { command: 'two' })).rejects.toThrow('total inner call cap')
     expect(calls).toBe(1)
+  })
+
+
+  test('enforces shell, mutation, and Agent caps independently', async () => {
+    resetDoomLoop()
+    const shellTool = createToolFixture(z.object({ command: z.string() }), {
+      name: BASH_TOOL_NAME,
+      async call() {
+        return { data: 'ok' }
+      },
+    })
+    const shellRunner = createRunner([shellTool], {
+      caps: { maxTotalCalls: 10, maxShellCalls: 1 },
+    })
+    await shellRunner.callTool(BASH_TOOL_NAME, { command: 'one' })
+    await expect(shellRunner.callTool(BASH_TOOL_NAME, { command: 'two' })).rejects.toThrow('shell/process call cap')
+
+    const mutationTool = createToolFixture(z.object({}), {
+      name: 'FixtureMutation',
+      isReadOnly: () => false,
+      async call() {
+        return { data: 'ok' }
+      },
+    })
+    const mutationRunner = createRunner([mutationTool], {
+      caps: { maxTotalCalls: 10, maxMutationCalls: 1 },
+    })
+    await mutationRunner.callTool('FixtureMutation', {})
+    await expect(mutationRunner.callTool('FixtureMutation', {})).rejects.toThrow('mutation call cap')
+
+    const agentTool = createToolFixture(z.object({}), {
+      name: 'Agent',
+      async call() {
+        return { data: 'ok' }
+      },
+    })
+    const agentRunner = createRunner([agentTool], {
+      caps: { maxTotalCalls: 10, maxAgentCalls: 1 },
+    })
+    await agentRunner.callTool('Agent', {})
+    await expect(agentRunner.callTool('Agent', {})).rejects.toThrow('Agent call cap')
   })
 
   test('runs independent concurrency-safe calls in parallel', async () => {

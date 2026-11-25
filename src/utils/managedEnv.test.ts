@@ -37,7 +37,7 @@ import {
   setFlagSettingsPath,
   setProjectRoot,
 } from '../bootstrap/state.js'
-import { CODE_MODE_ENV_VAR, SAFE_ENV_VARS } from './managedEnvConstants.js'
+import { CODE_MODE_ENV_VAR } from './managedEnvConstants.js'
 import { resetSettingsCache } from './settings/settingsCache.js'
 import {
   applyProviderProfileToProcessEnv,
@@ -173,7 +173,7 @@ describe('Code Mode settings env boundary', () => {
     }
   }
 
-  it('does not apply project settings before trust and is not a safe env var', () => {
+  it('does not apply project settings before trust', () => {
     const { restore } = writeSettingsFiles({
       project: { env: { [CODE_MODE_ENV_VAR]: '1' } },
     })
@@ -181,7 +181,6 @@ describe('Code Mode settings env boundary', () => {
       delete process.env[CODE_MODE_ENV_VAR]
       applySafeConfigEnvironmentVariables()
 
-      expect(SAFE_ENV_VARS.has(CODE_MODE_ENV_VAR)).toBe(false)
       expect(process.env[CODE_MODE_ENV_VAR]).toBeUndefined()
     } finally {
       restore()

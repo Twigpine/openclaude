@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { appendBoundedText, serializeBridgeError, serializeBridgeValue } from './serialization.js'
+import { serializeBridgeError, serializeBridgeValue } from './serialization.js'
 
 describe('serializeBridgeValue', () => {
   test('serializes ordinary JSON-compatible values', () => {
@@ -57,12 +57,5 @@ describe('serializeBridgeError', () => {
     const output = serializeBridgeError(new Error('x'.repeat(100)), { maxStringLength: 20 })
     expect(output.name).toBe('Error')
     expect(output.message).toContain('truncated')
-  })
-})
-
-describe('appendBoundedText', () => {
-  test('caps accumulated output', () => {
-    expect(appendBoundedText('abc', 'def', 4)).toBe('abcd')
-    expect(appendBoundedText('abcd', 'e', 4)).toBe('abcd')
   })
 })

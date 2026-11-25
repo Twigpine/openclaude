@@ -110,7 +110,7 @@ describe('executeQuickJSScript', () => {
       timeoutMs: 2_000,
       memoryLimitBytes: 2 * 1024 * 1024,
     })
-    expect(['error', 'timeout']).toContain(result.status)
+    expect(result.status).toBe('error')
     expect(result.error).toBeDefined()
   }, TEST_TIMEOUT)
 

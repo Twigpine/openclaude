@@ -8,7 +8,7 @@ import { createAssistantMessage } from '../../utils/messages.js'
 import { createChildAbortController } from '../../utils/abortController.js'
 import { serializeBridgeValue } from './serialization.js'
 import type { PromptWaitTracker, QuickJSHostFunction } from './quickjsRuntime.js'
-import { isLegalGuestIdentifier } from './toolWrappers.js'
+import { isLegalGuestIdentifier } from './guestIdentifiers.js'
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js'
 import { POWERSHELL_TOOL_NAME } from '../PowerShellTool/toolName.js'
 import { REPL_TOOL_NAME } from './constants.js'
@@ -36,6 +36,7 @@ export interface ReplInnerToolRunnerOptions {
   promptWaitTracker: PromptWaitTracker
   caps?: Partial<ReplResourceCaps>
   onVirtualMessage?: (message: Message) => void
+  onInnerToolUse?: (toolName: string) => void
   onProgress?: (message: Message) => void
   abortSignal?: AbortSignal
   onTerminalFailure?: (error: Error) => void
@@ -70,12 +71,21 @@ class Semaphore {
 class ReadWriteLock {
   private readers = 0
   private writerActive = false
-  private readonly waiters: Array<() => void> = []
+  private readonly waiters: Array<{ kind: 'read' | 'write'; grant: () => void }> = []
 
   private pump(): void {
-    if (this.waiters.length === 0 || this.writerActive) return
-    const next = this.waiters.shift()
-    next?.()
+    if (this.waiters.length === 0 || this.writerActive || this.readers > 0) return
+    if (this.waiters[0]?.kind === 'write') {
+      const next = this.waiters.shift()
+      this.writerActive = true
+      next?.grant()
+      return
+    }
+    while (this.waiters[0]?.kind === 'read') {
+      const next = this.waiters.shift()
+      this.readers += 1
+      next?.grant()
+    }
   }
 
   acquireRead(): Promise<void> {
@@ -84,10 +94,7 @@ class ReadWriteLock {
       return Promise.resolve()
     }
     return new Promise(resolve => {
-      this.waiters.push(() => {
-        this.readers += 1
-        resolve()
-      })
+      this.waiters.push({ kind: 'read', grant: resolve })
     })
   }
 
@@ -102,10 +109,7 @@ class ReadWriteLock {
       return Promise.resolve()
     }
     return new Promise(resolve => {
-      this.waiters.push(() => {
-        this.writerActive = true
-        resolve()
-      })
+      this.waiters.push({ kind: 'write', grant: resolve })
     })
   }
 
@@ -216,7 +220,6 @@ function extractTextFromToolResultContent(content: unknown): string {
     .join('\n')
 }
 
-/** Canonical inner execution bridge for one foreground REPL script. */
 export class ReplInnerToolRunner {
   private readonly inventoryByName = new Map<string, Tool>()
   private readonly caps: ReplResourceCaps
@@ -359,6 +362,7 @@ export class ReplInnerToolRunner {
       input: isObjectInput(input) ? input : {},
       caller: { type: 'direct' },
     }
+    this.options.onInnerToolUse?.(tool.name)
     const assistantMessage = createAssistantMessage({
       content: [toolUse],
       isVirtual: true,

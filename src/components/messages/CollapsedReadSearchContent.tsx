@@ -4,14 +4,14 @@ import { basename } from 'path';
 import React, { useRef } from 'react';
 import { useMinDisplayTime } from '../../hooks/useMinDisplayTime.js';
 import { Ansi, Box, Text, useTheme } from '../../ink.js';
-import { findToolByName, type Tools } from '../../Tool.js';
-import { getReplPrimitiveTools } from '../../tools/REPLTool/primitiveTools.js';
+import type { Tools } from '../../Tool.js';
 import type { CollapsedReadSearchGroup, NormalizedAssistantMessage } from '../../types/message.js';
 import { uniq } from '../../utils/array.js';
 import { getToolUseIdsFromCollapsedGroup } from '../../utils/collapseReadSearch.js';
 import { getDisplayPath } from '../../utils/file.js';
 import { formatDuration, formatSecondsShort } from '../../utils/format.js';
 import { isFullscreenEnvEnabled } from '../../utils/fullscreen.js';
+import { findToolForDisplay } from '../../utils/toolDisplay.js';
 import type { buildMessageLookups } from '../../utils/messages.js';
 import type { ThemeName } from '../../utils/theme.js';
 import { CtrlOToExpand } from '../CtrlOToExpand.js';
@@ -55,7 +55,7 @@ function VerboseToolUse(t0) {
   if ($[0] !== bg || $[1] !== content.id || $[2] !== content.input || $[3] !== content.name || $[4] !== inProgressToolUseIDs || $[5] !== lookups || $[6] !== shouldAnimate || $[7] !== theme || $[8] !== tools) {
     t2 = Symbol.for("react.early_return_sentinel");
     bb0: {
-      const tool = findToolByName(tools, content.name) ?? findToolByName(getReplPrimitiveTools(), content.name);
+      const tool = findToolForDisplay(tools, content.name);
       if (!tool) {
         t2 = null;
         break bb0;

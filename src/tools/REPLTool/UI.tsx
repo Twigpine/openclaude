@@ -3,6 +3,7 @@ import { MessageResponse } from '../../components/MessageResponse.js'
 import { Box, Text } from '../../ink.js'
 import type { ProgressMessage } from '../../types/message.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
+import { firstLineOf } from '../../utils/stringUtils.js'
 
 const INLINE_RESULT_LIMIT = 120
 const VERBOSE_SECTION_LIMIT = 8_000
@@ -20,7 +21,6 @@ type ReplOutputLike = {
   stderr?: string
   durationMs?: number
   toolsUsed?: string[]
-  innerMessageCount?: number
 }
 
 function lineCount(code: string): number {
@@ -31,7 +31,7 @@ function compactValue(value: unknown): string {
   if (value === undefined) return ''
   const serialized = typeof value === 'string' ? value : jsonStringify(value)
   if (!serialized) return ''
-  const firstLine = serialized.split('\n', 1)[0] ?? ''
+  const firstLine = firstLineOf(serialized)
   return firstLine.length > INLINE_RESULT_LIMIT
     ? `${firstLine.slice(0, INLINE_RESULT_LIMIT)}...`
     : firstLine

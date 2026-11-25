@@ -4,7 +4,7 @@ import { getEmptyToolPermissionContext } from '../../Tool.js'
 import type { ToolPermissionContext } from '../../types/permissions.js'
 import { createToolFixture } from '../../test/toolFixtures.js'
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js'
-import { buildReplToolInventory, createReplHostFunctionNames } from './toolWrappers.js'
+import { buildReplToolInventory } from './toolWrappers.js'
 
 describe('buildReplToolInventory', () => {
   test('includes hidden primitives even when absent from direct session tools', () => {
@@ -27,10 +27,8 @@ describe('buildReplToolInventory', () => {
       isMcp: true,
     })
     const inventory = buildReplToolInventory({ sessionTools: [mcp] })
-    const names = createReplHostFunctionNames(inventory)
-    expect(names.genericNames).toContain('mcp__server__not-legal')
-    expect(names.exactNames.has('mcp__server__not-legal')).toBe(false)
-    expect(names.exactNames.has('Read')).toBe(true)
+    expect(inventory.map(tool => tool.name)).toContain('mcp__server__not-legal')
+    expect(inventory.map(tool => tool.name)).toContain('Read')
   })
 
   test('applies deny filtering to primitives when permission context is supplied', () => {

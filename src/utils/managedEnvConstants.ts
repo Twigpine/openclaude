@@ -9,10 +9,10 @@ export const CODE_MODE_ENV_VAR = 'CLAUDE_CODE_EXPERIMENTAL_CODE_MODE'
  */
 const originalProcessEnvBeforeSettings: Readonly<
   Record<string, string | undefined>
-> = Object.freeze(
+> = Object.freeze({
   // eslint-disable-next-line custom-rules/no-process-env-top-level -- intentional pre-settings snapshot
-  { ...process.env },
-)
+  [CODE_MODE_ENV_VAR]: process.env[CODE_MODE_ENV_VAR],
+})
 
 export function getOriginalProcessEnvBeforeSettings(): Readonly<
   Record<string, string | undefined>

@@ -205,7 +205,6 @@ export const INTENTIONALLY_BUNDLED: string[] = [
   'graphology-metrics',
   // Tokenizer for repo map token budgeting
   'js-tiktoken',
-  // QuickJS runtime for Code Mode; single-file variant is embedded in the CLI bundle
   'quickjs-emscripten-core',
   '@jitl/quickjs-singlefile-mjs-release-sync',
 ]

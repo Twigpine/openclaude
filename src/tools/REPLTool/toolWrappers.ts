@@ -2,6 +2,7 @@ import type { Tool, Tools } from '../../Tool.js'
 import { filterToolsByDenyRules } from '../../tools.js'
 import type { ToolPermissionContext } from '../../types/permissions.js'
 import { POWERSHELL_TOOL_NAME } from '../PowerShellTool/toolName.js'
+import { isLegalGuestIdentifier } from './guestIdentifiers.js'
 import { getReplPrimitiveTools } from './primitiveTools.js'
 
 export const REPL_NON_PRIMITIVE_ALLOWLIST = new Set([
@@ -31,31 +32,12 @@ const REPL_EXCLUDED_TOOLS = new Set([
   'AskUserQuestion',
 ])
 
-const JAVASCRIPT_RESERVED_WORDS = new Set([
-  'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger',
-  'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'false',
-  'finally', 'for', 'function', 'if', 'implements', 'import', 'in',
-  'instanceof', 'interface', 'let', 'new', 'null', 'package', 'private',
-  'protected', 'public', 'return', 'static', 'super', 'switch', 'this',
-  'throw', 'true', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield',
-])
-
-export function isLegalGuestIdentifier(name: string): boolean {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) && !JAVASCRIPT_RESERVED_WORDS.has(name)
-}
-
 function addToolOnce(tools: Tool[], seen: Set<string>, tool: Tool): void {
   if (seen.has(tool.name)) return
   seen.add(tool.name)
   tools.push(tool)
 }
 
-/**
- * Build the deliberately constrained guest namespace. Hidden primitives are
- * included independently of the model-facing session list, while nonprimitive
- * built-ins are limited to the reviewed v1 allowlist. MCP tools already in the
- * session pool keep canonical names.
- */
 export function buildReplToolInventory(input: {
   sessionTools: Tools
   permissionContext?: ToolPermissionContext
@@ -85,20 +67,4 @@ export function buildReplToolInventory(input: {
     }
   }
   return inventory
-}
-
-export function createReplHostFunctionNames(inventory: Tools): {
-  exactNames: Map<string, string>
-  genericNames: string[]
-} {
-  const exactNames = new Map<string, string>()
-  const genericNames: string[] = []
-  for (const tool of inventory) {
-    if (isLegalGuestIdentifier(tool.name)) {
-      exactNames.set(tool.name, tool.name)
-    } else {
-      genericNames.push(tool.name)
-    }
-  }
-  return { exactNames, genericNames }
 }

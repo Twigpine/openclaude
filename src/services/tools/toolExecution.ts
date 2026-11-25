@@ -1663,9 +1663,6 @@ export async function checkPermissionsAndCallTool(
       if ('updatedToolOutput' in hookResult) {
         toolOutput = hookResult.updatedToolOutput
         if (!isMcpTool(tool) && committedToolResultIndex !== undefined) {
-          // Non-MCP results are ordered before hook attachments. The array is
-          // still local to execution, so replace the pending result in place
-          // before it can reach model context, rendering, or persistence.
           resultingMessages[committedToolResultIndex] =
             await createToolResultUpdate(toolOutput)
         }
@@ -1737,9 +1734,6 @@ export async function checkPermissionsAndCallTool(
     }
 
     // If the tool provided new messages, add them to the list to return.
-    // REPL's messages are virtual inner provenance produced while the script
-    // ran, so they belong before the reduced outer tool result even though
-    // the tool can only hand them back after execution completes.
     if (result.newMessages && result.newMessages.length > 0) {
       const updates = result.newMessages.map(message => ({ message }))
       const insertionIndex =

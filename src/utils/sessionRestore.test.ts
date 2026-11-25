@@ -317,7 +317,7 @@ describe('Code Mode resume compatibility', () => {
   })
 
 
-  test('loadConversationForResume rejects mismatched mode before resume side effects', async () => {
+  test('loadConversationForResume rejects mismatched resume mode', async () => {
     setReplModeEnabledForSession(false)
     const log = {
       date: ts,

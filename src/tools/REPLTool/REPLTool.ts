@@ -4,11 +4,6 @@ import type { PermissionDecision, ToolPermissionContext } from '../../types/perm
 import type { AssistantMessage, AttachmentMessage, SystemMessage, UserMessage } from '../../types/message.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
-import {
-  getAskRuleForTool,
-  getDenyRuleForTool,
-  toolAlwaysAllowedRule,
-} from '../../utils/permissions/permissions.js'
 import { PRODUCT_DISPLAY_NAME } from '../../constants/product.js'
 import { REPL_TOOL_NAME } from './constants.js'
 import { ReplInnerToolRunner } from './innerToolRunner.js'
@@ -43,7 +38,6 @@ const outputSchema = lazySchema(() =>
     stderr: z.string().optional(),
     durationMs: z.number().optional(),
     toolsUsed: z.array(z.string()).optional(),
-    innerMessageCount: z.number().optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -58,17 +52,6 @@ function formatUnknownForModel(value: unknown): string {
   if (value === undefined) return 'undefined'
   const serialized = jsonStringify(value, null, 2)
   return truncateForModel(serialized ?? String(value), 4_000)
-}
-
-function outerToolUseId(parentMessage: Parameters<Parameters<typeof buildTool>[0]['call']>[3]): string {
-  const content = parentMessage.message.content
-  if (!Array.isArray(content)) return 'unknown'
-  const toolUse = content.find(block =>
-    typeof block === 'object' && block !== null &&
-    (block as { type?: string }).type === 'tool_use' &&
-    (block as { name?: string }).name === REPL_TOOL_NAME,
-  ) as { id?: string } | undefined
-  return toolUse?.id ?? 'unknown'
 }
 
 export const REPLTool = buildTool({
@@ -102,32 +85,13 @@ export const REPLTool = buildTool({
   toAutoClassifierInput(input) {
     return input.code.slice(0, 8_000)
   },
-  async checkPermissions(input, context): Promise<PermissionDecision> {
-    const permissionContext = context.getAppState().toolPermissionContext
-    const denyRule = getDenyRuleForTool(permissionContext, REPLTool)
-    if (denyRule) {
-      return {
-        behavior: 'deny',
-        message: 'REPL execution is denied by permission rules.',
-        decisionReason: { type: 'rule', rule: denyRule },
-      }
-    }
-    const allowRule = toolAlwaysAllowedRule(permissionContext, REPLTool)
-    if (allowRule) {
-      return {
-        behavior: 'allow',
-        updatedInput: input,
-        decisionReason: { type: 'rule', rule: allowRule },
-      }
-    }
-    const askRule = getAskRuleForTool(permissionContext, REPLTool)
+  async checkPermissions(_input, _context): Promise<PermissionDecision> {
     return {
       behavior: 'ask',
       message: `${PRODUCT_DISPLAY_NAME} requested permissions to execute a JavaScript tool orchestration script with REPL. Inner tools will still use their normal permission checks.`,
-      ...(askRule ? { decisionReason: { type: 'rule', rule: askRule } } : {}),
     }
   },
-  async call(input: Input, context, canUseTool, parentMessage, onProgress) {
+  async call(input: Input, context, canUseTool, _parentMessage, onProgress) {
     const promptWaitTracker = new PromptWaitTracker()
     const virtualMessages: Array<UserMessage | AssistantMessage | AttachmentMessage | SystemMessage> = []
     const toolsUsed = new Set<string>()
@@ -139,7 +103,7 @@ export const REPLTool = buildTool({
     const scriptController = new AbortController()
     const abortFromOuter = () => scriptController.abort(context.abortController.signal.reason)
     context.abortController.signal.addEventListener('abort', abortFromOuter, { once: true })
-    const progressToolUseID = outerToolUseId(parentMessage)
+    const progressToolUseID = context.toolUseId ?? 'unknown'
     const runner = new ReplInnerToolRunner({
       inventory,
       toolUseContext: context,
@@ -147,6 +111,9 @@ export const REPLTool = buildTool({
       promptWaitTracker,
       abortSignal: scriptController.signal,
       onTerminalFailure: error => scriptController.abort(error),
+      onInnerToolUse: toolName => {
+        toolsUsed.add(toolName)
+      },
       onVirtualMessage: message => {
         if (
           message.type === 'assistant' ||
@@ -155,17 +122,6 @@ export const REPLTool = buildTool({
           message.type === 'system'
         ) {
           virtualMessages.push(message)
-        }
-        if (message.type === 'assistant' && Array.isArray(message.message.content)) {
-          for (const block of message.message.content) {
-            if (
-              typeof block === 'object' && block !== null &&
-              (block as { type?: string }).type === 'tool_use' &&
-              typeof (block as { name?: string }).name === 'string'
-            ) {
-              toolsUsed.add((block as { name: string }).name)
-            }
-          }
         }
       },
       onProgress: message => {
@@ -193,7 +149,6 @@ export const REPLTool = buildTool({
           ...execution,
           code: input.code,
           toolsUsed: [...toolsUsed].sort(),
-          innerMessageCount: virtualMessages.length,
         },
         newMessages: virtualMessages,
       }

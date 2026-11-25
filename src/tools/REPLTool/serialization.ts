@@ -15,11 +15,6 @@ function truncateString(value: string, maxLength: number): string {
   return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`
 }
 
-/**
- * Convert host or guest values into bounded JSON-compatible data. This is a
- * display/transport representation, not a host object reference: values that
- * cannot cross the QuickJS boundary become deterministic placeholders.
- */
 export function serializeBridgeValue(
   value: unknown,
   options: BridgeSerializationOptions = {},
@@ -106,11 +101,4 @@ export function serializeBridgeError(
     name: 'Error',
     message: truncateString(String(serializeBridgeValue(error, options) ?? error), maxStringLength),
   }
-}
-
-export function appendBoundedText(current: string, chunk: string, maxLength: number): string {
-  if (current.length >= maxLength) return current
-  const next = current + chunk
-  if (next.length <= maxLength) return next
-  return next.slice(0, maxLength)
 }

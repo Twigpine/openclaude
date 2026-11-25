@@ -74,7 +74,6 @@ describe('REPLTool', () => {
     expect(result.data.code).toBe("console.log('hello'); return {value: 2}")
     expect(result.data.result).toEqual({ value: 2 })
     expect(result.data.stdout).toContain('hello')
-    expect(result.data.innerMessageCount).toBe(0)
   })
 
   test('maps output to concise model-facing text rather than raw script state', async () => {
@@ -86,7 +85,6 @@ describe('REPLTool', () => {
       stderr: '',
       durationMs: 12,
       toolsUsed: ['Read'],
-      innerMessageCount: 2,
     }
     const block = REPLTool.mapToolResultToToolResultBlockParam(output, 'toolu_test')
     expect(block.type).toBe('tool_result')

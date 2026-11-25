@@ -5,8 +5,10 @@ import {
   type QuickJSHandle,
   type QuickJSWASMModule,
 } from 'quickjs-emscripten-core'
+import { jsonParse } from '../../utils/slowOperations.js'
+import { isLegalGuestIdentifier } from './guestIdentifiers.js'
+import { sleep } from '../../utils/sleep.js'
 import {
-  appendBoundedText,
   serializeBridgeError,
   serializeBridgeValue,
 } from './serialization.js'
@@ -46,7 +48,6 @@ function getQuickJSModule(): Promise<QuickJSWASMModule> {
   return quickjsModulePromise
 }
 
-/** Tracks intervals spent waiting for a human decision so they do not count as script execution time. */
 export class PromptWaitTracker {
   private excludedMs = 0
   private activeWaits = 0
@@ -117,11 +118,6 @@ function errorHandleToSerialized(context: QuickJSContext, errorHandle: QuickJSHa
   }
 }
 
-function validGuestIdentifier(name: string): boolean {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
-}
-
-/** Execute one script in one disposable QuickJS runtime. */
 export async function executeQuickJSScript(
   options: QuickJSExecutionOptions,
 ): Promise<QuickJSExecutionResult> {
@@ -130,13 +126,23 @@ export async function executeQuickJSScript(
   const stdoutLimit = options.stdoutLimit ?? DEFAULT_OUTPUT_LIMIT
   const stderrLimit = options.stderrLimit ?? DEFAULT_OUTPUT_LIMIT
   const promptWaitTracker = options.promptWaitTracker ?? new PromptWaitTracker()
-  let stdout = ''
-  let stderr = ''
+  const stdoutChunks: string[] = []
+  const stderrChunks: string[] = []
+  let stdoutLength = 0
+  let stderrLength = 0
   let timedOut = false
   let aborted = false
   let tornDown = false
 
   const executionMs = () => Date.now() - startedAt - promptWaitTracker.currentExcludedMs()
+  const appendOutput = (chunks: string[], currentLength: number, chunk: string, maxLength: number): number => {
+    if (currentLength >= maxLength) return currentLength
+    const remaining = maxLength - currentLength
+    chunks.push(chunk.length <= remaining ? chunk : chunk.slice(0, remaining))
+    return Math.min(maxLength, currentLength + chunk.length)
+  }
+  const stdoutText = () => stdoutChunks.join('')
+  const stderrText = () => stderrChunks.join('')
   const quickjs = await getQuickJSModule()
   const runtime = quickjs.newRuntime()
   runtime.setMemoryLimit(options.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT_BYTES)
@@ -169,15 +175,16 @@ export async function executeQuickJSScript(
     }
     const jsonText = context.dump(stringified.value) as string | undefined
     disposeQuietly(stringified.value)
-    return jsonText === undefined ? undefined : JSON.parse(jsonText)
+    return jsonText === undefined ? undefined : jsonParse(jsonText)
   }
 
   function installConsole(): void {
     const consoleObject = context.newObject()
     for (const method of ['log', 'info', 'debug'] as const) {
       const fn = context.newFunction(method, (...args) => {
-        stdout = appendBoundedText(
-          stdout,
+        stdoutLength = appendOutput(
+          stdoutChunks,
+          stdoutLength,
           `${args.map(arg => String(serializeBridgeValue(context.dump(arg)))).join(' ')}\n`,
           stdoutLimit,
         )
@@ -188,8 +195,9 @@ export async function executeQuickJSScript(
     }
     for (const method of ['warn', 'error'] as const) {
       const fn = context.newFunction(method, (...args) => {
-        stderr = appendBoundedText(
-          stderr,
+        stderrLength = appendOutput(
+          stderrChunks,
+          stderrLength,
           `${args.map(arg => String(serializeBridgeValue(context.dump(arg)))).join(' ')}\n`,
           stderrLimit,
         )
@@ -203,7 +211,7 @@ export async function executeQuickJSScript(
   }
 
   function installHostFunction(name: string, implementation: QuickJSHostFunction): void {
-    if (!validGuestIdentifier(name)) {
+    if (!isLegalGuestIdentifier(name)) {
       throw new Error(`Invalid QuickJS host function name: ${name}`)
     }
     const fn = context.newFunction(name, (...argHandles) => {
@@ -251,8 +259,8 @@ export async function executeQuickJSScript(
       return {
         status: timedOut ? 'timeout' : aborted ? 'aborted' : 'error',
         error: errorHandleToSerialized(context, evalResult.error),
-        stdout,
-        stderr,
+        stdout: stdoutText(),
+        stderr: stderrText(),
         durationMs: Date.now() - startedAt,
       }
     }
@@ -290,15 +298,15 @@ export async function executeQuickJSScript(
         settled = true
         break
       }
-      await new Promise(resolve => setTimeout(resolve, 1))
+      await sleep(1)
     }
 
     if (timedOut || aborted) {
       return {
         status: timedOut ? 'timeout' : 'aborted',
         error: serializeBridgeError(new Error(timedOut ? 'Script execution timed out' : 'Script execution aborted')),
-        stdout,
-        stderr,
+        stdout: stdoutText(),
+        stderr: stderrText(),
         durationMs: Date.now() - startedAt,
       }
     }
@@ -307,8 +315,8 @@ export async function executeQuickJSScript(
       return {
         status: 'error',
         error: serializeBridgeError(settlementFailure),
-        stdout,
-        stderr,
+        stdout: stdoutText(),
+        stderr: stderrText(),
         durationMs: Date.now() - startedAt,
       }
     }
@@ -319,8 +327,8 @@ export async function executeQuickJSScript(
       return {
         status: 'error',
         error: serialized,
-        stdout,
-        stderr,
+        stdout: stdoutText(),
+        stderr: stderrText(),
         durationMs: Date.now() - startedAt,
       }
     }
@@ -331,16 +339,16 @@ export async function executeQuickJSScript(
     return {
       status: 'completed',
       result,
-      stdout,
-      stderr,
+      stdout: stdoutText(),
+      stderr: stderrText(),
       durationMs: Date.now() - startedAt,
     }
   } catch (error) {
     return {
       status: timedOut ? 'timeout' : aborted ? 'aborted' : 'error',
       error: serializeBridgeError(error),
-      stdout,
-      stderr,
+      stdout: stdoutText(),
+      stderr: stderrText(),
       durationMs: Date.now() - startedAt,
     }
   } finally {
