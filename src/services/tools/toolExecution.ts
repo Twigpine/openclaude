@@ -40,6 +40,7 @@ import { FILE_WRITE_TOOL_NAME } from '../../tools/FileWriteTool/prompt.js'
 import { NOTEBOOK_EDIT_TOOL_NAME } from '../../tools/NotebookEditTool/constants.js'
 import { POWERSHELL_TOOL_NAME } from '../../tools/PowerShellTool/toolName.js'
 import { REPL_TOOL_NAME } from '../../tools/REPLTool/constants.js'
+import { validateReplForegroundOnlyInput } from '../../tools/REPLTool/foregroundValidation.js'
 import { SKILL_TOOL_NAME } from '../../tools/SkillTool/constants.js'
 import { parseGitCommitId } from '../../tools/shared/gitOperationTracking.js'
 import {
@@ -333,26 +334,103 @@ function getMcpServerBaseUrlFromToolName(
 
 const REPL_HOOK_REDACTED_TEXT = '[inner tool output redacted by REPL PostToolUse hook]'
 
+const ATTACHMENT_PROVENANCE_METADATA_KEYS = new Set([
+  'type',
+  'hookName',
+  'hookEvent',
+  'toolUseID',
+  'decision',
+  'exitCode',
+  'durationMs',
+  'processId',
+])
+
+const SYSTEM_PROVENANCE_METADATA_KEYS = new Set([
+  'type',
+  'subtype',
+  'uuid',
+  'timestamp',
+  'level',
+  'isMeta',
+  'isVirtual',
+  'toolUseID',
+  'preventContinuation',
+])
+
+function redactPayloadValue(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') return REPL_HOOK_REDACTED_TEXT
+  if (value === null || typeof value !== 'object') return value
+  if (depth >= 5) return REPL_HOOK_REDACTED_TEXT
+  if (Array.isArray(value)) {
+    const items = value.slice(0, 10).map(item => redactPayloadValue(item, depth + 1))
+    if (value.length > 10) items.push(`[${value.length - 10} redacted items omitted]`)
+    return items
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .slice(0, 50)
+      .map(([key, entryValue]) => [key, redactPayloadValue(entryValue, depth + 1)]),
+  )
+}
+
+function redactAttachmentProvenance(attachment: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(attachment).map(([key, value]) => [
+      key,
+      ATTACHMENT_PROVENANCE_METADATA_KEYS.has(key) ? value : redactPayloadValue(value),
+    ]),
+  )
+}
+
+function redactSystemProvenance(message: Message): Message {
+  return Object.fromEntries(
+    Object.entries(message).map(([key, value]) => [
+      key,
+      SYSTEM_PROVENANCE_METADATA_KEYS.has(key) ? value : redactPayloadValue(value),
+    ]),
+  ) as Message
+}
+
+function redactUserContentBlock(block: unknown): unknown {
+  if (typeof block !== 'object' || block === null) return REPL_HOOK_REDACTED_TEXT
+  return Object.fromEntries(
+    Object.entries(block as Record<string, unknown>).map(([key, value]) => {
+      if (key === 'type' || key === 'tool_use_id' || key === 'is_error') return [key, value]
+      return [key, redactPayloadValue(value)]
+    }),
+  )
+}
+
 function redactReplInnerProvenance(messages: Message[] | undefined): void {
   if (!messages) return
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index]
-    if (message.isVirtual !== true || message.type !== 'user') continue
+    if (message.isVirtual !== true) continue
+    if (message.type === 'attachment') {
+      messages[index] = {
+        ...message,
+        attachment: redactAttachmentProvenance(message.attachment as Record<string, unknown>),
+      } as Message
+      continue
+    }
+    if (message.type === 'system') {
+      messages[index] = redactSystemProvenance(message)
+      continue
+    }
+    if (message.type !== 'user') continue
     const content = message.message.content
     const redactedContent = Array.isArray(content)
-      ? content.map(block =>
-          typeof block === 'object' && block !== null && block.type === 'tool_result'
-            ? { ...block, content: REPL_HOOK_REDACTED_TEXT }
-            : block,
-        )
-      : content
+      ? content.map(redactUserContentBlock) as ContentBlockParam[]
+      : REPL_HOOK_REDACTED_TEXT
     messages[index] = {
       ...message,
       message: {
         ...message.message,
         content: redactedContent,
       },
-      ...(message.toolUseResult !== undefined ? { toolUseResult: REPL_HOOK_REDACTED_TEXT } : {}),
+      ...(message.toolUseResult !== undefined
+        ? { toolUseResult: redactPayloadValue(message.toolUseResult) }
+        : {}),
     }
   }
 }
@@ -1419,6 +1497,9 @@ export async function checkPermissionsAndCallTool(
   // result string embeds the path the model emitted — keeps transcript/VCR
   // hashes stable. Other hook modifications flow through unchanged.
   callInput = normalizeReplayToolInput(processedInput, callInput, backfilledClone)
+  if (toolUseContext.replInnerExecution === true) {
+    validateReplForegroundOnlyInput(tool.name, callInput)
+  }
 
   let queryActivityLease: { release(): void } | undefined
 

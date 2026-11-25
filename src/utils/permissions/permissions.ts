@@ -359,6 +359,7 @@ import {
 import {
   classifyYoloAction,
   formatActionForClassifier,
+  MAX_CLASSIFIER_BLOCK_VALUE_CHARS,
 } from './yoloClassifier.js'
 
 const PERMISSION_RULE_SOURCES = [
@@ -865,6 +866,21 @@ async function hasPermissionsToUseToolWithModeHandling(
         message: DONT_ASK_REJECT_MESSAGE(tool.name),
       }
     }
+    if (
+      appState.toolPermissionContext.mode === 'auto' &&
+      tool.name === REPL_TOOL_NAME &&
+      typeof input.code === 'string' &&
+      input.code.length > MAX_CLASSIFIER_BLOCK_VALUE_CHARS
+    ) {
+      logForDebugging(
+        `Skipping auto mode classifier for ${tool.name}: REPL script exceeds the classifier input budget`,
+      )
+      return suppressPromptIfConfigured(tool, {
+        ...result,
+        message: `REPL scripts longer than ${MAX_CLASSIFIER_BLOCK_VALUE_CHARS.toLocaleString('en-US')} characters require manual approval because auto mode cannot classify the complete script.`,
+      })
+    }
+
     // Apply auto mode: use AI classifier instead of prompting user
     // Check this BEFORE shouldAvoidPermissionPrompts so classifiers work in headless mode
     if (

@@ -14,6 +14,17 @@ describe('executeQuickJSScript', () => {
     expect(object.result).toEqual({ ok: true, items: [1, 2] })
   }, TEST_TIMEOUT)
 
+  test('bounds large object keys in completion results', async () => {
+    const result = await executeQuickJSScript({
+      code: "const key = 'k'.repeat(20000); const value = {}; value[key] = 'result'; return value",
+    })
+    expect(result.status).toBe('completed')
+    const key = Object.keys(result.result as Record<string, unknown>)[0] ?? ''
+    expect(key.length).toBeLessThan(17_000)
+    expect(key).toContain('truncated')
+    expect(JSON.stringify(result.result).length).toBeLessThan(18_000)
+  }, TEST_TIMEOUT)
+
   test('captures bounded console output', async () => {
     const result = await executeQuickJSScript({
       code: "console.log('hello', {a: 1}); console.error('bad'); return undefined",
@@ -113,6 +124,22 @@ describe('executeQuickJSScript', () => {
     expect(result.status).toBe('error')
     expect(result.error).toBeDefined()
   }, TEST_TIMEOUT)
+
+  test('uncaught guest TypeError preserves its name and message', async () => {
+    const result = await executeQuickJSScript({ code: "throw new TypeError('useful message')" })
+    expect(result.status).toBe('error')
+    expect(result.error?.name).toBe('TypeError')
+    expect(result.error?.message).toBe('useful message')
+  })
+
+  test('malformed guest errors serialize as controlled errors without recursive inspection', async () => {
+    const result = await executeQuickJSScript({
+      code: "const e = new Error('outer'); Object.defineProperty(e, 'message', { get() { throw this } }); throw e",
+    })
+    expect(result.status).toBe('error')
+    expect(result.error?.name).toBe('Error')
+    expect(result.error?.message).toBe('QuickJS guest value could not be serialized')
+  })
 
   test('host errors become catchable guest rejections', async () => {
     const result = await executeQuickJSScript({

@@ -21,11 +21,13 @@ import {
   getLargeOutputInstructions,
   getLargeOutputPersistenceFailureInstructions,
 } from './mcpOutputStorage.ts'
-import { createUserMessage } from './messages.ts'
+import { createAssistantMessage, createUserMessage } from './messages.ts'
 import { jsonStringify } from './slowOperations.ts'
 import {
   applyToolResultReplacementsToMessages,
   buildLargeToolResultMessage,
+  createContentReplacementState,
+  enforceToolResultBudget,
   formatOmissionMarker,
   generateFilePreview,
   generatePreview,
@@ -387,6 +389,40 @@ let previousProjectRoot: string
     setProjectRoot(previousProjectRoot)
     setClaudeConfigHomeDirForTesting(previousConfigDir)
     await rm(tempConfigDir, { recursive: true, force: true })
+  })
+
+  test('virtual assistant rows do not split API-level tool result budget groups', async () => {
+    const largeContent = 'x'.repeat(100_001)
+    const first = createUserMessage({
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'outer-tool-a',
+        content: largeContent,
+        is_error: false,
+      }],
+    })
+    const virtualAssistant = createAssistantMessage({
+      content: [],
+      isVirtual: true,
+    })
+    const second = createUserMessage({
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'outer-tool-b',
+        content: largeContent,
+        is_error: false,
+      }],
+    })
+
+    const state = createContentReplacementState()
+    const result = await enforceToolResultBudget([first, virtualAssistant, second], state)
+
+    expect(result.newlyReplaced).toHaveLength(1)
+    const replacedId = result.newlyReplaced[0]?.toolUseId
+    expect(replacedId).toBeDefined()
+    const replacedMessage = replacedId === 'outer-tool-a' ? result.messages[0] : result.messages[2]
+    const block = replacedMessage?.message.content[0] as { content?: string }
+    expect(block.content).toContain('<persisted-output>')
   })
 
   test('keeps the full plain-text spill, reports UTF-8 bytes, and replays EEXIST deterministically', async () => {

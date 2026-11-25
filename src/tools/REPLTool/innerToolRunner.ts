@@ -9,6 +9,7 @@ import { createChildAbortController } from '../../utils/abortController.js'
 import { serializeBridgeValue } from './serialization.js'
 import type { PromptWaitTracker, QuickJSHostFunction } from './quickjsRuntime.js'
 import { isLegalGuestIdentifier } from './guestIdentifiers.js'
+import { validateReplForegroundOnlyInput } from './foregroundValidation.js'
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js'
 import { POWERSHELL_TOOL_NAME } from '../PowerShellTool/toolName.js'
 import { REPL_TOOL_NAME } from './constants.js'
@@ -142,21 +143,33 @@ function omitAttachmentPayloads(value: unknown, depth = 0): unknown {
   if (Array.isArray(value)) return value.map(item => omitAttachmentPayloads(item, depth + 1))
   const input = value as Record<string, unknown>
   const type = typeof input.type === 'string' ? input.type : undefined
+  const file = typeof input.file === 'object' && input.file !== null
+    ? input.file as Record<string, unknown>
+    : undefined
   const mimeType = typeof input.mimeType === 'string'
     ? input.mimeType
     : typeof input.mime_type === 'string'
       ? input.mime_type
-      : undefined
+      : typeof file?.type === 'string'
+        ? file.type
+        : undefined
   if (
     type === 'image' ||
     type === 'document' ||
+    type === 'pdf' ||
     mimeType?.startsWith('image/') === true ||
     mimeType === 'application/pdf'
   ) {
     const out: Record<string, unknown> = {}
     for (const [key, entryValue] of Object.entries(input)) {
-      if (key === 'data' || key === 'source' || key === 'content') {
+      if (key === 'data' || key === 'source' || key === 'content' || key === 'base64') {
         out[key] = '[attachment payload omitted from REPL result]'
+      } else if (key === 'file' && typeof entryValue === 'object' && entryValue !== null) {
+        const file = entryValue as Record<string, unknown>
+        out[key] = {
+          ...file,
+          ...(file.base64 !== undefined ? { base64: '[attachment payload omitted from REPL result]' } : {}),
+        }
       } else {
         out[key] = omitAttachmentPayloads(entryValue, depth + 1)
       }
@@ -183,17 +196,7 @@ const REPL_ERGONOMIC_ALIASES = new Map([
 ])
 
 function validateForegroundOnlyInput(tool: Tool, input: unknown): void {
-  if (!isObjectInput(input)) return
-  if ('run_in_background' in input) {
-    throw new Error(`${tool.name} run_in_background is unavailable inside REPL foreground scripts`)
-  }
-  if (tool.name === 'Agent') {
-    for (const key of ['name', 'team_name', 'mode', 'isolation', 'model'] as const) {
-      if (input[key] !== undefined) {
-        throw new Error(`Agent ${key} override is unavailable inside REPL foreground scripts`)
-      }
-    }
-  }
+  validateReplForegroundOnlyInput(tool.name, input)
 }
 
 function markInnerMessageVirtual(message: Message): Message {
@@ -207,14 +210,61 @@ const PROVENANCE_MAX_NODES = 500
 const PROVENANCE_MAX_DEPTH = 8
 const PROVENANCE_MAX_ITEMS = 50
 
+function capProvenanceString(
+  value: string,
+  state: { nodes: number; stringChars: number; seen: WeakSet<object> },
+): string {
+  const remaining = Math.max(0, PROVENANCE_MAX_TOTAL_CHARS - state.stringChars)
+  const maxLength = Math.min(PROVENANCE_MAX_STRING_CHARS, remaining)
+  const capped = value.length <= maxLength
+    ? value
+    : `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`
+  state.stringChars += capped.length
+  return capped
+}
+
+function capProvenanceValue(
+  value: unknown,
+  state: { nodes: number; stringChars: number; seen: WeakSet<object> },
+  depth = 0,
+): unknown {
+  if (state.nodes >= PROVENANCE_MAX_NODES) return '[SerializationBudget]'
+  state.nodes += 1
+  if (value === null || typeof value === 'undefined') return value
+  if (typeof value === 'string') {
+    return capProvenanceString(value, state)
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value
+  if (typeof value === 'bigint') return `${value.toString()}n`
+  if (typeof value !== 'object') return String(value)
+  if (state.seen.has(value)) return '[Circular]'
+  if (depth >= PROVENANCE_MAX_DEPTH) return '[MaxDepth]'
+  state.seen.add(value)
+  if (Array.isArray(value)) {
+    const items = value.slice(0, PROVENANCE_MAX_ITEMS).map(item =>
+      capProvenanceValue(item, state, depth + 1),
+    )
+    if (value.length > PROVENANCE_MAX_ITEMS) {
+      items.push(`[truncated ${value.length - PROVENANCE_MAX_ITEMS} items]`)
+    }
+    return items
+  }
+  const out: Record<string, unknown> = {}
+  const entries = Object.entries(value as Record<string, unknown>)
+  for (const [key, entryValue] of entries.slice(0, PROVENANCE_MAX_ITEMS)) {
+    out[capProvenanceString(key, state)] = capProvenanceValue(entryValue, state, depth + 1)
+  }
+  if (entries.length > PROVENANCE_MAX_ITEMS) {
+    out.__truncated__ = `${entries.length - PROVENANCE_MAX_ITEMS} properties omitted`
+  }
+  return out
+}
+
 function capInnerMessageProvenance(message: Message): Message {
-  return serializeBridgeValue(omitAttachmentPayloads(message), {
-    maxStringLength: PROVENANCE_MAX_STRING_CHARS,
-    maxTotalStringLength: PROVENANCE_MAX_TOTAL_CHARS,
-    maxTotalNodes: PROVENANCE_MAX_NODES,
-    maxDepth: PROVENANCE_MAX_DEPTH,
-    maxArrayLength: PROVENANCE_MAX_ITEMS,
-    maxObjectProperties: PROVENANCE_MAX_ITEMS,
+  return capProvenanceValue(omitAttachmentPayloads(message), {
+    nodes: 0,
+    stringChars: 0,
+    seen: new WeakSet<object>(),
   }) as Message
 }
 
@@ -240,6 +290,7 @@ export class ReplInnerToolRunner {
   private readonly childControllers = new Set<AbortController>()
   private readonly abortListener: () => void
   private readonly activeInvocations = new Set<Promise<unknown>>()
+  private readonly toolNamesByUseId = new Map<string, string>()
   private totalCalls = 0
   private mutationCalls = 0
   private shellCalls = 0
@@ -397,11 +448,12 @@ export class ReplInnerToolRunner {
       caller: { type: 'direct' },
     }
     this.options.onInnerToolUse?.(tool.name)
+    this.toolNamesByUseId.set(toolUse.id, tool.name)
     const assistantMessage = createAssistantMessage({
       content: [toolUse],
       isVirtual: true,
     })
-    this.options.onVirtualMessage?.(assistantMessage)
+    this.options.onVirtualMessage?.(capInnerMessageProvenance(assistantMessage))
 
     const childController = createChildAbortController(this.options.toolUseContext.abortController)
     this.childControllers.add(childController)
@@ -430,7 +482,13 @@ export class ReplInnerToolRunner {
       )) {
         const message = update.message
         if (message.type === 'progress') {
-          this.options.onProgress?.(message)
+          this.options.onProgress?.({
+            ...message,
+            data: {
+              ...message.data,
+              replInnerToolName: this.toolNamesByUseId.get(message.parentToolUseID),
+            },
+          })
           continue
         }
         const virtualMessage = capInnerMessageProvenance(markInnerMessageVirtual(message))

@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { stripVTControlCharacters } from 'node:util'
 import { MessageResponse } from '../../components/MessageResponse.js'
 import { ShellProgressMessage } from '../../components/shell/ShellProgressMessage.js'
 import { Box, Text } from '../../ink.js'
@@ -56,15 +57,42 @@ export function renderToolUseMessage(input: { code?: string }): React.ReactNode 
 }
 
 
-export function renderToolUseProgressMessage(
+function progressData(message: ProgressMessage): Record<string, unknown> | undefined {
+  return message.data as Record<string, unknown> | undefined
+}
+
+function progressIdentity(message: ProgressMessage): string {
+  const data = progressData(message)
+  return typeof data?.replInnerToolUseID === 'string'
+    ? data.replInnerToolUseID
+    : '__unlabeled_inner_progress__'
+}
+
+export function selectLatestReplProgressMessages(
   progressMessagesForMessage: ProgressMessage[],
-  { verbose }: { verbose: boolean },
-): React.ReactNode {
-  const lastProgress = progressMessagesForMessage.at(-1)
-  const data = lastProgress?.data as Record<string, unknown> | undefined
-  if (!data) {
-    return <MessageResponse height={1}><Text dimColor>Running...</Text></MessageResponse>
+): ProgressMessage[] {
+  const latestByInnerTool = new Map<string, ProgressMessage>()
+  for (const message of progressMessagesForMessage) {
+    const key = progressIdentity(message)
+    latestByInnerTool.delete(key)
+    latestByInnerTool.set(key, message)
   }
+  return [...latestByInnerTool.values()]
+}
+
+function replProgressLabel(message: ProgressMessage): string {
+  const data = progressData(message)
+  if (typeof data?.replInnerToolName === 'string') return data.replInnerToolName
+  if (data?.type === 'bash_progress') return 'Bash'
+  if (data?.type === 'powershell_progress') return 'PowerShell'
+  if (data?.type === 'mcp_progress') return 'MCP tool'
+  return 'Inner tool'
+}
+
+function renderSingleReplProgress(
+  data: Record<string, unknown>,
+  verbose: boolean,
+): React.ReactNode {
   if (data.type === 'bash_progress' || data.type === 'powershell_progress') {
     return <ShellProgressMessage
       fullOutput={typeof data.fullOutput === 'string' ? data.fullOutput : ''}
@@ -78,7 +106,9 @@ export function renderToolUseProgressMessage(
     />
   }
   if (data.type === 'mcp_progress') {
-    const progressMessage = typeof data.progressMessage === 'string' ? data.progressMessage : undefined
+    const progressMessage = typeof data.progressMessage === 'string'
+      ? stripVTControlCharacters(data.progressMessage)
+      : undefined
     const progress = typeof data.progress === 'number' ? data.progress : undefined
     const total = typeof data.total === 'number' ? data.total : undefined
     const label = progressMessage ?? (progress !== undefined
@@ -89,6 +119,35 @@ export function renderToolUseProgressMessage(
     return <MessageResponse height={1}><Text dimColor>{label}</Text></MessageResponse>
   }
   return <MessageResponse height={1}><Text dimColor>Inner tool running...</Text></MessageResponse>
+}
+
+export function renderToolUseProgressMessage(
+  progressMessagesForMessage: ProgressMessage[],
+  { verbose }: { verbose: boolean },
+): React.ReactNode {
+  const latestByInnerTool = selectLatestReplProgressMessages(progressMessagesForMessage)
+  const lastProgress = latestByInnerTool.at(-1)
+  const data = lastProgress ? progressData(lastProgress) : undefined
+  if (!data) {
+    return <MessageResponse height={1}><Text dimColor>Running...</Text></MessageResponse>
+  }
+  if (latestByInnerTool.length === 1) {
+    return renderSingleReplProgress(data, verbose)
+  }
+
+  const visible = latestByInnerTool.slice(-3)
+  const hiddenCount = latestByInnerTool.length - visible.length
+  return <Box flexDirection="column">
+    {hiddenCount > 0 && <Text dimColor>{hiddenCount} other inner tools running...</Text>}
+    {visible.map(message => {
+      const messageData = progressData(message)
+      if (!messageData) return null
+      return <Box key={progressIdentity(message)} flexDirection="column">
+        <Text dimColor>{replProgressLabel(message)}</Text>
+        {renderSingleReplProgress(messageData, false)}
+      </Box>
+    })}
+  </Box>
 }
 
 export function renderToolResultMessage(

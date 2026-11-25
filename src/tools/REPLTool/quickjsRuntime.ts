@@ -101,7 +101,9 @@ const BOUNDED_GUEST_SERIALIZER_SOURCE = `
       const out = {}
       const entries = Object.entries(current)
       for (const entry of entries.slice(0, maxObjectProperties)) {
-        out[entry[0]] = serializeInner(entry[1], depth + 1)
+        const serializedKey = truncateString(entry[0], maxTotalStringChars - stringChars)
+        stringChars += serializedKey.length
+        out[serializedKey] = serializeInner(entry[1], depth + 1)
       }
       if (entries.length > maxObjectProperties) out.__truncated__ = (entries.length - maxObjectProperties) + ' properties omitted'
       return out
@@ -231,6 +233,7 @@ export async function executeQuickJSScript(
 
   const context = runtime.newContext()
   const activeDisposables = new Set<{ dispose: () => void }>()
+  const activeDeferreds = new Set<{ reject: (value: QuickJSHandle) => void }>()
   const serializerResult = context.evalCode(BOUNDED_GUEST_SERIALIZER_SOURCE, 'repl-serializer.js', { type: 'global', strict: true })
   if (serializerResult.error) {
     const error = errorHandleToSerializedUnbounded(context, serializerResult.error)
@@ -244,7 +247,15 @@ export async function executeQuickJSScript(
 
   function errorHandleToSerialized(errorHandle: QuickJSHandle) {
     try {
-      return serializeBridgeError(dumpBoundedGuestValue(errorHandle))
+      const dumped = dumpBoundedGuestValue(errorHandle)
+      if (
+        typeof dumped === 'object' &&
+        dumped !== null &&
+        typeof (dumped as { serializationError?: unknown }).serializationError === 'string'
+      ) {
+        return serializeBridgeError(new Error((dumped as { serializationError: string }).serializationError))
+      }
+      return serializeBridgeError(dumped)
     } catch (error) {
       return serializeBridgeError(error)
     }
@@ -257,9 +268,8 @@ export async function executeQuickJSScript(
   function dumpBoundedGuestValue(handle: QuickJSHandle): unknown {
     const serialized = context.callFunction(serializerHandle, context.undefined, [handle])
     if (serialized.error) {
-      const error = errorHandleToSerialized(serialized.error)
       disposeQuietly(serialized.error)
-      return { serializationError: error.message }
+      return { serializationError: 'QuickJS guest value could not be serialized' }
     }
     try {
       return context.dump(serialized.value)
@@ -317,9 +327,9 @@ export async function executeQuickJSScript(
       throw new Error(`Invalid QuickJS host function name: ${name}`)
     }
     const fn = context.newFunction(name, (...argHandles) => {
-      const deferred = context.newPromise()
-      activeDisposables.add(deferred)
       const args = argHandles.map(handle => guestInputFromHandle(handle))
+      const deferred = context.newPromise()
+      activeDeferreds.add(deferred)
       void Promise.resolve()
         .then(() => implementation(args))
         .then(value => {
@@ -340,8 +350,7 @@ export async function executeQuickJSScript(
           disposeQuietly(errorHandle)
         })
         .finally(() => {
-          activeDisposables.delete(deferred)
-          disposeQuietly(deferred)
+          activeDeferreds.delete(deferred)
         })
       return deferred.handle
     })
@@ -460,6 +469,19 @@ export async function executeQuickJSScript(
     }
   } finally {
     tornDown = true
+    for (const deferred of activeDeferreds) {
+      try {
+        const errorHandle = context.newError({
+          name: 'Error',
+          message: 'REPL execution ended before an inner tool call completed',
+        })
+        deferred.reject(errorHandle)
+        disposeQuietly(errorHandle)
+      } catch {
+        // Teardown must continue even when a deferred was already settled.
+      }
+    }
+    activeDeferreds.clear()
     for (const disposable of activeDisposables) disposeQuietly(disposable)
     activeDisposables.clear()
     disposeQuietly(context)

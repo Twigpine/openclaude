@@ -44,6 +44,18 @@ describe('serializeBridgeValue', () => {
     expect(String(wide.a).length + String(wide.b).length + String(wide.c).length).toBeLessThan(180)
   })
 
+  test('applies string budgets to object keys as well as values', () => {
+    const longKey = 'k'.repeat(10_000)
+    const output = serializeBridgeValue({ [longKey]: 'value' }, {
+      maxStringLength: 100,
+      maxTotalStringLength: 120,
+    }) as Record<string, unknown>
+    const key = Object.keys(output)[0] ?? ''
+    expect(key.length).toBeLessThan(150)
+    expect(key).toContain('truncated')
+    expect(JSON.stringify(output).length).toBeLessThan(500)
+  })
+
   test('bounds strings, arrays, objects, and depth', () => {
     const deep: Record<string, unknown> = {}
     let cursor = deep
@@ -74,5 +86,18 @@ describe('serializeBridgeError', () => {
     const output = serializeBridgeError(new Error('x'.repeat(100)), { maxStringLength: 20 })
     expect(output.name).toBe('Error')
     expect(output.message).toContain('truncated')
+  })
+
+  test('preserves already serialized guest error identity', () => {
+    const output = serializeBridgeError({
+      name: 'TypeError',
+      message: 'useful message',
+      stack: 'stack text',
+    })
+    expect(output).toEqual({
+      name: 'TypeError',
+      message: 'useful message',
+      stack: 'stack text',
+    })
   })
 })

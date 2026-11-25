@@ -903,6 +903,7 @@ function collectCandidatesByMessage(
     if (message.type === 'user') {
       current.push(...collectCandidatesFromMessage(message))
     } else if (message.type === 'assistant') {
+      if (message.isVirtual === true) continue
       if (!seenAsstIds.has(message.message.id)) {
         flush()
         seenAsstIds.add(message.message.id)

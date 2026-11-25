@@ -1086,6 +1086,10 @@ async function* runPowerShellCommand({
     });
   }
   const shouldAutoBackground = foregroundOnly !== true && !isBackgroundTasksDisabled && isAutobackgroundingAllowed(command);
+  if (run_in_background === true && foregroundOnly === true) {
+    throw new Error('run_in_background is unavailable inside REPL foreground scripts')
+  }
+
   const powershellPath = await getCachedPowerShellPath();
   if (!powershellPath) {
     // Pre-flight failure: pwsh not installed. Return code 0 so call() surfaces
@@ -1215,10 +1219,6 @@ async function* runPowerShellCommand({
   // Handle Claude asking to run it in the background explicitly
   // When explicitly requested via run_in_background, always honor the request
   // regardless of the command type (isAutobackgroundingAllowed only applies to automatic backgrounding)
-  if (run_in_background === true && foregroundOnly === true) {
-    throw new Error('run_in_background is unavailable inside REPL foreground scripts');
-  }
-
   if (run_in_background === true && !isBackgroundTasksDisabled) {
     const shellId = await spawnBackgroundTask();
     logEvent('tengu_powershell_command_explicitly_backgrounded', {

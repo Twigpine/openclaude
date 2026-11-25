@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react'
+import { stripVTControlCharacters } from 'node:util'
 import { useAppState } from 'src/state/AppState.js'
 import { getOriginalCwd } from '../../bootstrap/state.js'
 import { Box, Text } from '../../ink.js'
@@ -9,6 +10,44 @@ import { PermissionPrompt, type PermissionPromptOption } from './PermissionPromp
 import { createSimplePermissionHandlers } from './simplePermissionActions.js'
 
 type ReplOptionValue = 'yes' | 'yes-dont-ask-again' | 'yes-full-access' | 'no'
+
+const PERMISSION_PREVIEW_BUDGET_CHARS = 8_000
+const PERMISSION_PREVIEW_HEAD_CHARS = 6_000
+const PERMISSION_PREVIEW_TAIL_CHARS = 1_500
+
+function stripUnsafeControlCharacters(value: string): string {
+  return stripVTControlCharacters(value).replace(
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,
+    '�',
+  )
+}
+
+export function formatReplPermissionPreview(code: string): {
+  text: string
+  lineCount: number
+  characterCount: number
+  omittedCharacters: number
+} {
+  const sanitized = stripUnsafeControlCharacters(code)
+  const lineCount = sanitized.length === 0 ? 0 : sanitized.split('\n').length
+  if (sanitized.length <= PERMISSION_PREVIEW_BUDGET_CHARS) {
+    return {
+      text: sanitized,
+      lineCount,
+      characterCount: code.length,
+      omittedCharacters: 0,
+    }
+  }
+  const head = sanitized.slice(0, PERMISSION_PREVIEW_HEAD_CHARS)
+  const tail = sanitized.slice(-PERMISSION_PREVIEW_TAIL_CHARS)
+  const omittedCharacters = sanitized.length - head.length - tail.length
+  return {
+    text: `${head}\n... [omitted ${omittedCharacters} middle characters] ...\n${tail}`,
+    lineCount,
+    characterCount: code.length,
+    omittedCharacters,
+  }
+}
 
 export function REPLPermissionRequest({
   toolUseConfirm,
@@ -21,6 +60,7 @@ export function REPLPermissionRequest({
   )
   const input = toolUseConfirm.input as { code?: unknown }
   const code = typeof input.code === 'string' ? input.code : ''
+  const preview = useMemo(() => formatReplPermissionPreview(code), [code])
   const userFacingName = toolUseConfirm.tool.userFacingName(toolUseConfirm.input as never)
 
   const { onSelect, onCancel } = createSimplePermissionHandlers(
@@ -87,11 +127,15 @@ export function REPLPermissionRequest({
       header={
         <Box flexDirection="column" paddingX={2} paddingY={1}>
           <Text>
-            {userFacingName} requested permission to execute this exact JavaScript script.
+            {userFacingName} requested permission to execute this JavaScript script.
             Inner tools will still use their normal permission checks.
           </Text>
           <Text dimColor>{truncateToLines(toolUseConfirm.description, 3)}</Text>
-          <Text>{code}</Text>
+          <Text dimColor>
+            {preview.lineCount} lines, {preview.characterCount} characters
+            {preview.omittedCharacters > 0 ? `, preview omits ${preview.omittedCharacters} middle characters` : ''}
+          </Text>
+          <Text>{preview.text}</Text>
         </Box>
       }
       options={options}

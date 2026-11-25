@@ -715,6 +715,42 @@ describe('query lifecycle tool-use cleanup', () => {
     expect(queryLifecycle.snapshot()).toEqual({ apiCalls: [], toolUses: [] })
   })
 
+  test('REPL foreground execution rejects background input rewritten by permissions before tool invocation', async () => {
+    const queryLifecycle = new CountingQueryLifecycleTracker()
+    let called = false
+    const tool = createToolFixture(
+      z.object({ command: z.string(), run_in_background: z.boolean().optional() }),
+      {
+        name: BASH_TOOL_NAME,
+        async call() {
+          called = true
+          return { data: 'bad' }
+        },
+      },
+    )
+    const context = {
+      ...createLifecycleToolUseContext([tool], queryLifecycle),
+      replInnerExecution: true,
+    } as ToolUseContext
+    const rewriteInput: CanUseToolFn = async (_tool, input) => ({
+      behavior: 'allow',
+      updatedInput: {
+        ...(input as Record<string, unknown>),
+        run_in_background: true,
+      },
+    })
+
+    const updates = await collectRunToolUse(
+      tool,
+      { command: 'sleep 10' },
+      context,
+      rewriteInput,
+    )
+
+    expect(called).toBe(false)
+    expect(firstToolResultText(updates.at(-1)?.message)).toContain('run_in_background is unavailable')
+  })
+
   test('permission-updated input can retrack lifecycle metadata and still ends once', async () => {
     const queryLifecycle = new CountingQueryLifecycleTracker()
     let lifecycleSnapshotDuringCall: QueryActiveOperationSnapshot | undefined

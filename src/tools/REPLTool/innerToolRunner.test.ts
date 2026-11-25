@@ -51,6 +51,7 @@ function allowCanUseTool(calls: string[] = []): CanUseToolFn {
 function createRunner(tools: readonly Tool[], options: {
   caps?: ConstructorParameters<typeof ReplInnerToolRunner>[0]['caps']
   onVirtualMessage?: (message: Message) => void
+  onProgress?: (message: Message) => void
   canUseTool?: CanUseToolFn
   abortSignal?: AbortSignal
 } = {}) {
@@ -62,6 +63,7 @@ function createRunner(tools: readonly Tool[], options: {
     promptWaitTracker: new PromptWaitTracker(),
     caps: options.caps,
     onVirtualMessage: options.onVirtualMessage,
+    onProgress: options.onProgress,
     abortSignal: options.abortSignal,
   })
 }
@@ -88,6 +90,42 @@ describe('ReplInnerToolRunner', () => {
     expect(permissionCalls).toEqual(['FixtureRead'])
     expect(messages.some(message => message.type === 'assistant' && message.isVirtual)).toBe(true)
     expect(messages.some(message => message.type === 'user' && message.isVirtual)).toBe(true)
+  })
+
+  test('attributes emitted progress to the owning inner tool invocation', async () => {
+    resetDoomLoop()
+    const messages: Message[] = []
+    const progressMessages: Message[] = []
+    const tool = createToolFixture(z.object({}), {
+      name: 'FixtureProgress',
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      async call(_input, _context, _canUseTool, _parentMessage, onProgress) {
+        onProgress?.({
+          toolUseID: 'fixture-progress-event',
+          data: { type: 'mcp_progress', progressMessage: 'working' },
+        })
+        return { data: 'done' }
+      },
+    })
+    const runner = createRunner([tool], {
+      onVirtualMessage: message => messages.push(message),
+      onProgress: message => progressMessages.push(message),
+    })
+
+    await expect(runner.callTool('FixtureProgress', {})).resolves.toBe('done')
+    const assistant = messages.find(message => message.type === 'assistant')
+    const toolUseId = assistant?.type === 'assistant' && Array.isArray(assistant.message.content)
+      ? assistant.message.content[0]?.type === 'tool_use'
+        ? assistant.message.content[0].id
+        : undefined
+      : undefined
+    const emitted = progressMessages[0]
+    if (!toolUseId) throw new Error('Expected inner tool use provenance')
+    expect(emitted?.type).toBe('progress')
+    if (emitted?.type !== 'progress') throw new Error('Expected progress provenance')
+    expect(emitted.parentToolUseID).toBe(toolUseId)
+    expect((emitted.data as Record<string, unknown>).replInnerToolName).toBe('FixtureProgress')
   })
 
   test('lower-case primitive aliases resolve to canonical tools without replacing exact names', async () => {
@@ -289,6 +327,79 @@ describe('ReplInnerToolRunner', () => {
     const result = await runner.callTool('ImageFixture', {}) as Record<string, unknown>
     expect(result.data).toBe('[attachment payload omitted from REPL result]')
     expect(result.mimeType).toBe('image/png')
+  })
+
+  test('omits nested FileRead image and PDF payloads from guest results', async () => {
+    resetDoomLoop()
+    const tool = createToolFixture(z.object({}), {
+      name: 'FileReadFixture',
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      async call() {
+        return {
+          data: {
+            type: 'image',
+            file: {
+              base64: 'a'.repeat(1000),
+              type: 'image/png',
+              originalSize: 1000,
+            },
+          },
+        }
+      },
+    })
+    const runner = createRunner([tool])
+    const result = await runner.callTool('FileReadFixture', {}) as {
+      file: { base64: string; type: string; originalSize: number }
+    }
+    expect(result.file.base64).toBe('[attachment payload omitted from REPL result]')
+    expect(result.file.type).toBe('image/png')
+    expect(result.file.originalSize).toBe(1000)
+
+    const pdfTool = createToolFixture(z.object({}), {
+      name: 'PdfReadFixture',
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      async call() {
+        return {
+          data: {
+            type: 'pdf',
+            file: {
+              filePath: '/tmp/example.pdf',
+              base64: 'c'.repeat(1000),
+              originalSize: 1000,
+            },
+          },
+        }
+      },
+    })
+    const pdfRunner = createRunner([pdfTool])
+    const pdfResult = await pdfRunner.callTool('PdfReadFixture', {}) as {
+      file: { base64: string; filePath: string }
+    }
+    expect(pdfResult.file.base64).toBe('[attachment payload omitted from REPL result]')
+    expect(pdfResult.file.filePath).toBe('/tmp/example.pdf')
+  })
+
+  test('caps initial virtual assistant input provenance while preserving the tool use id', async () => {
+    resetDoomLoop()
+    const messages: Message[] = []
+    const tool = createToolFixture(z.object({ command: z.string() }), {
+      name: BASH_TOOL_NAME,
+      async call() { return { data: 'ok' } },
+    })
+    const runner = createRunner([tool], {
+      onVirtualMessage: message => messages.push(message),
+    })
+    const longKey = 'k'.repeat(20_000)
+    await runner.callTool(BASH_TOOL_NAME, { command: `echo ${'x'.repeat(20_000)}`, [longKey]: 'extra' })
+    const assistant = messages.find(message => message.type === 'assistant')
+    const block = assistant?.message.content[0] as { id?: string; input?: { command?: string } }
+    expect(block.id).toStartWith('repl_tool_')
+    expect(block.input?.command?.length).toBeLessThan(5_000)
+    expect(block.input?.command).toContain('truncated')
+    expect(JSON.stringify(assistant)).not.toContain('[undefined]')
+    expect(JSON.stringify(assistant)).not.toContain(longKey)
   })
 
   test('rejects background execution introduced by permission input rewriting', async () => {

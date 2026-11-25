@@ -18,6 +18,7 @@ import { ExitPlanModeV2Tool } from '../../tools/ExitPlanModeTool/ExitPlanModeV2T
 import { FILE_EDIT_TOOL_NAME } from '../../tools/FileEditTool/constants.js'
 import { FILE_WRITE_TOOL_NAME } from '../../tools/FileWriteTool/constants.js'
 import { PowerShellTool } from '../../tools/PowerShellTool/PowerShellTool.js'
+import { REPLTool } from '../../tools/REPLTool/REPLTool.js'
 import { getPlatform } from '../platform.js'
 import {
   getActiveSessionPlanFilePath,
@@ -271,6 +272,25 @@ function mcpTool(name: string, readOnlyHint?: boolean) {
     },
   })
 }
+
+describe('auto mode REPL classifier bounds', () => {
+  test('requires manual approval when the script exceeds the classifier input budget', async () => {
+    const result = await hasPermissionsToUseTool(
+      REPLTool,
+      { code: `return ${'x'.repeat(32_001)}` },
+      contextFor('auto'),
+      assistantMessage,
+      'repl-tool-use-id',
+    )
+
+    expect(result.behavior).toBe('ask')
+    if (result.behavior !== 'ask') {
+      throw new Error(`Expected ask decision, received ${result.behavior}`)
+    }
+    expect(result.message).toContain('require manual approval')
+    expect(result.message).toContain('32,000')
+  })
+})
 
 describe('plan mode mechanical read-only policy', () => {
   test.each([

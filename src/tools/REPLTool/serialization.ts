@@ -33,14 +33,18 @@ export function serializeBridgeValue(
   let nodes = 0
   let stringChars = 0
 
+  function capString(value: string): string {
+    const serialized = truncateString(value, Math.min(maxStringLength, Math.max(0, maxTotalStringLength - stringChars)))
+    stringChars += serialized.length
+    return serialized
+  }
+
   function serializeInner(current: unknown, depth: number): unknown {
     if (nodes >= maxTotalNodes) return '[SerializationBudget]'
     nodes += 1
     if (current === null) return null
     if (typeof current === 'string') {
-      const serialized = truncateString(current, Math.min(maxStringLength, Math.max(0, maxTotalStringLength - stringChars)))
-      stringChars += serialized.length
-      return serialized
+      return capString(current)
     }
     if (typeof current === 'number' || typeof current === 'boolean') return current
     if (typeof current === 'undefined') return '[undefined]'
@@ -79,7 +83,7 @@ export function serializeBridgeValue(
       const out: Record<string, unknown> = {}
       const entries = Object.entries(current as Record<string, unknown>)
       for (const [key, entryValue] of entries.slice(0, maxObjectProperties)) {
-        out[key] = serializeInner(entryValue, depth + 1)
+        out[capString(key)] = serializeInner(entryValue, depth + 1)
       }
       if (entries.length > maxObjectProperties) {
         out.__truncated__ = `${entries.length - maxObjectProperties} properties omitted`
@@ -107,6 +111,18 @@ export function serializeBridgeError(
       name: error.name || 'Error',
       message: truncateString(error.message || String(error), maxStringLength),
       ...(error.stack ? { stack: truncateString(error.stack, maxStringLength) } : {}),
+    }
+  }
+  if (typeof error === 'object' && error !== null) {
+    const serialized = error as { name?: unknown; message?: unknown; stack?: unknown }
+    if (typeof serialized.name === 'string' && typeof serialized.message === 'string') {
+      return {
+        name: truncateString(serialized.name || 'Error', maxStringLength),
+        message: truncateString(serialized.message, maxStringLength),
+        ...(typeof serialized.stack === 'string'
+          ? { stack: truncateString(serialized.stack, maxStringLength) }
+          : {}),
+      }
     }
   }
   return {

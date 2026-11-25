@@ -1,15 +1,22 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { z } from 'zod/v4'
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
+import type { ProgressMessage } from '../../types/message.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import { getSessionId } from '../../bootstrap/state.js'
 import { runToolUse, type MessageUpdateLazy } from '../../services/tools/toolExecution.js'
 import { getDefaultAppState } from '../../state/AppStateStore.js'
+import { createToolFixture } from '../../test/toolFixtures.js'
 import { getEmptyToolPermissionContext, type ToolUseContext } from '../../Tool.js'
 import { getAllBaseTools, getTools } from '../../tools.js'
 import { createAssistantMessage } from '../../utils/messages.js'
 import { REPLTool } from './REPLTool.js'
 import { isReplModeEnabled, setReplModeEnabledForSession } from './constants.js'
-import { renderToolResultMessage } from './UI.js'
+import {
+  renderToolResultMessage,
+  renderToolUseProgressMessage,
+  selectLatestReplProgressMessages,
+} from './UI.js'
 
 afterEach(() => setReplModeEnabledForSession(false))
 
@@ -248,6 +255,162 @@ describe('REPLTool', () => {
     expect(JSON.stringify(toolResult)).toContain('[redacted script]')
     expect(JSON.stringify(toolResult)).not.toContain('original-script-result')
     expect(JSON.stringify(toolResult)).not.toContain(code)
+  })
+
+  test('PostToolUse output replacement redacts virtual hook attachment and system provenance', async () => {
+    const code = "await Bash({command: 'printf inner-tool-$((1))ecret'}); return 'done'"
+    const innerHookJson = JSON.stringify({
+      systemMessage: 'inner-system-secret',
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse',
+        additionalContext: 'inner-additional-secret',
+      },
+    })
+    const replacement = {
+      status: 'completed',
+      code: '[redacted script]',
+      result: '[redacted result]',
+    }
+    const replacementJson = JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse',
+        updatedToolOutput: replacement,
+      },
+    })
+    const sessionHooks = new Map([
+      [
+        getSessionId(),
+        {
+          hooks: {
+            PostToolUse: [
+              {
+                matcher: 'Bash',
+                hooks: [
+                  {
+                    hook: {
+                      type: 'command',
+                      command: `printf '%s' '${innerHookJson}'`,
+                    },
+                  },
+                ],
+              },
+              {
+                matcher: 'REPL',
+                hooks: [
+                  {
+                    hook: {
+                      type: 'command',
+                      command: `printf '%s' '${replacementJson}'`,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    ])
+    const context = createContext([REPLTool], sessionHooks)
+    const updates: MessageUpdateLazy[] = []
+    for await (const update of runToolUse(
+      {
+        type: 'tool_use',
+        id: 'repl-hook-provenance-test',
+        name: 'REPL',
+        input: { code },
+      } as ToolUseBlock,
+      parentFor(code),
+      allow,
+      context,
+    )) {
+      updates.push(update)
+    }
+
+    const serialized = JSON.stringify(updates.map(update => update.message).filter(message => message.type !== 'progress'))
+    expect(serialized).toContain('[inner tool output redacted by REPL PostToolUse hook]')
+    expect(serialized).not.toContain('inner-tool-1ecret')
+    expect(serialized).not.toContain('inner-additional-secret')
+    expect(serialized).not.toContain('inner-system-secret')
+  })
+
+  test('forwards progress with the owning inner invocation id and original event id', async () => {
+    const progressTool = createToolFixture(z.object({}), {
+      name: 'mcp__fixture__progress',
+      isMcp: true,
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      async call(_input, _context, _canUseTool, _parentMessage, onProgress) {
+        onProgress?.({
+          toolUseID: 'fixture-progress-event',
+          data: { type: 'mcp_progress', progressMessage: 'working' },
+        })
+        return { data: 'done' }
+      },
+    })
+    const progressEvents: Array<{ toolUseID: string; data: Record<string, unknown> }> = []
+    const result = await REPLTool.call(
+      { code: "await mcp__fixture__progress({}); return 'done'" },
+      createContext([progressTool]),
+      allow,
+      parentFor('return done'),
+      progress => progressEvents.push(progress as { toolUseID: string; data: Record<string, unknown> }),
+    )
+
+    expect(result.data.status).toBe('completed')
+    expect(progressEvents).toHaveLength(1)
+    const data = progressEvents[0]?.data ?? {}
+    expect(data.replInnerProgressEventID).toBe('fixture-progress-event')
+    expect(data.replInnerToolUseID).toBeString()
+    expect(data.replInnerToolUseID).not.toBe('fixture-progress-event')
+    expect(data.replInnerToolName).toBe('mcp__fixture__progress')
+  })
+
+  test('groups interleaved inner progress by owning tool call', () => {
+    const progress = (
+      innerId: string,
+      toolName: string,
+      data: Record<string, unknown>,
+      eventId: string,
+    ) => ({
+      type: 'progress',
+      toolUseID: eventId,
+      parentToolUseID: 'outer-repl',
+      data: {
+        ...data,
+        replInnerToolUseID: innerId,
+        replInnerToolName: toolName,
+      },
+      uuid: eventId,
+      timestamp: new Date(0).toISOString(),
+    }) as unknown as ProgressMessage
+    const events = [
+      progress('inner-bash', 'Bash', { type: 'bash_progress', output: 'bash old' }, 'event-1'),
+      progress('inner-mcp', 'mcp__server__search', { type: 'mcp_progress', progressMessage: 'mcp working' }, 'event-2'),
+      progress('inner-bash', 'Bash', { type: 'bash_progress', output: 'bash new' }, 'event-3'),
+      progress('inner-powershell', 'PowerShell', { type: 'powershell_progress', output: 'powershell working' }, 'event-4'),
+    ]
+
+    const latest = selectLatestReplProgressMessages(events)
+    expect(latest).toHaveLength(3)
+    expect(latest.map(message => message.data.replInnerToolUseID)).toEqual([
+      'inner-mcp',
+      'inner-bash',
+      'inner-powershell',
+    ])
+    expect(latest.find(message => message.data.replInnerToolUseID === 'inner-bash')?.data.output).toBe('bash new')
+
+    const rendered = JSON.stringify(renderToolUseProgressMessage(events, { verbose: false }))
+    expect(rendered).toContain('Bash')
+    expect(rendered).toContain('PowerShell')
+    expect(rendered).toContain('mcp__server__search')
+    expect(rendered).toContain('bash new')
+    expect(rendered).not.toContain('bash old')
+  })
+
+  test('documents PowerShell availability and alias in the REPL prompt', async () => {
+    const prompt = await REPLTool.prompt()
+    expect(prompt).toContain('PowerShell when enabled')
+    expect(prompt).toContain('powerShell')
   })
 
   test('registers only when session mode is active and hides primitives only then', () => {

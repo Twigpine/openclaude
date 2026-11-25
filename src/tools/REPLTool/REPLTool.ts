@@ -132,7 +132,8 @@ export const REPLTool = buildTool({
           toolUseID: progressToolUseID,
           data: {
             ...message.data,
-            replInnerToolUseID: message.toolUseID,
+            replInnerToolUseID: message.parentToolUseID,
+            replInnerProgressEventID: message.toolUseID,
           },
         })
       },
