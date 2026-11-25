@@ -678,9 +678,15 @@ describe('ReplInnerToolRunner', () => {
       }
     }).executionLane
     const originalReleaseRead = lane.releaseRead.bind(lane)
+    let abortAfterWriteGrant = false
     lane.releaseRead = () => {
+      const writersBefore = lane.waiters.filter(waiter => waiter.kind === 'write').length
       originalReleaseRead()
-      runner.abort()
+      const writersAfter = lane.waiters.filter(waiter => waiter.kind === 'write').length
+      if (writersAfter < writersBefore) {
+        abortAfterWriteGrant = true
+        runner.abort()
+      }
     }
 
     try {
@@ -692,6 +698,7 @@ describe('ReplInnerToolRunner', () => {
 
       await first.catch(() => {})
       await expect(second).rejects.toThrow('REPL execution aborted')
+      expect(abortAfterWriteGrant).toBe(true)
       expect(events).not.toContain('start:two')
     } finally {
       lane.releaseRead = originalReleaseRead
