@@ -646,9 +646,7 @@ export async function executeQuickJSScript(
     if (settlementFailure) {
       return {
         status: 'error',
-        error: typeof settlementFailure === 'object' && settlementFailure !== null && 'message' in settlementFailure
-        ? settlementFailure as ReturnType<typeof serializeBridgeError>
-        : serializeBridgeError(settlementFailure),
+        error: serializeBridgeError(settlementFailure),
         stdout: stdoutText(),
         stderr: stderrText(),
         durationMs: Date.now() - startedAt,

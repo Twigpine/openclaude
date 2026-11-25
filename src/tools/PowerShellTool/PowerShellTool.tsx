@@ -1087,7 +1087,7 @@ async function* runPowerShellCommand({
   }
   const shouldAutoBackground = foregroundOnly !== true && !isBackgroundTasksDisabled && isAutobackgroundingAllowed(command);
   if (run_in_background === true && foregroundOnly === true) {
-    throw new Error('run_in_background is unavailable inside REPL foreground scripts')
+    throw new Error('run_in_background is unavailable inside REPL foreground scripts');
   }
 
   const powershellPath = await getCachedPowerShellPath();

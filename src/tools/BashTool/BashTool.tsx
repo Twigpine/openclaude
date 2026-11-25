@@ -1161,7 +1161,7 @@ async function* runShellCommand({
   // and when background tasks are not disabled
   const shouldAutoBackground = foregroundOnly !== true && !isBackgroundTasksDisabled && isAutobackgroundingAllowed(command);
   if (run_in_background === true && foregroundOnly === true) {
-    throw new Error('run_in_background is unavailable inside REPL foreground scripts')
+    throw new Error('run_in_background is unavailable inside REPL foreground scripts');
   }
 
   const shellCommand = await exec(command, abortController.signal, 'bash', {

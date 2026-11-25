@@ -608,10 +608,10 @@ export const AgentTool = buildTool({
         `or GITHUB_COPILOT_OPTIMIZATION_DISABLED=1.`,
       );
     }
-    const replInnerExecution = toolUseContext.replInnerExecution === true
-    const asyncRequiredByAgentOrRuntime = selectedAgent.background === true || isCoordinator || forceAsync || assistantForceAsync || (proactiveModule?.isProactiveActive() ?? false)
+    const replInnerExecution = toolUseContext.replInnerExecution === true;
+    const asyncRequiredByAgentOrRuntime = selectedAgent.background === true || isCoordinator || forceAsync || assistantForceAsync || (proactiveModule?.isProactiveActive() ?? false);
     if (replInnerExecution && asyncRequiredByAgentOrRuntime && !forceSyncCopilot && !forcePlanModeSync && !isBackgroundTasksDisabled) {
-      throw new Error(`Agent '${selectedAgent.agentType}' requires background execution, which is unavailable inside a foreground REPL script.`)
+      throw new Error(`Agent '${selectedAgent.agentType}' requires background execution, which is unavailable inside a foreground REPL script.`);
     }
     const shouldRunAsync = forceSyncCopilot || forcePlanModeSync || replInnerExecution
       ? false

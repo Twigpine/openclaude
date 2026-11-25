@@ -1,7 +1,6 @@
 import type { Tool, ToolPermissionContext, Tools } from '../../Tool.js'
 import { filterToolsByDenyRules } from '../../tools.js'
 import { POWERSHELL_TOOL_NAME } from '../PowerShellTool/toolName.js'
-import { isLegalGuestIdentifier } from './guestIdentifiers.js'
 import { getReplPrimitiveTools } from './primitiveTools.js'
 
 export const REPL_NON_PRIMITIVE_ALLOWLIST = new Set([
