@@ -84,6 +84,16 @@ describe('appendMessageTagToUserMessage', () => {
       }),
       isVirtual: true,
     }
+    const innerHookAttachment = {
+      ...createAttachmentMessage({
+        type: 'hook_additional_context',
+        content: ['inner-hook-should-not-enter-api'],
+        hookName: 'PostToolUse:Read',
+        toolUseID: 'inner-use-1',
+        hookEvent: 'PostToolUse',
+      }),
+      isVirtual: true,
+    }
     const outerResult = createUserMessage({
       content: [
         {
@@ -99,6 +109,7 @@ describe('appendMessageTagToUserMessage', () => {
       outerUse,
       innerUse,
       innerResult,
+      innerHookAttachment,
       outerResult,
     ])
     const serialized = JSON.stringify(normalized)
@@ -106,6 +117,7 @@ describe('appendMessageTagToUserMessage', () => {
     expect(serialized).toContain('REPL')
     expect(serialized).not.toContain('InnerUniqueTool')
     expect(serialized).not.toContain('inner-should-not-enter-api')
+    expect(serialized).not.toContain('inner-hook-should-not-enter-api')
   })
 
   test(

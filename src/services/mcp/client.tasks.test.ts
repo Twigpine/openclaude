@@ -127,6 +127,36 @@ describe('MCP server tasks', () => {
     reset()
   })
 
+  test('foreground REPL calls use the plain path and never register server tasks', async () => {
+    reset()
+    const state = makeState()
+    const request = vi.fn(async (req: { method: string }) => {
+      if (req.method === 'tools/list') {
+        return { tools: [SLOW_TOOL_LIST] }
+      }
+      throw new Error('task-augmented request must not be sent')
+    })
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'plain result' }],
+    }))
+    const connection = makeConnection({ request, callTool })
+
+    const result = await callMCPToolWithUrlElicitationRetry({
+      client: connection,
+      clientConnection: connection,
+      tool: 'slow-tool',
+      args: {},
+      signal: new AbortController().signal,
+      setAppState: state.set,
+      allowServerTasks: false,
+    })
+
+    expect(callTool).toHaveBeenCalledTimes(1)
+    expect(result.content).toBeTruthy()
+    expect(Object.keys(state.get().tasks)).toHaveLength(0)
+    reset()
+  })
+
   test('non-task tool still takes the plain tools/call path', async () => {
     reset()
     const state = makeState()

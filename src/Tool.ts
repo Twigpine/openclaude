@@ -200,6 +200,8 @@ export type ToolUseContext = {
     refreshTools?: () => Tools
     /** Per-agent provider override from agentRouting config */
     providerOverride?: { model: string; baseURL: string; apiKey: string }
+    /** Primitive tool names the current session contract permits inside Code Mode. */
+    replPrimitiveToolNames?: readonly string[]
   }
   /** Shared by copies with the same options; internal options clones retain separate snapshots. */
   queryModelSelection?: {
@@ -225,6 +227,8 @@ export type ToolUseContext = {
   toolResultAbortSignal?: AbortSignal
   /** True for canonical tool calls scoped inside a foreground REPL script. */
   replInnerExecution?: boolean
+  /** Human prompt clock for the foreground REPL script that owns this call. */
+  replPromptWaitTracker?: { begin(): void; end(): void }
   readFileState: FileStateCache
   getAppState(): AppState
   /** Returns untransformed root state when this context belongs to an agent. */

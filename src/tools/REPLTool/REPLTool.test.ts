@@ -267,4 +267,37 @@ describe('REPLTool', () => {
     expect(nestedAgentTools.some(tool => tool.name === 'Read')).toBe(true)
     expect(nestedAgentTools.some(tool => tool.name === 'REPL')).toBe(false)
   })
+
+  test('marks runtime failure as a protocol tool error and exposes the full script to classifiers', () => {
+    const block = REPLTool.mapToolResultToToolResultBlockParam({ status: 'timeout' }, 'toolu_timeout')
+    expect(block.is_error).toBe(true)
+    const longCode = `// ${'x'.repeat(20_000)}
+return 1`
+    expect(REPLTool.toAutoClassifierInput({ code: longCode })).toBe(longCode)
+  })
+
+  test('uses authoritative input rather than hook-mutated output code in verbose rendering', () => {
+    const rendered = renderToolResultMessage(
+      { status: 'completed', code: 'return "mutated"', result: 1 },
+      [],
+      { verbose: true, input: { code: 'return "authoritative"' } },
+    )
+    const serialized = JSON.stringify(rendered)
+    expect(serialized).toContain('authoritative')
+    expect(serialized).not.toContain('mutated')
+  })
+
+  test('fails closed when script completion leaves inner tool work unawaited', async () => {
+    const code = "Bash({command: 'sleep 5'}); return 'done'"
+    const result = await REPLTool.call(
+      { code },
+      createContext(),
+      allow,
+      parentFor(code),
+      undefined,
+    )
+    expect(result.data.status).toBe('error')
+    expect(result.data.error?.message).toContain('without awaiting all inner tool calls')
+    expect(result.data.result).not.toBe('done')
+  })
 })

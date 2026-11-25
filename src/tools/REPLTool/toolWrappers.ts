@@ -41,12 +41,19 @@ function addToolOnce(tools: Tool[], seen: Set<string>, tool: Tool): void {
 export function buildReplToolInventory(input: {
   sessionTools: Tools
   permissionContext?: ToolPermissionContext
+  allowedPrimitiveNames?: readonly string[]
 }): Tools {
   const inventory: Tool[] = []
   const seen = new Set<string>()
+  const allowedPrimitiveNames = input.allowedPrimitiveNames === undefined
+    ? undefined
+    : new Set(input.allowedPrimitiveNames)
+  const unrestrictedPrimitives = [...getReplPrimitiveTools()].filter(tool =>
+    allowedPrimitiveNames === undefined || allowedPrimitiveNames.has(tool.name),
+  )
   const primitives = input.permissionContext
-    ? filterToolsByDenyRules([...getReplPrimitiveTools()], input.permissionContext)
-    : [...getReplPrimitiveTools()]
+    ? filterToolsByDenyRules(unrestrictedPrimitives, input.permissionContext)
+    : unrestrictedPrimitives
 
   for (const tool of primitives) {
     if (tool.isEnabled()) addToolOnce(inventory, seen, tool)

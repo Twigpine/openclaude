@@ -26,7 +26,11 @@ export function isReplModeEligibleForSession(): boolean {
   return replModeEligibleForSession
 }
 
-export function setReplModeForConversation(enabled: boolean): void {
+export function getReplModeConversationOverride(): boolean | undefined {
+  return replModeConversationOverride
+}
+
+export function setReplModeForConversation(enabled: boolean | undefined): void {
   replModeConversationOverride = enabled
 }
 

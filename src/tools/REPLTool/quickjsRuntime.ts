@@ -41,6 +41,76 @@ const DEFAULT_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024
 const DEFAULT_STACK_SIZE_BYTES = 1024 * 1024
 const DEFAULT_OUTPUT_LIMIT = 64 * 1024
 
+
+const BOUNDED_GUEST_SERIALIZER_SOURCE = `
+(function() {
+  const maxStringLength = 16000
+  const maxDepth = 8
+  const maxArrayLength = 200
+  const maxObjectProperties = 200
+  const maxTotalNodes = 2000
+  const maxTotalStringChars = 128000
+  function truncateString(value, remaining) {
+    const maxLength = Math.min(maxStringLength, Math.max(0, remaining))
+    if (value.length <= maxLength) return value
+    return value.slice(0, maxLength) + '... [truncated ' + (value.length - maxLength) + ' chars]'
+  }
+  return function serializeReplValue(value) {
+    let nodes = 0
+    let stringChars = 0
+    const seen = new WeakSet()
+    function serializeInner(current, depth) {
+      if (nodes >= maxTotalNodes) return '[SerializationBudget]'
+      nodes += 1
+      if (current === null) return null
+      const type = typeof current
+      if (type === 'string') {
+        const serialized = truncateString(current, maxTotalStringChars - stringChars)
+        stringChars += serialized.length
+        return serialized
+      }
+      if (type === 'number' || type === 'boolean') return current
+      if (type === 'undefined') return '[undefined]'
+      if (type === 'bigint') return current.toString() + 'n'
+      if (type === 'symbol') return String(current)
+      if (type === 'function') return '[function' + (current.name ? ' ' + current.name : '') + ']'
+      if (type !== 'object') return String(current)
+      if (seen.has(current)) return '[Circular]'
+      if (depth >= maxDepth) return '[MaxDepth]'
+      seen.add(current)
+      if (current instanceof Date) return current.toISOString()
+      if (current instanceof Error) {
+        return {
+          name: current.name || 'Error',
+          message: serializeInner(current.message || String(current), depth + 1),
+          ...(current.stack ? { stack: serializeInner(current.stack, depth + 1) } : {}),
+        }
+      }
+      if (ArrayBuffer.isView(current)) {
+        return { type: current.constructor && current.constructor.name || 'TypedArray', byteLength: current.byteLength || 0, note: 'binary data omitted' }
+      }
+      if (current instanceof ArrayBuffer) {
+        return { type: 'ArrayBuffer', byteLength: current.byteLength, note: 'binary data omitted' }
+      }
+      if (current instanceof Promise) return '[Promise]'
+      if (Array.isArray(current)) {
+        const items = current.slice(0, maxArrayLength).map(item => serializeInner(item, depth + 1))
+        if (current.length > maxArrayLength) items.push('[truncated ' + (current.length - maxArrayLength) + ' items]')
+        return items
+      }
+      const out = {}
+      const entries = Object.entries(current)
+      for (const entry of entries.slice(0, maxObjectProperties)) {
+        out[entry[0]] = serializeInner(entry[1], depth + 1)
+      }
+      if (entries.length > maxObjectProperties) out.__truncated__ = (entries.length - maxObjectProperties) + ' properties omitted'
+      return out
+    }
+    return serializeInner(value, 0)
+  }
+})()
+`
+
 let quickjsModulePromise: Promise<QuickJSWASMModule> | undefined
 
 function getQuickJSModule(): Promise<QuickJSWASMModule> {
@@ -110,7 +180,7 @@ function hostValueToQuickJS(context: QuickJSContext, value: unknown, depth = 0):
   return context.newString(String(serializeBridgeValue(value)))
 }
 
-function errorHandleToSerialized(context: QuickJSContext, errorHandle: QuickJSHandle) {
+function errorHandleToSerializedUnbounded(context: QuickJSContext, errorHandle: QuickJSHandle) {
   try {
     return serializeBridgeError(context.dump(errorHandle))
   } catch (error) {
@@ -161,15 +231,47 @@ export async function executeQuickJSScript(
 
   const context = runtime.newContext()
   const activeDisposables = new Set<{ dispose: () => void }>()
+  const serializerResult = context.evalCode(BOUNDED_GUEST_SERIALIZER_SOURCE, 'repl-serializer.js', { type: 'global', strict: true })
+  if (serializerResult.error) {
+    const error = errorHandleToSerializedUnbounded(context, serializerResult.error)
+    disposeQuietly(serializerResult.error)
+    disposeQuietly(context)
+    disposeQuietly(runtime)
+    throw new Error(`Failed to install REPL serializer: ${error.message}`)
+  }
+  const serializerHandle = serializerResult.value
+  activeDisposables.add(serializerHandle)
+
+  function errorHandleToSerialized(errorHandle: QuickJSHandle) {
+    try {
+      return serializeBridgeError(dumpBoundedGuestValue(errorHandle))
+    } catch (error) {
+      return serializeBridgeError(error)
+    }
+  }
   const jsonHandle = context.getProp(context.global, 'JSON')
   const jsonStringifyHandle = context.getProp(jsonHandle, 'stringify')
   disposeQuietly(jsonHandle)
   activeDisposables.add(jsonStringifyHandle)
 
+  function dumpBoundedGuestValue(handle: QuickJSHandle): unknown {
+    const serialized = context.callFunction(serializerHandle, context.undefined, [handle])
+    if (serialized.error) {
+      const error = errorHandleToSerialized(serialized.error)
+      disposeQuietly(serialized.error)
+      return { serializationError: error.message }
+    }
+    try {
+      return context.dump(serialized.value)
+    } finally {
+      disposeQuietly(serialized.value)
+    }
+  }
+
   function guestInputFromHandle(handle: QuickJSHandle): unknown {
     const stringified = context.callFunction(jsonStringifyHandle, context.undefined, [handle])
     if (stringified.error) {
-      const serialized = errorHandleToSerialized(context, stringified.error)
+      const serialized = errorHandleToSerialized(stringified.error)
       disposeQuietly(stringified.error)
       throw new Error(`REPL tool input is not JSON-compatible: ${serialized.message}`)
     }
@@ -185,7 +287,7 @@ export async function executeQuickJSScript(
         stdoutLength = appendOutput(
           stdoutChunks,
           stdoutLength,
-          `${args.map(arg => String(serializeBridgeValue(context.dump(arg)))).join(' ')}\n`,
+          `${args.map(arg => String(serializeBridgeValue(dumpBoundedGuestValue(arg)))).join(' ')}\n`,
           stdoutLimit,
         )
         return context.undefined
@@ -198,7 +300,7 @@ export async function executeQuickJSScript(
         stderrLength = appendOutput(
           stderrChunks,
           stderrLength,
-          `${args.map(arg => String(serializeBridgeValue(context.dump(arg)))).join(' ')}\n`,
+          `${args.map(arg => String(serializeBridgeValue(dumpBoundedGuestValue(arg)))).join(' ')}\n`,
           stderrLimit,
         )
         return context.undefined
@@ -256,9 +358,11 @@ export async function executeQuickJSScript(
     const wrappedCode = `(async function() {\n${options.code}\n})()`
     const evalResult = context.evalCode(wrappedCode, 'repl.js', { type: 'global', strict: true })
     if (evalResult.error) {
+      const serializedEvalError = errorHandleToSerialized(evalResult.error)
+      disposeQuietly(evalResult.error)
       return {
         status: timedOut ? 'timeout' : aborted ? 'aborted' : 'error',
-        error: errorHandleToSerialized(context, evalResult.error),
+        error: serializedEvalError,
         stdout: stdoutText(),
         stderr: stderrText(),
         durationMs: Date.now() - startedAt,
@@ -294,7 +398,8 @@ export async function executeQuickJSScript(
       }
       const jobs = runtime.executePendingJobs()
       if (jobs.error) {
-        settlementFailure = jobs.error
+        settlementFailure = errorHandleToSerialized(jobs.error)
+        disposeQuietly(jobs.error)
         settled = true
         break
       }
@@ -314,7 +419,9 @@ export async function executeQuickJSScript(
     if (settlementFailure) {
       return {
         status: 'error',
-        error: serializeBridgeError(settlementFailure),
+        error: typeof settlementFailure === 'object' && settlementFailure !== null && 'message' in settlementFailure
+        ? settlementFailure as ReturnType<typeof serializeBridgeError>
+        : serializeBridgeError(settlementFailure),
         stdout: stdoutText(),
         stderr: stderrText(),
         durationMs: Date.now() - startedAt,
@@ -322,7 +429,7 @@ export async function executeQuickJSScript(
     }
 
     if (settlementValue?.error) {
-      const serialized = errorHandleToSerialized(context, settlementValue.error)
+      const serialized = errorHandleToSerialized(settlementValue.error)
       disposeQuietly(settlementValue.error)
       return {
         status: 'error',
@@ -334,7 +441,7 @@ export async function executeQuickJSScript(
     }
 
     const valueHandle = settlementValue?.value
-    const result = valueHandle ? serializeBridgeValue(context.dump(valueHandle)) : undefined
+    const result = valueHandle ? serializeBridgeValue(dumpBoundedGuestValue(valueHandle)) : undefined
     disposeQuietly(valueHandle)
     return {
       status: 'completed',

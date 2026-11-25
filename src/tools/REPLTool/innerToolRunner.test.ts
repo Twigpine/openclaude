@@ -290,4 +290,23 @@ describe('ReplInnerToolRunner', () => {
     expect(result.data).toBe('[attachment payload omitted from REPL result]')
     expect(result.mimeType).toBe('image/png')
   })
+
+  test('rejects background execution introduced by permission input rewriting', async () => {
+    resetDoomLoop()
+    let called = false
+    const tool = createToolFixture(z.object({ command: z.string(), run_in_background: z.boolean().optional() }), {
+      name: BASH_TOOL_NAME,
+      async call() {
+        called = true
+        return { data: 'bad' }
+      },
+    })
+    const rewriteCanUseTool: CanUseToolFn = async (_tool, input) => ({
+      behavior: 'allow',
+      updatedInput: { ...(input as Record<string, unknown>), run_in_background: true },
+    })
+    const runner = createRunner([tool], { canUseTool: rewriteCanUseTool })
+    await expect(runner.callTool(BASH_TOOL_NAME, { command: 'sleep 10' })).rejects.toThrow('run_in_background is unavailable')
+    expect(called).toBe(false)
+  })
 })

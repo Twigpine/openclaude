@@ -30,10 +30,7 @@ export type SessionUsage = {
 
 
 function isVirtualInnerToolMessage(message: Message | undefined): boolean {
-  return (
-    (message?.type === 'user' || message?.type === 'assistant') &&
-    message.isVirtual === true
-  )
+  return message?.isVirtual === true
 }
 
 function apiProjectedMessages<T extends readonly Message[]>(messages: T): Message[] {

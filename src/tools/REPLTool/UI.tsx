@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { MessageResponse } from '../../components/MessageResponse.js'
+import { ShellProgressMessage } from '../../components/shell/ShellProgressMessage.js'
 import { Box, Text } from '../../ink.js'
 import type { ProgressMessage } from '../../types/message.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
@@ -54,6 +55,42 @@ export function renderToolUseMessage(input: { code?: string }): React.ReactNode 
   return `${lines} ${lines === 1 ? 'line' : 'lines'}`
 }
 
+
+export function renderToolUseProgressMessage(
+  progressMessagesForMessage: ProgressMessage[],
+  { verbose }: { verbose: boolean },
+): React.ReactNode {
+  const lastProgress = progressMessagesForMessage.at(-1)
+  const data = lastProgress?.data as Record<string, unknown> | undefined
+  if (!data) {
+    return <MessageResponse height={1}><Text dimColor>Running...</Text></MessageResponse>
+  }
+  if (data.type === 'bash_progress' || data.type === 'powershell_progress') {
+    return <ShellProgressMessage
+      fullOutput={typeof data.fullOutput === 'string' ? data.fullOutput : ''}
+      output={typeof data.output === 'string' ? data.output : ''}
+      elapsedTimeSeconds={typeof data.elapsedTimeSeconds === 'number' ? data.elapsedTimeSeconds : undefined}
+      totalLines={typeof data.totalLines === 'number' ? data.totalLines : undefined}
+      totalBytes={typeof data.totalBytes === 'number' ? data.totalBytes : undefined}
+      timeoutMs={typeof data.timeoutMs === 'number' ? data.timeoutMs : undefined}
+      taskId={typeof data.taskId === 'string' ? data.taskId : undefined}
+      verbose={verbose}
+    />
+  }
+  if (data.type === 'mcp_progress') {
+    const progressMessage = typeof data.progressMessage === 'string' ? data.progressMessage : undefined
+    const progress = typeof data.progress === 'number' ? data.progress : undefined
+    const total = typeof data.total === 'number' ? data.total : undefined
+    const label = progressMessage ?? (progress !== undefined
+      ? total !== undefined && total > 0
+        ? `Processing... ${Math.round(Math.min(1, Math.max(0, progress / total)) * 100)}%`
+        : `Processing... ${progress}`
+      : 'Running...')
+    return <MessageResponse height={1}><Text dimColor>{label}</Text></MessageResponse>
+  }
+  return <MessageResponse height={1}><Text dimColor>Inner tool running...</Text></MessageResponse>
+}
+
 export function renderToolResultMessage(
   output: ReplOutputLike,
   _progressMessagesForMessage: ProgressMessage[],
@@ -62,10 +99,10 @@ export function renderToolResultMessage(
   const input = typeof options.input === 'object' && options.input !== null
     ? options.input as { code?: unknown }
     : undefined
-  const code = typeof output.code === 'string'
-    ? output.code
-    : typeof input?.code === 'string'
-      ? input.code
+  const code = typeof input?.code === 'string'
+    ? input.code
+    : typeof output.code === 'string'
+      ? output.code
       : undefined
   const status = output.status ?? 'completed'
   const toolsUsed = Array.isArray(output.toolsUsed) ? output.toolsUsed : []
@@ -89,7 +126,7 @@ export function renderToolResultMessage(
   return <Box flexDirection="column">
     {code !== undefined && <>
       <Text dimColor>code:</Text>
-      <Text>{code}</Text>
+      <Text>{boundedSection(code)}</Text>
     </>}
     <Text dimColor>status: {status}{typeof output.durationMs === 'number' ? ` · ${Math.round(output.durationMs)}ms` : ''}</Text>
     <Text dimColor>tools used: {toolsUsed.length > 0 ? toolsUsed.join(', ') : 'none'}</Text>

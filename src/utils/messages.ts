@@ -403,6 +403,16 @@ export function reorderMessagesInUI(
   const isToolUse = (m: any): boolean => isToolUseRequestMessage(m) // eslint-disable-line @typescript-eslint/no-explicit-any
   const isHook = (m: any): boolean => isHookAttachmentMessage(m) // eslint-disable-line @typescript-eslint/no-explicit-any
 
+  const replToolUseIds = new Set<string>()
+  for (const message of messages) {
+    if (isToolUse(message)) {
+      const block = message.message.content[0]
+      if (block?.name === 'REPL' && typeof block.id === 'string') {
+        replToolUseIds.add(block.id)
+      }
+    }
+  }
+
   // Maps tool use ID to its related messages
   const toolUseGroups = new Map<
     string,
@@ -458,7 +468,7 @@ export function reorderMessagesInUI(
       message.message.content[0]?.type === 'tool_result'
     ) {
       const toolUseID = message.message.content[0].tool_use_id
-      if (!toolUseGroups.has(toolUseID)) {
+      if (!replToolUseIds.has(toolUseID) && !toolUseGroups.has(toolUseID)) {
         toolUseGroups.set(toolUseID, {
           toolUse: null,
           preHooks: [],
@@ -466,7 +476,9 @@ export function reorderMessagesInUI(
           postHooks: [],
         })
       }
-      toolUseGroups.get(toolUseID)!.toolResult = message
+      if (!replToolUseIds.has(toolUseID)) {
+        toolUseGroups.get(toolUseID)!.toolResult = message
+      }
       continue
     }
 
@@ -498,6 +510,10 @@ export function reorderMessagesInUI(
     // Check if this is a tool use
     if (isToolUse(message)) {
       const toolUseID = message.message.content[0]?.id
+      if (toolUseID && replToolUseIds.has(toolUseID)) {
+        result.push(message)
+        continue
+      }
       if (toolUseID && !processedToolUses.has(toolUseID)) {
         processedToolUses.add(toolUseID)
         const group = toolUseGroups.get(toolUseID)
@@ -528,6 +544,9 @@ export function reorderMessagesInUI(
       message.type === 'user' &&
       message.message.content[0]?.type === 'tool_result'
     ) {
+      if (replToolUseIds.has(message.message.content[0].tool_use_id)) {
+        result.push(message)
+      }
       // Skip - already handled in tool use groups
       continue
     }
@@ -1495,7 +1514,7 @@ export function normalizeMessagesForAPI(
   // Then strip virtual messages — they're display-only (e.g. REPL inner tool
   // calls) and must never reach the API.
   const reorderedMessages = reorderAttachmentsForAPI(messages).filter(
-    m => !((m.type === 'user' || m.type === 'assistant') && m.isVirtual),
+    m => m.isVirtual !== true,
   )
 
   // Build a map from error text → which block types to strip from the preceding user message.

@@ -814,7 +814,7 @@ function contentSize(
 function buildToolNameMap(messages: Message[]): Map<string, string> {
   const map = new Map<string, string>()
   for (const message of messages) {
-    if (message.type !== 'assistant') continue
+    if (message.type !== 'assistant' || message.isVirtual === true) continue
     const content = message.message.content
     if (!Array.isArray(content)) continue
     for (const block of content) {
@@ -833,7 +833,7 @@ function buildToolNameMap(messages: Message[]): Map<string, string> {
  * Returns [] for messages with no eligible blocks.
  */
 function collectCandidatesFromMessage(message: Message): ToolResultCandidate[] {
-  if (message.type !== 'user' || !Array.isArray(message.message.content)) {
+  if (message.type !== 'user' || message.isVirtual === true || !Array.isArray(message.message.content)) {
     return []
   }
   return message.message.content.flatMap(block => {

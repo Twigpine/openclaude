@@ -89,7 +89,7 @@ class ReadWriteLock {
   }
 
   acquireRead(): Promise<void> {
-    if (!this.writerActive) {
+    if (!this.writerActive && !this.waiters.some(waiter => waiter.kind === 'write')) {
       this.readers += 1
       return Promise.resolve()
     }
@@ -188,7 +188,7 @@ function validateForegroundOnlyInput(tool: Tool, input: unknown): void {
     throw new Error(`${tool.name} run_in_background is unavailable inside REPL foreground scripts`)
   }
   if (tool.name === 'Agent') {
-    for (const key of ['team_name', 'mode', 'isolation', 'model'] as const) {
+    for (const key of ['name', 'team_name', 'mode', 'isolation', 'model'] as const) {
       if (input[key] !== undefined) {
         throw new Error(`Agent ${key} override is unavailable inside REPL foreground scripts`)
       }
@@ -197,13 +197,25 @@ function validateForegroundOnlyInput(tool: Tool, input: unknown): void {
 }
 
 function markInnerMessageVirtual(message: Message): Message {
-  if (
-    (message.type === 'user' || message.type === 'assistant') &&
-    message.isVirtual !== true
-  ) {
-    return { ...message, isVirtual: true }
-  }
-  return message
+  return message.isVirtual === true ? message : { ...message, isVirtual: true }
+}
+
+
+const PROVENANCE_MAX_STRING_CHARS = 4_000
+const PROVENANCE_MAX_TOTAL_CHARS = 64_000
+const PROVENANCE_MAX_NODES = 500
+const PROVENANCE_MAX_DEPTH = 8
+const PROVENANCE_MAX_ITEMS = 50
+
+function capInnerMessageProvenance(message: Message): Message {
+  return serializeBridgeValue(omitAttachmentPayloads(message), {
+    maxStringLength: PROVENANCE_MAX_STRING_CHARS,
+    maxTotalStringLength: PROVENANCE_MAX_TOTAL_CHARS,
+    maxTotalNodes: PROVENANCE_MAX_NODES,
+    maxDepth: PROVENANCE_MAX_DEPTH,
+    maxArrayLength: PROVENANCE_MAX_ITEMS,
+    maxObjectProperties: PROVENANCE_MAX_ITEMS,
+  }) as Message
 }
 
 function extractTextFromToolResultContent(content: unknown): string {
@@ -227,6 +239,7 @@ export class ReplInnerToolRunner {
   private readonly executionLane = new ReadWriteLock()
   private readonly childControllers = new Set<AbortController>()
   private readonly abortListener: () => void
+  private readonly activeInvocations = new Set<Promise<unknown>>()
   private totalCalls = 0
   private mutationCalls = 0
   private shellCalls = 0
@@ -264,7 +277,31 @@ export class ReplInnerToolRunner {
     return hostFunctions
   }
 
-  async callTool(toolName: string, input: unknown): Promise<unknown> {
+  callTool(toolName: string, input: unknown): Promise<unknown> {
+    const invocation = this.invokeTool(toolName, input)
+    const tracked = invocation.finally(() => {
+      this.activeInvocations.delete(tracked)
+    })
+    this.activeInvocations.add(tracked)
+    return tracked
+  }
+
+  hasActiveInvocations(): boolean {
+    return this.activeInvocations.size > 0
+  }
+
+  async quiesce(timeoutMs = 2_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (this.activeInvocations.size > 0 && Date.now() < deadline) {
+      await Promise.race([
+        Promise.allSettled([...this.activeInvocations]),
+        new Promise(resolve => setTimeout(resolve, 25)),
+      ])
+    }
+    return this.activeInvocations.size === 0
+  }
+
+  private async invokeTool(toolName: string, input: unknown): Promise<unknown> {
     if (toolName === REPL_TOOL_NAME) throw new ReplToolUnavailableError(toolName)
     const tool = this.inventoryByName.get(toolName)
     if (!tool) throw new ReplToolUnavailableError(toolName)
@@ -272,6 +309,7 @@ export class ReplInnerToolRunner {
     this.reserveBudget(tool, input)
 
     if (this.terminalError) throw this.terminalError
+    if (this.aborted) throw new Error('REPL execution aborted')
     await this.concurrency.acquire()
     const needsExclusiveLane = !tool.isConcurrencySafe(isObjectInput(input) ? input : {})
     if (needsExclusiveLane) {
@@ -281,6 +319,7 @@ export class ReplInnerToolRunner {
     }
     try {
       if (this.terminalError) throw this.terminalError
+      if (this.aborted) throw new Error('REPL execution aborted')
       return await this.executeCanonical(tool, input)
     } finally {
       if (needsExclusiveLane) {
@@ -337,20 +376,15 @@ export class ReplInnerToolRunner {
 
   private wrapCanUseTool(): CanUseToolFn {
     const canUseTool = this.options.canUseTool
-    const tracker = this.options.promptWaitTracker
     return async (tool, input, context, assistantMessage, toolUseID, forceDecision) => {
-      tracker.begin()
-      try {
-        const decision = await canUseTool(tool, input, context, assistantMessage, toolUseID, forceDecision)
-        if (decision.behavior === 'ask' && !decision.rejectFeedback) {
-          const error = new Error(`Permission for ${tool.name} was denied without feedback; terminating REPL script`)
-          this.terminalError ??= error
-          queueMicrotask(() => this.options.onTerminalFailure?.(error))
-        }
-        return decision
-      } finally {
-        tracker.end()
+      const decision = await canUseTool(tool, input, context, assistantMessage, toolUseID, forceDecision)
+      validateForegroundOnlyInput(tool, decision.behavior === 'deny' ? input : (decision.updatedInput ?? input))
+      if (decision.behavior === 'ask' && !decision.rejectFeedback) {
+        const error = new Error(`Permission for ${tool.name} was denied without feedback; terminating REPL script`)
+        this.terminalError ??= error
+        queueMicrotask(() => this.options.onTerminalFailure?.(error))
       }
+      return decision
     }
   }
 
@@ -377,6 +411,7 @@ export class ReplInnerToolRunner {
       ...this.options.toolUseContext,
       abortController: childController,
       replInnerExecution: true,
+      replPromptWaitTracker: this.options.promptWaitTracker,
       options: {
         ...this.options.toolUseContext.options,
         tools: this.options.inventory,
@@ -398,7 +433,7 @@ export class ReplInnerToolRunner {
           this.options.onProgress?.(message)
           continue
         }
-        const virtualMessage = markInnerMessageVirtual(message)
+        const virtualMessage = capInnerMessageProvenance(markInnerMessageVirtual(message))
         this.options.onVirtualMessage?.(virtualMessage)
         if (message.type !== 'user') continue
         const content = message.message.content

@@ -1065,7 +1065,7 @@ async function* queryLoop(
     if (canForceCompact) {
       if (
         isAboveMaxActiveMessagesLimit(
-          messagesForQuery.length,
+          messagesForQuery.filter(message => message.isVirtual !== true).length,
           getMessageCountCompactionTrigger(
             messageCountCompactionLimit,
             isAutoCompactEnabled(),

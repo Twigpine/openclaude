@@ -39,4 +39,12 @@ describe('buildReplToolInventory', () => {
     const inventory = buildReplToolInventory({ sessionTools: [], permissionContext: permissionContext as ToolPermissionContext })
     expect(inventory.map(tool => tool.name)).not.toContain(BASH_TOOL_NAME)
   })
+
+  test('honors the session primitive contract when one is supplied', () => {
+    const inventory = buildReplToolInventory({
+      sessionTools: [],
+      allowedPrimitiveNames: ['Read', 'Bash'],
+    })
+    expect(inventory.map(tool => tool.name)).toEqual(['Read', 'Bash'])
+  })
 })

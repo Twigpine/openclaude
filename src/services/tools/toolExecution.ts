@@ -330,6 +330,33 @@ function getMcpServerBaseUrlFromToolName(
   return getLoggingSafeMcpBaseUrl(serverConnection.config)
 }
 
+
+const REPL_HOOK_REDACTED_TEXT = '[inner tool output redacted by REPL PostToolUse hook]'
+
+function redactReplInnerProvenance(messages: Message[] | undefined): void {
+  if (!messages) return
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
+    if (message.isVirtual !== true || message.type !== 'user') continue
+    const content = message.message.content
+    const redactedContent = Array.isArray(content)
+      ? content.map(block =>
+          typeof block === 'object' && block !== null && block.type === 'tool_result'
+            ? { ...block, content: REPL_HOOK_REDACTED_TEXT }
+            : block,
+        )
+      : content
+    messages[index] = {
+      ...message,
+      message: {
+        ...message.message,
+        content: redactedContent,
+      },
+      ...(message.toolUseResult !== undefined ? { toolUseResult: REPL_HOOK_REDACTED_TEXT } : {}),
+    }
+  }
+}
+
 export async function* runToolUse(
   toolUse: ToolUseBlock,
   assistantMessage: AssistantMessage,
@@ -1662,6 +1689,9 @@ export async function checkPermissionsAndCallTool(
     )) {
       if ('updatedToolOutput' in hookResult) {
         toolOutput = hookResult.updatedToolOutput
+        if (tool.name === REPL_TOOL_NAME) {
+          redactReplInnerProvenance(result.newMessages)
+        }
         if (!isMcpTool(tool) && committedToolResultIndex !== undefined) {
           resultingMessages[committedToolResultIndex] =
             await createToolResultUpdate(toolOutput)

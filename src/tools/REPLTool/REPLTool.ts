@@ -9,8 +9,10 @@ import { REPL_TOOL_NAME } from './constants.js'
 import { ReplInnerToolRunner } from './innerToolRunner.js'
 import { getReplToolDescription, getReplToolPrompt } from './prompt.js'
 import { executeQuickJSScript, PromptWaitTracker } from './quickjsRuntime.js'
+import { serializeBridgeError } from './serialization.js'
+import { sleep } from '../../utils/sleep.js'
 import { buildReplToolInventory } from './toolWrappers.js'
-import { isResultTruncated, renderToolResultMessage, renderToolUseMessage } from './UI.js'
+import { isResultTruncated, renderToolResultMessage, renderToolUseMessage, renderToolUseProgressMessage } from './UI.js'
 
 const REPL_TIMEOUT_MS = 10 * 60 * 1000
 const REPL_CODE_MAX_CHARS = 100_000
@@ -83,7 +85,7 @@ export const REPLTool = buildTool({
     return 'cancel'
   },
   toAutoClassifierInput(input) {
-    return input.code.slice(0, 8_000)
+    return input.code
   },
   async checkPermissions(_input, _context): Promise<PermissionDecision> {
     return {
@@ -99,6 +101,7 @@ export const REPLTool = buildTool({
     const inventory = buildReplToolInventory({
       sessionTools: context.options.tools,
       permissionContext: permissionContext as ToolPermissionContext,
+      allowedPrimitiveNames: context.options.replPrimitiveToolNames,
     })
     const scriptController = new AbortController()
     const abortFromOuter = () => scriptController.abort(context.abortController.signal.reason)
@@ -128,9 +131,8 @@ export const REPLTool = buildTool({
         onProgress?.({
           toolUseID: progressToolUseID,
           data: {
-            type: 'repl_inner_progress',
-            innerToolUseID: message.toolUseID,
-            innerProgress: message.data,
+            ...message.data,
+            replInnerToolUseID: message.toolUseID,
           },
         })
       },
@@ -144,9 +146,25 @@ export const REPLTool = buildTool({
         abortSignal: scriptController.signal,
         promptWaitTracker,
       })
+      await sleep(0)
+      const hasUnawaitedWork = runner.hasActiveInvocations()
+      if (hasUnawaitedWork) {
+        runner.abort(new Error('REPL script completed without awaiting all inner tool calls'))
+      }
+      const quiesced = await runner.quiesce()
+      const finalExecution = (hasUnawaitedWork || !quiesced) && execution.status === 'completed'
+        ? {
+            ...execution,
+            status: 'error' as const,
+            result: undefined,
+            error: serializeBridgeError(new Error(hasUnawaitedWork
+              ? 'REPL script completed without awaiting all inner tool calls'
+              : 'REPL inner tool calls did not stop during teardown')),
+          }
+        : execution
       return {
         data: {
-          ...execution,
+          ...finalExecution,
           code: input.code,
           toolsUsed: [...toolsUsed].sort(),
         },
@@ -175,9 +193,11 @@ export const REPLTool = buildTool({
       type: 'tool_result',
       tool_use_id: toolUseID,
       content: lines.join('\n'),
+      ...(status !== 'completed' ? { is_error: true } : {}),
     }
   },
   renderToolUseMessage,
+  renderToolUseProgressMessage,
   renderToolResultMessage,
   isResultTruncated,
 })

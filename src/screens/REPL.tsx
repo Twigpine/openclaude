@@ -77,7 +77,8 @@ import type { SSHSession } from '../ssh/createSSHSession.js';
 import { SpinnerWithVerb, BriefIdleStatus, type SpinnerMode } from '../components/Spinner.js';
 import { CompletionFlash } from '../components/Spinner/CompletionFlash.js';
 import { getSystemPrompt } from '../constants/prompts.js';
-import { CODE_MODE_STARTUP_NOTICE, isReplModeEnabled } from '../tools/REPLTool/constants.js';
+import { CODE_MODE_STARTUP_NOTICE, getReplModeConversationOverride, isReplModeEnabled, setReplModeForConversation } from '../tools/REPLTool/constants.js';
+import { getReplPrimitiveTools } from '../tools/REPLTool/primitiveTools.js';
 import { buildEffectiveSystemPrompt } from '../utils/systemPrompt.js';
 import { getSystemContext, getUserContext } from '../context.js';
 import { getMemoryFiles } from '../utils/claudemd.js';
@@ -2047,6 +2048,7 @@ export function REPL({
   })));
   const resume = useCallback(async (sessionId: UUID, log: LogOption, entrypoint: ResumeEntrypoint) => {
     const resumeStart = performance.now();
+    const previousReplModeOverride = getReplModeConversationOverride();
     try {
       resetAutoCompactTracking();
       // Deserialize messages to properly clean up the conversation
@@ -2273,6 +2275,7 @@ export function REPL({
         resume_duration_ms: Math.round(performance.now() - resumeStart)
       });
     } catch (error) {
+      setReplModeForConversation(previousReplModeOverride);
       logEvent('tengu_session_resumed', {
         entrypoint: entrypoint as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         success: false
@@ -2805,6 +2808,23 @@ export function REPL({
     // async as servers connect — the store may have newer MCP state than
     // the closure captured at render time. Also doubles as refreshTools()
     // for mid-query tool list updates.
+    const computeReplPrimitiveToolNames = () => {
+      const primitives = [...getReplPrimitiveTools()];
+      if (isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)) {
+        return primitives
+          .filter(tool => tool.name === 'Bash' || tool.name === 'Read' || tool.name === 'Edit')
+          .map(tool => tool.name);
+      }
+      if (!mainThreadAgentDefinition) return primitives.map(tool => tool.name);
+      const primitiveSet = new Set(primitives.map(tool => tool.name));
+      const resolved = resolveAgentTools(
+        mainThreadAgentDefinition,
+        [...primitives, ...computeTools()],
+        false,
+        true,
+      ).resolvedTools;
+      return resolved.filter(tool => primitiveSet.has(tool.name)).map(tool => tool.name);
+    };
     const computeTools = () => {
       const state = store.getState();
       const assembled = assembleToolPool(state.toolPermissionContext, state.mcp.tools);
@@ -2846,7 +2866,8 @@ export function REPL({
         } : s.agentDefinitions,
         customSystemPrompt,
         appendSystemPrompt,
-        refreshTools: computeTools
+        refreshTools: computeTools,
+        replPrimitiveToolNames: computeReplPrimitiveToolNames()
       },
       getAppState: () => store.getState(),
       setAppState,

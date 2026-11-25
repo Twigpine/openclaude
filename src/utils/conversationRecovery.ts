@@ -53,6 +53,7 @@ import { jsonStringify } from './slowOperations.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
 import { isDangerousPermissionMode } from './permissions/PermissionMode.js'
 import { enforceCodeModeResumeCompatibility } from './sessionRestore.js'
+import { getReplModeConversationOverride, setReplModeForConversation } from '../tools/REPLTool/constants.js'
 
 // Dead code elimination: internal-only tool names are conditionally required so
 // their strings don't leak into external builds. Static imports always bundle.
@@ -687,6 +688,7 @@ export async function loadConversationForResume(
   // Full path to the session file (for cross-directory resume)
   fullPath?: string
 } | null> {
+  const previousReplModeOverride = getReplModeConversationOverride()
   try {
     let log: LogOption | null = null
     let sessionId: UUID | undefined
@@ -795,6 +797,7 @@ export async function loadConversationForResume(
       fullPath: log?.fullPath,
     }
   } catch (error) {
+    setReplModeForConversation(previousReplModeOverride)
     logError(error as Error)
     throw error
   }

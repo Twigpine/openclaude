@@ -2334,6 +2334,13 @@ class Project {
         sessionId,
       })
     }
+    if (entry?.codeMode !== undefined) {
+      appendEntryToFile(sessionFile, {
+        type: 'code-mode',
+        codeMode: entry.codeMode,
+        sessionId,
+      })
+    }
     // Unconditional: cache was refreshed from tail above; re-append keeps
     // the entry at EOF so compaction-pushed content doesn't evict it.
     if (title) {
@@ -2375,13 +2382,6 @@ class Project {
       appendEntryToFile(sessionFile, {
         type: 'mode',
         mode: entry.mode,
-        sessionId,
-      })
-    }
-    if (entry?.codeMode !== undefined) {
-      appendEntryToFile(sessionFile, {
-        type: 'code-mode',
-        codeMode: entry.codeMode,
         sessionId,
       })
     }
@@ -6497,6 +6497,20 @@ export async function loadTranscriptFile(
 
   // Find all terminal messages (messages with no children)
   const terminalMessages = allMessages.filter(msg => !parentUuids.has(msg.uuid))
+  const resolvedToolUseIds = new Set<string>()
+  for (const msg of allMessages) {
+    if (msg.type !== 'user' || !Array.isArray(msg.message.content)) continue
+    for (const block of msg.message.content) {
+      if (block.type === 'tool_result') resolvedToolUseIds.add(block.tool_use_id)
+    }
+  }
+  const isResumeLeafCandidate = (msg: TranscriptMessage): boolean => {
+    if ((msg.type !== 'user' && msg.type !== 'assistant') || msg.isVirtual === true) return false
+    if (msg.type !== 'assistant' || !Array.isArray(msg.message.content)) return true
+    return msg.message.content.every(block =>
+      block.type !== 'tool_use' || resolvedToolUseIds.has(block.id),
+    )
+  }
 
   const leafUuids = new Set<UUID>()
   let hasCycle = false
@@ -6524,7 +6538,7 @@ export async function loadTranscriptFile(
           break
         }
         seen.add(current.uuid)
-        if (current.type === 'user' || current.type === 'assistant') {
+        if (isResumeLeafCandidate(current)) {
           if (!hasUserAssistantChild.has(current.uuid)) {
             leafUuids.add(current.uuid)
           }
@@ -6547,7 +6561,7 @@ export async function loadTranscriptFile(
           break
         }
         seen.add(current.uuid)
-        if (current.type === 'user' || current.type === 'assistant') {
+        if (isResumeLeafCandidate(current)) {
           leafUuids.add(current.uuid)
           break
         }

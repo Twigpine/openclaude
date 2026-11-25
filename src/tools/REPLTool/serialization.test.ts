@@ -27,6 +27,23 @@ describe('serializeBridgeValue', () => {
     expect(output.bytes).toEqual({ type: 'Uint8Array', byteLength: 4, note: 'binary data omitted' })
   })
 
+  test('applies aggregate node and string budgets across shared references', () => {
+    const shared = { text: 'x'.repeat(100) }
+    const output = serializeBridgeValue({ first: shared, second: shared }, {
+      maxTotalNodes: 5,
+      maxTotalStringLength: 30,
+    }) as Record<string, unknown>
+    expect(JSON.stringify(output).length).toBeLessThan(500)
+    expect(JSON.stringify(output)).toContain('truncated')
+
+    const wide = serializeBridgeValue({
+      a: 'x'.repeat(100),
+      b: 'y'.repeat(100),
+      c: 'z'.repeat(100),
+    }, { maxTotalStringLength: 25 }) as Record<string, unknown>
+    expect(String(wide.a).length + String(wide.b).length + String(wide.c).length).toBeLessThan(180)
+  })
+
   test('bounds strings, arrays, objects, and depth', () => {
     const deep: Record<string, unknown> = {}
     let cursor = deep

@@ -323,6 +323,59 @@ test('cleanMessagesForLogging preserves Code Mode outer script and inner provena
   }
 })
 
+
+test('virtual inner rows and unresolved REPL tool uses cannot anchor resume', async () => {
+  const prompt = user(id(830), null, 'run a script')
+  const replUse = {
+    ...assistant(id(831), id(830), ''),
+    message: {
+      ...assistant(id(831), id(830), '').message,
+      content: [
+        {
+          type: 'tool_use',
+          id: 'repl-use-unresolved',
+          name: 'REPL',
+          input: { code: 'await Read({file_path:"a.ts"})' },
+        },
+      ],
+    },
+  }
+  const innerUse = {
+    ...assistant(id(832), id(831), ''),
+    isVirtual: true,
+    message: {
+      ...assistant(id(832), id(831), '').message,
+      content: [
+        {
+          type: 'tool_use',
+          id: 'inner-use-unresolved',
+          name: 'Read',
+          input: { file_path: 'a.ts' },
+        },
+      ],
+    },
+  }
+  const innerResult = {
+    ...user(id(833), id(832), [
+      {
+        type: 'tool_result',
+        tool_use_id: 'inner-use-unresolved',
+        content: 'inner output',
+        is_error: false,
+      } as ToolResultBlockParam,
+    ]),
+    isVirtual: true,
+  }
+
+  const filePath = await writeJsonl([prompt, replUse, innerUse, innerResult])
+  const { leafUuids } = await loadTranscriptFile(filePath)
+
+  expect(leafUuids.has(id(832))).toBe(false)
+  expect(leafUuids.has(id(833))).toBe(false)
+  expect(leafUuids.has(id(831))).toBe(false)
+  expect(leafUuids.has(id(830))).toBe(true)
+})
+
 test('session metadata persists and reloads the Code Mode contract', async () => {
   await withSessionPersistence(async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openclaude-session-storage-'))

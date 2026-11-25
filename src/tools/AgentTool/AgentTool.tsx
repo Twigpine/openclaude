@@ -378,6 +378,9 @@ export const AgentTool = buildTool({
     if (isTeammate() && teamName && name) {
       throw new Error('Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter.');
     }
+    if (toolUseContext.replInnerExecution === true && teamName && name) {
+      throw new Error('Teammate spawning is unavailable inside a foreground REPL script. Omit `name` to use a synchronous subagent.');
+    }
     // In-process teammates cannot spawn background agents (their lifecycle is
     // tied to the leader's process). Tmux teammates are separate processes and
     // can manage their own background agents.

@@ -1268,6 +1268,10 @@ async function* runShellCommand({
   // When explicitly requested via run_in_background, always honor the request
   // regardless of the command type (isAutobackgroundingAllowed only applies to automatic backgrounding)
   // Skip if background tasks are disabled - run in foreground instead
+  if (run_in_background === true && foregroundOnly === true) {
+    throw new Error('run_in_background is unavailable inside REPL foreground scripts');
+  }
+
   if (run_in_background === true && !isBackgroundTasksDisabled) {
     const shellId = await spawnBackgroundTask();
     logEvent('tengu_bash_command_explicitly_backgrounded', {

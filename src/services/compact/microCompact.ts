@@ -232,6 +232,7 @@ function collectCompactableToolIds(messages: Message[]): string[] {
   for (const message of messages) {
     if (
       message.type === 'assistant' &&
+      message.isVirtual !== true &&
       Array.isArray(message.message.content)
     ) {
       for (const block of message.message.content) {

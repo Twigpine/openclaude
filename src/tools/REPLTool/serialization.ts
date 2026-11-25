@@ -3,12 +3,16 @@ export interface BridgeSerializationOptions {
   maxDepth?: number
   maxArrayLength?: number
   maxObjectProperties?: number
+  maxTotalNodes?: number
+  maxTotalStringLength?: number
 }
 
 const DEFAULT_MAX_STRING_LENGTH = 16_000
 const DEFAULT_MAX_DEPTH = 8
 const DEFAULT_MAX_ARRAY_LENGTH = 200
 const DEFAULT_MAX_OBJECT_PROPERTIES = 200
+const DEFAULT_MAX_TOTAL_NODES = 2_000
+const DEFAULT_MAX_TOTAL_STRING_LENGTH = 128_000
 
 function truncateString(value: string, maxLength: number): string {
   if (value.length <= maxLength) return value
@@ -23,11 +27,21 @@ export function serializeBridgeValue(
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
   const maxArrayLength = options.maxArrayLength ?? DEFAULT_MAX_ARRAY_LENGTH
   const maxObjectProperties = options.maxObjectProperties ?? DEFAULT_MAX_OBJECT_PROPERTIES
+  const maxTotalNodes = options.maxTotalNodes ?? DEFAULT_MAX_TOTAL_NODES
+  const maxTotalStringLength = options.maxTotalStringLength ?? DEFAULT_MAX_TOTAL_STRING_LENGTH
   const seen = new WeakSet<object>()
+  let nodes = 0
+  let stringChars = 0
 
   function serializeInner(current: unknown, depth: number): unknown {
+    if (nodes >= maxTotalNodes) return '[SerializationBudget]'
+    nodes += 1
     if (current === null) return null
-    if (typeof current === 'string') return truncateString(current, maxStringLength)
+    if (typeof current === 'string') {
+      const serialized = truncateString(current, Math.min(maxStringLength, Math.max(0, maxTotalStringLength - stringChars)))
+      stringChars += serialized.length
+      return serialized
+    }
     if (typeof current === 'number' || typeof current === 'boolean') return current
     if (typeof current === 'undefined') return '[undefined]'
     if (typeof current === 'bigint') return `${current.toString()}n`
@@ -54,7 +68,7 @@ export function serializeBridgeValue(
     if (seen.has(current)) return '[Circular]'
     if (depth >= maxDepth) return '[MaxDepth]'
     seen.add(current)
-    try {
+    {
       if (Array.isArray(current)) {
         const items = current.slice(0, maxArrayLength).map(item => serializeInner(item, depth + 1))
         if (current.length > maxArrayLength) {
@@ -71,8 +85,6 @@ export function serializeBridgeValue(
         out.__truncated__ = `${entries.length - maxObjectProperties} properties omitted`
       }
       return out
-    } finally {
-      seen.delete(current)
     }
   }
 
