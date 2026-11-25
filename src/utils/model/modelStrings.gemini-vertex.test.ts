@@ -55,7 +55,7 @@ test.each(['flag'] as const)(
         expect(typeof model).toBe('string')
         expect(model.length).toBeGreaterThan(0)
       }
-      expect(output.native.main).toBe('gemini-2.5-flash')
+      expect(output.native.main).toBe('gemini-3.8-flash')
       expect(output.native.teammate).toBe('gemini-2.5-pro')
       expect(output.overriddenTeammate).toBe('gemini-3.5-flash')
       expect(output.restoredProvider).toBe('firstParty')

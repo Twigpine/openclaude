@@ -645,7 +645,18 @@ test('Vertex without a model override ignores a saved model from another provide
   saveGlobalConfig(current => ({ ...current, model: 'claude-sonnet-4-6' }))
   process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
   const { getUserSpecifiedModelSetting } = await importFreshModelModule()
-  expect(getUserSpecifiedModelSetting()).toBe('gemini-2.5-flash')
+  expect(getUserSpecifiedModelSetting()).toBe('gemini-3.8-flash')
   process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-pro'
   expect(getUserSpecifiedModelSetting()).toBe('gemini-2.5-pro')
+})
+
+test('Vertex sonnet, haiku and small-fast defaults use the current flash model', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  delete process.env.GEMINI_VERTEX_MODEL
+  const { getSmallFastModel, getDefaultSonnetModel, getDefaultHaikuModel, getDefaultMainLoopModelSetting } =
+    await importFreshModelModule()
+  const getters = [getSmallFastModel, getDefaultSonnetModel, getDefaultHaikuModel, getDefaultMainLoopModelSetting]
+  for (const getModel of getters) expect(getModel()).toBe('gemini-3.8-flash')
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-pro'
+  for (const getModel of getters) expect(getModel()).toBe('gemini-2.5-pro')
 })
