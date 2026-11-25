@@ -129,6 +129,12 @@ exports[`schema compatibility preserves generated and advertised JSON schemas fo
     "output": "6f5c83fd72140fe13917468022b340f565a5b163ecd1005798935d62aeff3107",
   },
   {
+    "advertised": "19973bac38669dbe3a0778660cb965efbc5ded19f6eae60d9cacececdfce2802",
+    "id": "cb23485ebede62b35cd6196fe4268c34460379e1ac64847ee35ac3d0b1c427aa",
+    "input": "19973bac38669dbe3a0778660cb965efbc5ded19f6eae60d9cacececdfce2802",
+    "output": "40818d58c1ccb9522b8474e30e8a5158890d003999af1ef7f34d43a0282ebabf",
+  },
+  {
     "advertised": "1fc3ed2694b6385febea1cfefefbbf81d186cd3d3e6349bddc5704a7ada032b2",
     "id": "c2f88f01ee5dcea9c4b9bd6d31af76b59fc9cfb8e04462468624f39b366bfa6d",
     "input": "1fc3ed2694b6385febea1cfefefbbf81d186cd3d3e6349bddc5704a7ada032b2",
