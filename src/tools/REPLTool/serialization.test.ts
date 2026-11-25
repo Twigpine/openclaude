@@ -108,13 +108,8 @@ describe('serializeBridgeValue', () => {
   })
 
   test('preserves an own __proto__ entry as a data property', () => {
-    const input: Record<string, unknown> = {}
-    Object.defineProperty(input, '__proto__', {
-      value: 'kept',
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    })
+    const input = JSON.parse('{"__proto__":"kept"}') as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(input, '__proto__')).toBe(true)
     const output = serializeBridgeValue(input) as Record<string, unknown>
     expect(Object.prototype.hasOwnProperty.call(output, '__proto__')).toBe(true)
     expect(Object.getOwnPropertyDescriptor(output, '__proto__')?.value).toBe('kept')
