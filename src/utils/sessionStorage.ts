@@ -6685,6 +6685,7 @@ async function loadSessionFile(
   customTitles: Map<UUID, string>
   tags: Map<UUID, string>
   agentSettings: Map<UUID, string>
+  codeModes: Map<UUID, boolean>
   worktreeStates: Map<UUID, PersistedWorktreeSession | null>
   fileHistorySnapshots: Map<UUID, FileHistorySnapshotMessage>
   attributionSnapshots: Map<UUID, AttributionSnapshotMessage>
@@ -6772,6 +6773,7 @@ export async function getLastSessionLog(
     customTitles,
     tags,
     agentSettings,
+    codeModes,
     worktreeStates,
     fileHistorySnapshots,
     attributionSnapshots,
@@ -6821,6 +6823,7 @@ export async function getLastSessionLog(
       contentReplacements.get(sessionId) ?? [],
     ),
     worktreeSession: worktreeStates.get(sessionId),
+    codeMode: codeModes.get(sessionId),
     goal: goalStates.get(sessionId),
     sessionBranch: sessionBranches.get(sessionId),
     contextCollapseCommits: contextCollapseCommits.filter(

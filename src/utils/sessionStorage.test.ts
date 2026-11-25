@@ -22,6 +22,7 @@ import {
   recordGoalState,
   recordTranscript,
   flushSessionStorage,
+  getLastSessionLog,
   resetProjectForTesting,
   resetSessionFilePointer,
   setSessionFileForTesting,
@@ -502,6 +503,8 @@ test('session metadata persists and reloads the Code Mode contract', async () =>
 
     const { codeModes } = await loadTranscriptFile(filePath)
     expect(codeModes.get(sessionId as never)).toBe(true)
+    const lastLog = await getLastSessionLog(sessionId as never)
+    expect(lastLog?.codeMode).toBe(true)
   })
 })
 
