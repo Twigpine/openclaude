@@ -700,12 +700,10 @@ export async function executeQuickJSScript(
       if (jobs.error) {
         settlementFailure = hostCallAttemptFailure ?? errorHandleToSerialized(jobs.error)
         disposeQuietly(jobs.error)
-        settled = true
         break
       }
       if (hostCallAttemptFailure) {
         settlementFailure = hostCallAttemptFailure
-        settled = true
         break
       }
       await sleep(1)
