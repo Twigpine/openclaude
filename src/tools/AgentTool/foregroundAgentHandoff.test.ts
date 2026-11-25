@@ -4,6 +4,9 @@ import { asSessionId } from '../../types/ids.js'
 import {
   closeForegroundAgentForBackground,
   createForegroundAgentAbortController,
+  getReplAgentConcurrencyBudget,
+  REPL_FOREGROUND_AGENT_CONCURRENCY_CAP,
+  resolveReplAgentConcurrencyBudget,
 } from './foregroundAgentHandoff.js'
 
 describe('foreground agent background handoff', () => {
@@ -95,5 +98,73 @@ describe('foreground agent background handoff', () => {
     liveRootState = { mode: 'acceptEdits' }
     expect(getOriginAppState()).toEqual({ mode: 'acceptEdits' })
     expect(getOriginRootState()).toEqual({ mode: 'acceptEdits' })
+  })
+})
+
+describe('repl agent concurrency budget', () => {
+  test('caps concurrent acquisitions at the shared limit and fails fast', () => {
+    const tracker = { begin: () => {}, end: () => {} }
+    const budget = getReplAgentConcurrencyBudget(tracker)
+    expect(budget.cap).toBe(REPL_FOREGROUND_AGENT_CONCURRENCY_CAP)
+
+    for (let i = 0; i < REPL_FOREGROUND_AGENT_CONCURRENCY_CAP; i += 1) {
+      budget.tryAcquire()
+    }
+    expect(() => budget.tryAcquire()).toThrow(/concurrency limit/)
+  })
+
+  test('keys the budget by tracker identity', () => {
+    const trackerA = { begin: () => {}, end: () => {} }
+    const trackerB = { begin: () => {}, end: () => {} }
+
+    expect(getReplAgentConcurrencyBudget(trackerA)).toBe(
+      getReplAgentConcurrencyBudget(trackerA),
+    )
+    expect(getReplAgentConcurrencyBudget(trackerA)).not.toBe(
+      getReplAgentConcurrencyBudget(trackerB),
+    )
+  })
+
+  test('release reopens a slot for a later acquisition', () => {
+    const tracker = { begin: () => {}, end: () => {} }
+    const budget = getReplAgentConcurrencyBudget(tracker)
+
+    for (let i = 0; i < REPL_FOREGROUND_AGENT_CONCURRENCY_CAP; i += 1) {
+      budget.tryAcquire()
+    }
+    budget.release()
+    expect(() => budget.tryAcquire()).not.toThrow()
+  })
+
+  test('release underflow is ignored instead of inflating the budget', () => {
+    const tracker = { begin: () => {}, end: () => {} }
+    const budget = getReplAgentConcurrencyBudget(tracker)
+
+    budget.release()
+    budget.release()
+    for (let i = 0; i < REPL_FOREGROUND_AGENT_CONCURRENCY_CAP; i += 1) {
+      budget.tryAcquire()
+    }
+    expect(() => budget.tryAcquire()).toThrow(/concurrency limit/)
+  })
+
+  test('resolve prefers the pinned budget over the tracker lookup', () => {
+    const tracker = { begin: () => {}, end: () => {} }
+    const pinned = {
+      cap: 8,
+      tryAcquire: () => {},
+      release: () => {},
+    }
+
+    expect(
+      resolveReplAgentConcurrencyBudget({
+        replAgentConcurrencyBudget: pinned,
+        replPromptWaitTracker: tracker,
+      }),
+    ).toBe(pinned)
+    expect(resolveReplAgentConcurrencyBudget({ replPromptWaitTracker: tracker })).toBe(
+      getReplAgentConcurrencyBudget(tracker),
+    )
+    expect(resolveReplAgentConcurrencyBudget({})).toBeUndefined()
   })
 })

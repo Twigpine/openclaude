@@ -52,8 +52,7 @@ import {
 import { jsonStringify } from './slowOperations.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
 import { isDangerousPermissionMode } from './permissions/PermissionMode.js'
-import { enforceCodeModeResumeCompatibility } from './sessionRestore.js'
-import { getReplModeConversationOverride, setReplModeForConversation } from '../tools/REPLTool/constants.js'
+import { withCodeModeResumeActivation } from './sessionRestore.js'
 
 // Dead code elimination: internal-only tool names are conditionally required so
 // their strings don't leak into external builds. Static imports always bundle.
@@ -688,7 +687,6 @@ export async function loadConversationForResume(
   // Full path to the session file (for cross-directory resume)
   fullPath?: string
 } | null> {
-  const previousReplModeOverride = getReplModeConversationOverride()
   try {
     let log: LogOption | null = null
     let sessionId: UUID | undefined
@@ -730,74 +728,78 @@ export async function loadConversationForResume(
       log = await loadFullLog(log)
     }
 
-    // Refuse mode-mismatched resumes before plan/file-history copies or
-    // SessionStart hooks produce side effects for a transcript this process
-    // cannot coherently continue.
-    enforceCodeModeResumeCompatibility(log.codeMode)
+    // Pin the narrowed non-null log for the closure below: TypeScript
+    // discards narrowing of mutable outer `let` variables inside closures.
+    const fullLog: LogOption = log
 
-    // Determine sessionId first so we can pass it to copy functions
-    if (!sessionId) {
-      sessionId = getSessionIdFromLog(log) as UUID
-    }
-    goal = log.goal
-    // Pass the original session ID to ensure the plan slug is associated with
-    // the session we're resuming, not the temporary session ID before resume
-    if (sessionId) {
-      await copyPlanForResume(log, asSessionId(sessionId))
-    }
+    // Validate the mode contract and activate the transcript's mode around
+    // the fallible resume work. withCodeModeResumeActivation restores the
+    // prior conversation mode override if anything below fails, so the
+    // current conversation never inherits a failed resume's mode.
+    return await withCodeModeResumeActivation(fullLog.codeMode, async () => {
+      // Determine sessionId first so we can pass it to copy functions
+      if (!sessionId) {
+        sessionId = getSessionIdFromLog(fullLog) as UUID
+      }
+      goal = fullLog.goal
+      // Pass the original session ID to ensure the plan slug is associated with
+      // the session we're resuming, not the temporary session ID before resume
+      if (sessionId) {
+        await copyPlanForResume(fullLog, asSessionId(sessionId))
+      }
 
-    // Copy file history for resume
-    void copyFileHistoryForResume(log)
+      // Copy file history for resume
+      void copyFileHistoryForResume(fullLog)
 
-    let messages: Message[] = log.messages
-    checkResumeConsistency(messages)
+      let messages: Message[] = fullLog.messages
+      checkResumeConsistency(messages)
 
-    // Restore skill state from invoked_skills attachments before deserialization.
-    // This ensures skills survive multiple compaction cycles after resume.
-    restoreSkillStateFromMessages(messages)
+      // Restore skill state from invoked_skills attachments before deserialization.
+      // This ensures skills survive multiple compaction cycles after resume.
+      restoreSkillStateFromMessages(messages)
 
-    // Deserialize messages to handle unresolved tool uses and ensure proper format
-    const deserialized = deserializeMessagesWithInterruptDetection(messages)
-    messages = deserialized.messages
+      // Deserialize messages to handle unresolved tool uses and ensure proper format
+      const deserialized = deserializeMessagesWithInterruptDetection(messages)
+      messages = deserialized.messages
 
-    // Reject oversized resumes before running side-effectful resume hooks.
-    assertResumeMessageSize(messages)
+      // Reject oversized resumes before running side-effectful resume hooks.
+      assertResumeMessageSize(messages)
 
-    // Process session start hooks for resume
-    const hookMessages = await processSessionStartHooks('resume', { sessionId })
+      // Process session start hooks for resume
+      const hookMessages = await processSessionStartHooks('resume', { sessionId })
 
-    // Append hook messages to the conversation and guard again in case hook
-    // output itself pushes the session over the safe resume limit.
-    messages.push(...hookMessages)
-    assertResumeMessageSize(messages)
+      // Append hook messages to the conversation and guard again in case hook
+      // output itself pushes the session over the safe resume limit.
+      messages.push(...hookMessages)
+      assertResumeMessageSize(messages)
 
-    return {
-      messages,
-      turnInterruptionState: deserialized.turnInterruptionState,
-      fileHistorySnapshots: log?.fileHistorySnapshots,
-      attributionSnapshots: log?.attributionSnapshots,
-      contentReplacements: log?.contentReplacements,
-      contextCollapseCommits: log?.contextCollapseCommits,
-      contextCollapseSnapshot: log?.contextCollapseSnapshot,
-      sessionId,
-      // Include session metadata for restoring agent context on resume
-      agentName: log?.agentName,
-      agentColor: log?.agentColor,
-      agentSetting: log?.agentSetting,
-      customTitle: log?.customTitle,
-      tag: log?.tag,
-      mode: log?.mode,
-      codeMode: log?.codeMode,
-      worktreeSession: log?.worktreeSession,
-      prNumber: log?.prNumber,
-      prUrl: log?.prUrl,
-      prRepository: log?.prRepository,
-      goal,
-      // Include full path for cross-directory resume
-      fullPath: log?.fullPath,
-    }
+      return {
+        messages,
+        turnInterruptionState: deserialized.turnInterruptionState,
+        fileHistorySnapshots: fullLog?.fileHistorySnapshots,
+        attributionSnapshots: fullLog?.attributionSnapshots,
+        contentReplacements: fullLog?.contentReplacements,
+        contextCollapseCommits: fullLog?.contextCollapseCommits,
+        contextCollapseSnapshot: fullLog?.contextCollapseSnapshot,
+        sessionId,
+        // Include session metadata for restoring agent context on resume
+        agentName: fullLog?.agentName,
+        agentColor: fullLog?.agentColor,
+        agentSetting: fullLog?.agentSetting,
+        customTitle: fullLog?.customTitle,
+        tag: fullLog?.tag,
+        mode: fullLog?.mode,
+        codeMode: fullLog?.codeMode,
+        worktreeSession: fullLog?.worktreeSession,
+        prNumber: fullLog?.prNumber,
+        prUrl: fullLog?.prUrl,
+        prRepository: fullLog?.prRepository,
+        goal,
+        // Include full path for cross-directory resume
+        fullPath: fullLog?.fullPath,
+      }
+    })
   } catch (error) {
-    setReplModeForConversation(previousReplModeOverride)
     logError(error as Error)
     throw error
   }

@@ -561,6 +561,10 @@ Permissions and hooks keep their usual meaning. Rules and `PreToolUse` hooks for
 
 The main conversation emphasizes meaningful inner activity such as edits and command results rather than the JavaScript source. The transcript keeps a compact Code row for the outer script. Keyboard transcript navigation can expand that row to reveal the exact source, and click expansion is also available. Session transcripts store the outer script, its structured result, and virtual inner tool activity as audit provenance. Those virtual inner messages are not replayed to the model as independent direct tool calls; the model receives the reduced outer `REPL` result instead.
 
+Audit provenance is bounded in aggregate as well as per message. One script has a conservative 256 KiB UTF-8 budget for virtual inner audit rows, including space reserved for an elision marker. Rows that no longer fit are represented in that marker with counts, tool-use IDs, error state, and compact mutation evidence rather than being dropped without a trace.
+
+Large structured script output is also bounded before it enters live session state or the JSONL transcript. When the raw structured output exceeds 16,000 characters, the complete serialized output is written to the existing session `tool-results` artifact store. The inline structured result keeps status, duration, tool usage, error metadata, bounded excerpts, and the artifact path, size, and preview. `PostToolUse` replacement runs before this artifact spill, so a hook redaction cannot accidentally persist the pre-redaction output.
+
 Resume is mode-aware. A session created in Code Mode can be resumed only when Code Mode is enabled; otherwise resume refuses with a clear reason. A session created with direct tools keeps the direct-tool contract even if the variable is enabled later. This prevents either kind of transcript from changing tool contracts in the middle of its history.
 
 ## Environment Variables

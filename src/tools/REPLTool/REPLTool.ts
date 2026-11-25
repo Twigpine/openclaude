@@ -1,6 +1,6 @@
 import { z } from 'zod/v4'
 import { buildTool } from '../../Tool.js'
-import type { PermissionDecision, ToolPermissionContext } from '../../types/permissions.js'
+import type { PermissionDecision } from '../../types/permissions.js'
 import type { AssistantMessage, AttachmentMessage, SystemMessage, UserMessage } from '../../types/message.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
@@ -10,13 +10,34 @@ import { ReplInnerToolRunner } from './innerToolRunner.js'
 import { getReplToolDescription, getReplToolPrompt } from './prompt.js'
 import { executeQuickJSScript, PromptWaitTracker } from './quickjsRuntime.js'
 import { serializeBridgeError } from './serialization.js'
-import { sleep } from '../../utils/sleep.js'
 import { buildReplToolInventory } from './toolWrappers.js'
 import { isResultTruncated, renderToolResultMessage, renderToolUseMessage, renderToolUseProgressMessage } from './UI.js'
 
 const REPL_TIMEOUT_MS = 10 * 60 * 1000
+const REPL_QUIESCE_TIMEOUT_MS = 2_000
 const REPL_CODE_MAX_CHARS = 100_000
 const MODEL_OUTPUT_TEXT_LIMIT = 8_000
+
+let replTimeoutMsOverride: number | undefined
+let replQuiesceTimeoutMsOverride: number | undefined
+
+export const __test = {
+  async withExecutionLimits<T>(
+    limits: { timeoutMs?: number; quiesceTimeoutMs?: number },
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const previousTimeoutMs = replTimeoutMsOverride
+    const previousQuiesceTimeoutMs = replQuiesceTimeoutMsOverride
+    replTimeoutMsOverride = limits.timeoutMs
+    replQuiesceTimeoutMsOverride = limits.quiesceTimeoutMs
+    try {
+      return await run()
+    } finally {
+      replTimeoutMsOverride = previousTimeoutMs
+      replQuiesceTimeoutMsOverride = previousQuiesceTimeoutMs
+    }
+  },
+}
 
 const inputSchema = lazySchema(() =>
   z.strictObject({
@@ -40,6 +61,18 @@ const outputSchema = lazySchema(() =>
     stderr: z.string().optional(),
     durationMs: z.number().optional(),
     toolsUsed: z.array(z.string()).optional(),
+    residualInnerWork: z.object({
+      active: z.boolean(),
+      activeInvocationCount: z.number().int().nonnegative(),
+      quiesceTimeoutMs: z.number().int().positive(),
+      warning: z.string(),
+    }).optional(),
+    persistedOutputPath: z.string().optional(),
+    persistedOutputSize: z.number().int().nonnegative().optional(),
+    persistedOutputPreview: z.string().optional(),
+    persistedOutputTruncated: z.boolean().optional(),
+    persistedOutputTruncatedFields: z.array(z.string()).optional(),
+    persistedOutputError: z.string().optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -56,6 +89,11 @@ function formatUnknownForModel(value: unknown): string {
   return truncateForModel(serialized ?? String(value), 4_000)
 }
 
+function residualInnerWorkWarning(activeInvocationCount: number): string {
+  const noun = activeInvocationCount === 1 ? 'invocation' : 'invocations'
+  return `${activeInvocationCount} inner tool ${noun} still running after REPL teardown. Side effects from this work may still complete. Do not retry or repeat potentially non-idempotent operations unless you first verify the current state.`
+}
+
 export const REPLTool = buildTool({
   name: REPL_TOOL_NAME,
   searchHint: 'javascript orchestration of session tools',
@@ -69,8 +107,8 @@ export const REPLTool = buildTool({
   async description() {
     return getReplToolDescription()
   },
-  async prompt() {
-    return getReplToolPrompt()
+  async prompt(options) {
+    return getReplToolPrompt(options)
   },
   userFacingName() {
     return 'REPL'
@@ -100,7 +138,7 @@ export const REPLTool = buildTool({
     const permissionContext = context.getAppState().toolPermissionContext
     const inventory = buildReplToolInventory({
       sessionTools: context.options.tools,
-      permissionContext: permissionContext as ToolPermissionContext,
+      permissionContext,
       allowedPrimitiveNames: context.options.replPrimitiveToolNames,
     })
     const scriptController = new AbortController()
@@ -139,21 +177,36 @@ export const REPLTool = buildTool({
       },
     })
 
+    let hasUnawaitedWorkAtCompletion = false
     try {
+      const quiesceTimeoutMs = replQuiesceTimeoutMsOverride ?? REPL_QUIESCE_TIMEOUT_MS
       const execution = await executeQuickJSScript({
         code: input.code,
         hostFunctions: runner.createHostFunctions(),
-        timeoutMs: REPL_TIMEOUT_MS,
+        timeoutMs: replTimeoutMsOverride ?? REPL_TIMEOUT_MS,
         abortSignal: scriptController.signal,
         promptWaitTracker,
+        onScriptCompletion: ({ pendingHostFunctionNames }) => {
+          hasUnawaitedWorkAtCompletion = pendingHostFunctionNames.length > 0
+        },
       })
-      await sleep(0)
-      const hasUnawaitedWork = runner.hasActiveInvocations()
-      if (hasUnawaitedWork) {
-        runner.abort(new Error('REPL script completed without awaiting all inner tool calls'))
+      const hasUnawaitedWork = hasUnawaitedWorkAtCompletion
+      if (hasUnawaitedWork || runner.hasActiveInvocations()) {
+        runner.abort(new Error(hasUnawaitedWork
+          ? 'REPL script completed without awaiting all inner tool calls'
+          : 'REPL execution ended before inner tool calls completed'))
       }
-      const quiesced = await runner.quiesce()
-      const finalExecution = (hasUnawaitedWork || !quiesced) && execution.status === 'completed'
+      const quiesced = await runner.quiesce(quiesceTimeoutMs)
+      const activeInvocationCount = runner.getActiveInvocationCount()
+      const residualInnerWork = !quiesced && activeInvocationCount > 0
+        ? {
+            active: true,
+            activeInvocationCount,
+            quiesceTimeoutMs,
+            warning: residualInnerWorkWarning(activeInvocationCount),
+          }
+        : undefined
+      const finalExecution = (hasUnawaitedWork || residualInnerWork !== undefined) && execution.status === 'completed'
         ? {
             ...execution,
             status: 'error' as const,
@@ -168,6 +221,7 @@ export const REPLTool = buildTool({
           ...finalExecution,
           code: input.code,
           toolsUsed: [...toolsUsed].sort(),
+          ...(residualInnerWork ? { residualInnerWork } : {}),
         },
         newMessages: virtualMessages,
       }
@@ -188,6 +242,9 @@ export const REPLTool = buildTool({
       `result: ${formatUnknownForModel(output.result)}`,
     ]
     if (output.error) lines.push(`error: ${output.error.name}: ${output.error.message}`)
+    if (output.residualInnerWork?.active) {
+      lines.push(`warning: ${output.residualInnerWork.warning}`)
+    }
     if (output.stdout) lines.push(`stdout:\n${truncateForModel(output.stdout, 2_000)}`)
     if (output.stderr) lines.push(`stderr:\n${truncateForModel(output.stderr, 2_000)}`)
     return {

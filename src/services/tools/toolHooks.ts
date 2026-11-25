@@ -165,7 +165,27 @@ export async function* runPostToolUseHooks<Input extends AnyObject, Output>(
             ? result.updatedMCPToolOutput
             : undefined
         if (replacement !== undefined) {
-          toolOutput = replacement as Output
+          const outputSchema = tool.outputSchema
+          if (outputSchema) {
+            const parsedOutput = outputSchema.safeParse(replacement)
+            if (!parsedOutput.success) {
+              const issues = parsedOutput.error.issues
+                .map(issue => {
+                  const path = issue.path.length > 0 ? issue.path.join('.') : '<root>'
+                  return `  - ${path}: ${issue.message}`
+                })
+                .join('\n')
+              throw new Error(
+                `PostToolUse hook replacement output for ${tool.name} failed output schema validation:\n${issues}`,
+              )
+            }
+            toolOutput = parsedOutput.data as Output
+          } else {
+            // Schema-less tools have no local output contract to validate against.
+            // Keep accepting their replacements because current MCP tools are
+            // schema-less and legacy updatedMCPToolOutput hooks depend on that.
+            toolOutput = replacement as Output
+          }
           yield {
             updatedToolOutput: toolOutput,
           }

@@ -15,6 +15,10 @@ import {
 
 export type QuickJSHostFunction = (args: unknown[]) => unknown | Promise<unknown>
 
+export interface QuickJSScriptCompletionState {
+  pendingHostFunctionNames: readonly string[]
+}
+
 export interface QuickJSExecutionOptions {
   code: string
   hostFunctions?: Record<string, QuickJSHostFunction>
@@ -23,8 +27,19 @@ export interface QuickJSExecutionOptions {
   maxStackSizeBytes?: number
   stdoutLimit?: number
   stderrLimit?: number
+  /**
+   * Maximum UTF-8 bytes accepted in the serialized arguments of one host call.
+   * Inputs are measured as JSON text before JSON.parse materializes host objects.
+   */
+  maxInputBytesPerCall?: number
+  /**
+   * Maximum aggregate UTF-8 bytes accepted across all host calls in one script.
+   * This includes calls that are still queued behind inner tool concurrency control.
+   */
+  maxInputBytesPerScript?: number
   abortSignal?: AbortSignal
   promptWaitTracker?: PromptWaitTracker
+  onScriptCompletion?: (state: QuickJSScriptCompletionState) => void
 }
 
 export interface QuickJSExecutionResult {
@@ -36,11 +51,74 @@ export interface QuickJSExecutionResult {
   durationMs: number
 }
 
+interface HostPromiseObservation {
+  token: number
+  functionName: string
+  observed: boolean
+  settled: boolean
+}
+
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024
 const DEFAULT_STACK_SIZE_BYTES = 1024 * 1024
 const DEFAULT_OUTPUT_LIMIT = 64 * 1024
+// One MiB preserves ordinary large Write/Bash inputs while preventing a single
+// tool call from consuming a large fraction of the 64 MiB QuickJS memory limit.
+const DEFAULT_INPUT_BYTES_PER_CALL = 1024 * 1024
+// Eight MiB matches eight saturated default concurrency lanes. The aggregate is
+// charged when the input crosses the host boundary, before any queueing in the
+// inner tool runner, so queued fanout cannot multiply host memory without bound.
+const DEFAULT_INPUT_BYTES_PER_SCRIPT = 8 * 1024 * 1024
 
+
+// Native promise awaiting uses internal promise slots and does not call the
+// observable Promise.prototype.then implementation. A Proxy has no promise
+// internal slots, so await, return assimilation, and Promise.all read its then
+// property while the proxy still preserves the target promise's shape.
+const OBSERVABLE_HOST_PROMISE_FACTORY_SOURCE = `
+(function() {
+  const promiseThen = Promise.prototype.then
+  const promiseCatch = Promise.prototype.catch
+  const promiseFinally = Promise.prototype.finally
+  const reflectGet = Reflect.get
+  const proxyConstructor = Proxy
+  return function createObservableHostPromise(promise, token, observe) {
+    let observed = false
+    function markObserved() {
+      if (!observed) {
+        observed = true
+        observe(token)
+      }
+    }
+    // Keep host rejections out of QuickJS's unhandled-rejection path. Observation
+    // is tracked separately so a detached rejection remains a contract violation.
+    promiseCatch.call(promise, function() {})
+    return new proxyConstructor(promise, {
+      get: function(target, property, receiver) {
+        if (property === 'then') {
+          return function(onFulfilled, onRejected) {
+            markObserved()
+            return promiseThen.call(target, onFulfilled, onRejected)
+          }
+        }
+        if (property === 'catch') {
+          return function(onRejected) {
+            markObserved()
+            return promiseCatch.call(target, onRejected)
+          }
+        }
+        if (property === 'finally') {
+          return function(onFinally) {
+            markObserved()
+            return promiseFinally.call(target, onFinally)
+          }
+        }
+        return reflectGet(target, property, receiver)
+      },
+    })
+  }
+})()
+`
 
 const BOUNDED_GUEST_SERIALIZER_SOURCE = `
 (function() {
@@ -197,11 +275,14 @@ export async function executeQuickJSScript(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const stdoutLimit = options.stdoutLimit ?? DEFAULT_OUTPUT_LIMIT
   const stderrLimit = options.stderrLimit ?? DEFAULT_OUTPUT_LIMIT
+  const maxInputBytesPerCall = options.maxInputBytesPerCall ?? DEFAULT_INPUT_BYTES_PER_CALL
+  const maxInputBytesPerScript = options.maxInputBytesPerScript ?? DEFAULT_INPUT_BYTES_PER_SCRIPT
   const promptWaitTracker = options.promptWaitTracker ?? new PromptWaitTracker()
   const stdoutChunks: string[] = []
   const stderrChunks: string[] = []
   let stdoutLength = 0
   let stderrLength = 0
+  let acceptedInputBytes = 0
   let timedOut = false
   let aborted = false
   let tornDown = false
@@ -260,6 +341,75 @@ export async function executeQuickJSScript(
       return serializeBridgeError(error)
     }
   }
+
+  const hostPromiseObservations = new Map<number, HostPromiseObservation>()
+  let nextHostPromiseToken = 1
+  let observableFactoryHandle: QuickJSHandle | undefined
+  let observeHostPromiseHandle: QuickJSHandle | undefined
+  if (Object.keys(options.hostFunctions ?? {}).length > 0) {
+    const observableFactoryResult = context.evalCode(
+      OBSERVABLE_HOST_PROMISE_FACTORY_SOURCE,
+      'repl-observable-host-promise.js',
+      { type: 'global', strict: true },
+    )
+    if (observableFactoryResult.error) {
+      const error = errorHandleToSerialized(observableFactoryResult.error)
+      disposeQuietly(observableFactoryResult.error)
+      for (const disposable of activeDisposables) disposeQuietly(disposable)
+      disposeQuietly(context)
+      disposeQuietly(runtime)
+      throw new Error(`Failed to install REPL host promise observer: ${error.message}`)
+    }
+    observableFactoryHandle = observableFactoryResult.value
+    activeDisposables.add(observableFactoryHandle)
+    observeHostPromiseHandle = context.newFunction('observeHostPromise', (...args) => {
+      const tokenHandle = args[0]
+      if (!tokenHandle || context.typeof(tokenHandle) !== 'number') return context.undefined
+      const observation = hostPromiseObservations.get(context.getNumber(tokenHandle))
+      if (observation) observation.observed = true
+      return context.undefined
+    })
+    activeDisposables.add(observeHostPromiseHandle)
+  }
+
+  function beginHostPromiseObservation(functionName: string, settled: boolean): HostPromiseObservation {
+    const observation: HostPromiseObservation = {
+      token: nextHostPromiseToken,
+      functionName,
+      observed: false,
+      settled,
+    }
+    nextHostPromiseToken += 1
+    hostPromiseObservations.set(observation.token, observation)
+    return observation
+  }
+
+  function wrapHostPromise(
+    promiseHandle: QuickJSHandle,
+    observation: HostPromiseObservation,
+  ): QuickJSHandle {
+    if (!observableFactoryHandle || !observeHostPromiseHandle) {
+      throw new Error('REPL host promise observer is not installed')
+    }
+    const tokenHandle = context.newNumber(observation.token)
+    const wrapped = context.callFunction(observableFactoryHandle, context.undefined, [
+      promiseHandle,
+      tokenHandle,
+      observeHostPromiseHandle,
+    ])
+    disposeQuietly(tokenHandle)
+    // The wrapper closure now owns the guest-side promise reference. Since the
+    // raw promise handle is not the host function return value, release this
+    // host reference; resolver handles stay alive until settlement.
+    disposeQuietly(promiseHandle)
+    if (wrapped.error) {
+      const serialized = errorHandleToSerialized(wrapped.error)
+      disposeQuietly(wrapped.error)
+      throw new Error(`Failed to wrap REPL host promise: ${serialized.message}`)
+    }
+    return wrapped.value
+  }
+
   const jsonHandle = context.getProp(context.global, 'JSON')
   const jsonStringifyHandle = context.getProp(jsonHandle, 'stringify')
   disposeQuietly(jsonHandle)
@@ -278,16 +428,65 @@ export async function executeQuickJSScript(
     }
   }
 
-  function guestInputFromHandle(handle: QuickJSHandle): unknown {
-    const stringified = context.callFunction(jsonStringifyHandle, context.undefined, [handle])
-    if (stringified.error) {
-      const serialized = errorHandleToSerialized(stringified.error)
-      disposeQuietly(stringified.error)
-      throw new Error(`REPL tool input is not JSON-compatible: ${serialized.message}`)
+  function guestInputsFromHandles(functionName: string, handles: QuickJSHandle[]): unknown[] {
+    const jsonTexts: Array<string | undefined> = []
+    let inputBytes = 0
+    for (const handle of handles) {
+      const stringified = context.callFunction(jsonStringifyHandle, context.undefined, [handle])
+      if (stringified.error) {
+        const serialized = errorHandleToSerialized(stringified.error)
+        disposeQuietly(stringified.error)
+        throw new Error(`REPL tool input is not JSON-compatible: ${serialized.message}`)
+      }
+      let jsonText: string | undefined
+      if (context.typeof(stringified.value) === 'string') {
+        // UTF-8 byte length is at least the UTF-16 string length, so this guest-side
+        // check can reject clearly oversized inputs without copying the JSON text.
+        const lengthHandle = context.getProp(stringified.value, 'length')
+        const jsonTextLength = context.getNumber(lengthHandle)
+        disposeQuietly(lengthHandle)
+        const callBytesLowerBound = inputBytes + jsonTextLength
+        if (callBytesLowerBound > maxInputBytesPerCall) {
+          disposeQuietly(stringified.value)
+          throw new Error(
+            `REPL input to ${functionName} exceeds the per-call serialized input budget (at least ${callBytesLowerBound} of ${maxInputBytesPerCall} bytes)`,
+          )
+        }
+        const acceptedLowerBound = acceptedInputBytes + callBytesLowerBound
+        if (acceptedLowerBound > maxInputBytesPerScript) {
+          disposeQuietly(stringified.value)
+          throw new Error(
+            `REPL input to ${functionName} exceeds the per-script serialized input budget (at least ${acceptedLowerBound} of ${maxInputBytesPerScript} bytes)`,
+          )
+        }
+        jsonText = context.dump(stringified.value) as string
+      }
+      disposeQuietly(stringified.value)
+      jsonTexts.push(jsonText)
+      if (jsonText !== undefined) inputBytes += Buffer.byteLength(jsonText, 'utf8')
     }
-    const jsonText = context.dump(stringified.value) as string | undefined
-    disposeQuietly(stringified.value)
-    return jsonText === undefined ? undefined : jsonParse(jsonText)
+
+    // Budget the serialized JSON text before JSON.parse materializes the host
+    // object graph. Only successfully parsed calls are charged to the aggregate.
+    if (inputBytes > maxInputBytesPerCall) {
+      throw new Error(
+        `REPL input to ${functionName} exceeds the per-call serialized input budget (${inputBytes} of ${maxInputBytesPerCall} bytes)`,
+      )
+    }
+    const acceptedAfterCall = acceptedInputBytes + inputBytes
+    if (acceptedAfterCall > maxInputBytesPerScript) {
+      throw new Error(
+        `REPL input to ${functionName} exceeds the per-script serialized input budget (${acceptedAfterCall} of ${maxInputBytesPerScript} bytes)`,
+      )
+    }
+    const args: unknown[] = []
+    for (let index = 0; index < jsonTexts.length; index++) {
+      const jsonText = jsonTexts[index]
+      jsonTexts[index] = undefined
+      args.push(jsonText === undefined ? undefined : jsonParse(jsonText))
+    }
+    acceptedInputBytes = acceptedAfterCall
+    return args
   }
 
   function installConsole(): void {
@@ -327,13 +526,31 @@ export async function executeQuickJSScript(
       throw new Error(`Invalid QuickJS host function name: ${name}`)
     }
     const fn = context.newFunction(name, (...argHandles) => {
-      const args = argHandles.map(handle => guestInputFromHandle(handle))
+      let args: unknown[]
+      try {
+        args = guestInputsFromHandles(name, argHandles)
+      } catch (error) {
+        // Input validation failures are tool call rejections rather than host
+        // exceptions, matching the asynchronous error shape of inner tools.
+        const inputError = serializeBridgeError(error)
+        const inputErrorHandle = context.newError({
+          name: inputError.name,
+          message: inputError.message,
+        })
+        const rejectedInput = context.newPromise()
+        activeDisposables.add(rejectedInput)
+        rejectedInput.reject(inputErrorHandle)
+        disposeQuietly(inputErrorHandle)
+        return wrapHostPromise(rejectedInput.handle, beginHostPromiseObservation(name, true))
+      }
       const deferred = context.newPromise()
+      const observation = beginHostPromiseObservation(name, false)
       activeDeferreds.add(deferred)
       void Promise.resolve()
         .then(() => implementation(args))
         .then(value => {
           if (tornDown) return
+          observation.settled = true
           const serialized = serializeBridgeValue(value)
           const resultHandle = hostValueToQuickJS(context, serialized)
           deferred.resolve(resultHandle)
@@ -341,6 +558,7 @@ export async function executeQuickJSScript(
         })
         .catch((error: unknown) => {
           if (tornDown) return
+          observation.settled = true
           const serialized = serializeBridgeError(error)
           const errorHandle = context.newError({
             name: serialized.name,
@@ -352,7 +570,7 @@ export async function executeQuickJSScript(
         .finally(() => {
           activeDeferreds.delete(deferred)
         })
-      return deferred.handle
+      return wrapHostPromise(deferred.handle, observation)
     })
     context.setProp(context.global, name, fn)
     disposeQuietly(fn)
@@ -443,6 +661,32 @@ export async function executeQuickJSScript(
       return {
         status: 'error',
         error: serialized,
+        stdout: stdoutText(),
+        stderr: stderrText(),
+        durationMs: Date.now() - startedAt,
+      }
+    }
+
+    const pendingHostFunctionNames = [...new Set(
+      [...hostPromiseObservations.values()]
+        .filter(observation => !observation.settled)
+        .map(observation => observation.functionName),
+    )]
+    options.onScriptCompletion?.({ pendingHostFunctionNames })
+
+    const unobservedSettled = [...hostPromiseObservations.values()].filter(observation =>
+      observation.settled && !observation.observed,
+    )
+    if (unobservedSettled.length > 0) {
+      const names = [...new Set(unobservedSettled.map(observation => observation.functionName))]
+      const shownNames = names.slice(0, 5).join(', ')
+      const hiddenCount = names.length - 5
+      const nameText = hiddenCount > 0 ? `${shownNames}, and ${hiddenCount} more` : shownNames
+      return {
+        status: 'error',
+        error: serializeBridgeError(new Error(
+          `REPL script completed without observing settled inner tool results: ${nameText}`,
+        )),
         stdout: stdoutText(),
         stderr: stderrText(),
         durationMs: Date.now() - startedAt,

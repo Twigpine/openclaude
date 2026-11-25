@@ -77,7 +77,7 @@ import type { SSHSession } from '../ssh/createSSHSession.js';
 import { SpinnerWithVerb, BriefIdleStatus, type SpinnerMode } from '../components/Spinner.js';
 import { CompletionFlash } from '../components/Spinner/CompletionFlash.js';
 import { getSystemPrompt } from '../constants/prompts.js';
-import { CODE_MODE_STARTUP_NOTICE, getReplModeConversationOverride, isReplModeEnabled, setReplModeForConversation } from '../tools/REPLTool/constants.js';
+import { CODE_MODE_STARTUP_NOTICE, isReplModeEnabled } from '../tools/REPLTool/constants.js';
 import { getReplPrimitiveTools } from '../tools/REPLTool/primitiveTools.js';
 import { buildEffectiveSystemPrompt } from '../utils/systemPrompt.js';
 import { getSystemContext, getUserContext } from '../context.js';
@@ -195,7 +195,7 @@ import type { AgentColorName } from '../tools/AgentTool/agentColorManager.js';
 import { fileHistoryMakeSnapshot, type FileHistoryState, fileHistoryRewind, type FileHistorySnapshot, copyFileHistoryForResume, fileHistoryEnabled, fileHistoryHasAnyChanges } from '../utils/fileHistory.js';
 import { type AttributionState, incrementPromptCount } from '../utils/commitAttribution.js';
 import { recordAttributionSnapshot } from '../utils/sessionStorage.js';
-import { enforceCodeModeResumeCompatibility, computeStandaloneAgentContext, restoreAgentFromSession, restoreSessionStateFromLog, restoreWorktreeForResume, exitRestoredWorktree } from '../utils/sessionRestore.js';
+import { withCodeModeResumeActivation, computeStandaloneAgentContext, restoreAgentFromSession, restoreSessionStateFromLog, restoreWorktreeForResume, exitRestoredWorktree } from '../utils/sessionRestore.js';
 import { notifySessionMetadataChanged } from '../utils/sessionState.js';
 import { isBgSession, updateSessionName, updateSessionActivity } from '../utils/concurrentSessions.js';
 import { isInProcessTeammateTask, type InProcessTeammateTaskState } from '../tasks/InProcessTeammateTask/types.js';
@@ -2048,234 +2048,236 @@ export function REPL({
   })));
   const resume = useCallback(async (sessionId: UUID, log: LogOption, entrypoint: ResumeEntrypoint) => {
     const resumeStart = performance.now();
-    const previousReplModeOverride = getReplModeConversationOverride();
     try {
-      resetAutoCompactTracking();
-      // Deserialize messages to properly clean up the conversation
-      // This filters unresolved tool uses and adds a synthetic assistant message if needed
-      enforceCodeModeResumeCompatibility(log.codeMode);
-      const messages = deserializeMessages(log.messages);
+      // Validate and activate the transcript's conversation mode around the
+      // fallible resume work. The helper restores the prior mode override if
+      // anything inside fails, so the current conversation keeps its own mode.
+      await withCodeModeResumeActivation(log.codeMode, async () => {
+        resetAutoCompactTracking();
+        // Deserialize messages to properly clean up the conversation
+        // This filters unresolved tool uses and adds a synthetic assistant message if needed
+        const messages = deserializeMessages(log.messages);
 
-      // Match coordinator/normal mode to the resumed session
-      if (feature('COORDINATOR_MODE')) {
-        /* eslint-disable @typescript-eslint/no-require-imports */
-        const coordinatorModule = require('../coordinator/coordinatorMode.js') as typeof import('../coordinator/coordinatorMode.js');
-        /* eslint-enable @typescript-eslint/no-require-imports */
-        const warning = coordinatorModule.matchSessionMode(log.mode);
-        if (warning) {
-          // Re-derive agent definitions after mode switch so built-in agents
-          // reflect the new coordinator/normal mode
+        // Match coordinator/normal mode to the resumed session
+        if (feature('COORDINATOR_MODE')) {
+          /* eslint-disable @typescript-eslint/no-require-imports */
+          const coordinatorModule = require('../coordinator/coordinatorMode.js') as typeof import('../coordinator/coordinatorMode.js');
+          /* eslint-enable @typescript-eslint/no-require-imports */
+          const warning = coordinatorModule.matchSessionMode(log.mode);
+          if (warning) {
+            // Re-derive agent definitions after mode switch so built-in agents
+            // reflect the new coordinator/normal mode
+            /* eslint-disable @typescript-eslint/no-require-imports */
+            const {
+              getAgentDefinitionsWithOverrides,
+              getActiveAgentsFromList
+            } = require('../tools/AgentTool/loadAgentsDir.js') as typeof import('../tools/AgentTool/loadAgentsDir.js');
+            /* eslint-enable @typescript-eslint/no-require-imports */
+            getAgentDefinitionsWithOverrides.cache.clear?.();
+            const freshAgentDefs = await getAgentDefinitionsWithOverrides(getOriginalCwd());
+            setAppState(prev => ({
+              ...prev,
+              agentDefinitions: {
+                ...freshAgentDefs,
+                allAgents: freshAgentDefs.allAgents,
+                activeAgents: getActiveAgentsFromList(freshAgentDefs.allAgents)
+              }
+            }));
+            messages.push(createSystemMessage(warning, 'warning'));
+          }
+        }
+
+        // Fire SessionEnd hooks for the current session before starting the
+        // resumed one, mirroring the /clear flow in conversation.ts.
+        const sessionEndTimeoutMs = getSessionEndHookTimeoutMs();
+        const { signal, cleanup } = createCombinedAbortSignal(undefined, {
+          timeoutMs: sessionEndTimeoutMs,
+        });
+        try {
+          await executeSessionEndHooks('resume', {
+            getAppState: () => store.getState(),
+            setAppState,
+            signal,
+            timeoutMs: sessionEndTimeoutMs
+          });
+        } finally {
+          cleanup();
+        }
+
+        // Process session start hooks for resume
+        const hookMessages = await processSessionStartHooks('resume', {
+          sessionId,
+          agentType: mainThreadAgentDefinition?.agentType,
+          model: mainLoopModel
+        });
+
+        // Append hook messages to the conversation
+        messages.push(...hookMessages);
+        // For forks, generate a new plan slug and copy the plan content so the
+        // original and forked sessions don't clobber each other's plan files.
+        // For regular resumes, reuse the original session's plan slug.
+        if (entrypoint === 'fork') {
+          void copyPlanForFork(log, asSessionId(sessionId));
+        } else {
+          void copyPlanForResume(log, asSessionId(sessionId));
+        }
+
+        // Restore file history and attribution state from the resumed conversation
+        restoreSessionStateFromLog(log, setAppState);
+        if (log.fileHistorySnapshots) {
+          void copyFileHistoryForResume(log);
+        }
+
+        // Restore agent setting from the resumed conversation
+        // Always reset to the new session's values (or clear if none),
+        // matching the standaloneAgentContext pattern below
+        const {
+          agentDefinition: restoredAgent
+        } = restoreAgentFromSession(log.agentSetting, initialMainThreadAgentDefinition, agentDefinitions);
+        setMainThreadAgentDefinition(restoredAgent);
+        setAppState(prev => ({
+          ...prev,
+          agent: restoredAgent?.agentType
+        }));
+
+        // Restore standalone agent context from the resumed conversation
+        // Always reset to the new session's values (or clear if none)
+        setAppState(prev => ({
+          ...prev,
+          standaloneAgentContext: computeStandaloneAgentContext(log.agentName, log.agentColor)
+        }));
+        void updateSessionName(log.agentName);
+
+        // Restore read file state from the message history
+        restoreReadFileState(messages, log.projectPath ?? getOriginalCwd());
+
+        // Clear any active loading state (no queryId since we're not in a query)
+        resetLoadingState();
+        setAbortController(null);
+        interruptionCorrectionTracker.handleSessionChange();
+        setConversationId(sessionId);
+
+        // Get target session's costs BEFORE saving current session
+        // (saveCurrentSessionCosts overwrites the config, so we need to read first)
+        const targetSessionCosts = getStoredSessionCosts(sessionId);
+
+        // Save current session's costs before switching to avoid losing accumulated costs
+        saveCurrentSessionCosts();
+
+        // Reset cost state for clean slate before restoring target session
+        resetCostState();
+
+        // Switch session (id + project dir atomically). fullPath may point to
+        // a different project (cross-worktree, /branch); null derives from
+        // current originalCwd.
+        switchSession(asSessionId(sessionId), log.fullPath ? dirname(log.fullPath) : null);
+        // Rename asciicast recording to match the resumed session ID
+        const {
+          renameRecordingForSession
+        } = await import('../utils/asciicast.js');
+        await renameRecordingForSession();
+        await resetSessionFilePointer();
+
+        // Clear then restore session metadata so it's re-appended on exit via
+        // reAppendSessionMetadata. clearSessionMetadata must be called first:
+        // restoreSessionMetadata only sets-if-truthy, so without the clear,
+        // a session without an agent name would inherit the previous session's
+        // cached name and write it to the wrong transcript on first message.
+        clearSessionMetadata();
+        restoreSessionMetadata(log);
+        // Resumed sessions shouldn't re-title from mid-conversation context
+        // (same reasoning as the useRef seed), and the previous session's
+        // Haiku title shouldn't carry over.
+        haikuTitleAttemptedRef.current = true;
+        setHaikuTitle(undefined);
+
+        // Exit any worktree a prior /resume entered, then cd into the one
+        // this session was in. Without the exit, resuming from worktree B
+        // to non-worktree C leaves cwd/currentWorktreeSession stale;
+        // resuming B→C where C is also a worktree fails entirely
+        // (getCurrentWorktreeSession guard blocks the switch).
+        //
+        // Skipped for /branch: forkLog doesn't carry worktreeSession, so
+        // this would kick the user out of a worktree they're still working
+        // in. Same fork skip as processResumedConversation for the adopt,
+        // fork materializes its own file via recordTranscript on REPL mount.
+        if (entrypoint !== 'fork') {
+          exitRestoredWorktree();
+          restoreWorktreeForResume(log.worktreeSession);
+          adoptResumedSessionFile();
+          void restoreRemoteAgentTasks({
+            abortController: new AbortController(),
+            getAppState: () => store.getState(),
+            setAppState
+          });
+        } else {
+          // Fork: same re-persist as /clear (conversation.ts). The clear
+          // above wiped currentSessionWorktree, forkLog doesn't carry it,
+          // and the process is still in the same worktree.
+          const ws = getCurrentWorktreeSession();
+          if (ws) saveWorktreeState(ws);
+        }
+
+        // Persist the current mode so future resumes know what mode this session was in
+        if (feature('COORDINATOR_MODE')) {
           /* eslint-disable @typescript-eslint/no-require-imports */
           const {
-            getAgentDefinitionsWithOverrides,
-            getActiveAgentsFromList
-          } = require('../tools/AgentTool/loadAgentsDir.js') as typeof import('../tools/AgentTool/loadAgentsDir.js');
+            saveMode
+          } = require('../utils/sessionStorage.js');
+          const {
+            isCoordinatorMode
+          } = require('../coordinator/coordinatorMode.js') as typeof import('../coordinator/coordinatorMode.js');
           /* eslint-enable @typescript-eslint/no-require-imports */
-          getAgentDefinitionsWithOverrides.cache.clear?.();
-          const freshAgentDefs = await getAgentDefinitionsWithOverrides(getOriginalCwd());
-          setAppState(prev => ({
-            ...prev,
-            agentDefinitions: {
-              ...freshAgentDefs,
-              allAgents: freshAgentDefs.allAgents,
-              activeAgents: getActiveAgentsFromList(freshAgentDefs.allAgents)
-            }
-          }));
-          messages.push(createSystemMessage(warning, 'warning'));
+          saveMode(isCoordinatorMode() ? 'coordinator' : 'normal');
         }
-      }
 
-      // Fire SessionEnd hooks for the current session before starting the
-      // resumed one, mirroring the /clear flow in conversation.ts.
-      const sessionEndTimeoutMs = getSessionEndHookTimeoutMs();
-      const { signal, cleanup } = createCombinedAbortSignal(undefined, {
-        timeoutMs: sessionEndTimeoutMs,
-      });
-      try {
-        await executeSessionEndHooks('resume', {
-          getAppState: () => store.getState(),
-          setAppState,
-          signal,
-          timeoutMs: sessionEndTimeoutMs
-        });
-      } finally {
-        cleanup();
-      }
-
-      // Process session start hooks for resume
-      const hookMessages = await processSessionStartHooks('resume', {
-        sessionId,
-        agentType: mainThreadAgentDefinition?.agentType,
-        model: mainLoopModel
-      });
-
-      // Append hook messages to the conversation
-      messages.push(...hookMessages);
-      // For forks, generate a new plan slug and copy the plan content so the
-      // original and forked sessions don't clobber each other's plan files.
-      // For regular resumes, reuse the original session's plan slug.
-      if (entrypoint === 'fork') {
-        void copyPlanForFork(log, asSessionId(sessionId));
-      } else {
-        void copyPlanForResume(log, asSessionId(sessionId));
-      }
-
-      // Restore file history and attribution state from the resumed conversation
-      restoreSessionStateFromLog(log, setAppState);
-      if (log.fileHistorySnapshots) {
-        void copyFileHistoryForResume(log);
-      }
-
-      // Restore agent setting from the resumed conversation
-      // Always reset to the new session's values (or clear if none),
-      // matching the standaloneAgentContext pattern below
-      const {
-        agentDefinition: restoredAgent
-      } = restoreAgentFromSession(log.agentSetting, initialMainThreadAgentDefinition, agentDefinitions);
-      setMainThreadAgentDefinition(restoredAgent);
-      setAppState(prev => ({
-        ...prev,
-        agent: restoredAgent?.agentType
-      }));
-
-      // Restore standalone agent context from the resumed conversation
-      // Always reset to the new session's values (or clear if none)
-      setAppState(prev => ({
-        ...prev,
-        standaloneAgentContext: computeStandaloneAgentContext(log.agentName, log.agentColor)
-      }));
-      void updateSessionName(log.agentName);
-
-      // Restore read file state from the message history
-      restoreReadFileState(messages, log.projectPath ?? getOriginalCwd());
-
-      // Clear any active loading state (no queryId since we're not in a query)
-      resetLoadingState();
-      setAbortController(null);
-      interruptionCorrectionTracker.handleSessionChange();
-      setConversationId(sessionId);
-
-      // Get target session's costs BEFORE saving current session
-      // (saveCurrentSessionCosts overwrites the config, so we need to read first)
-      const targetSessionCosts = getStoredSessionCosts(sessionId);
-
-      // Save current session's costs before switching to avoid losing accumulated costs
-      saveCurrentSessionCosts();
-
-      // Reset cost state for clean slate before restoring target session
-      resetCostState();
-
-      // Switch session (id + project dir atomically). fullPath may point to
-      // a different project (cross-worktree, /branch); null derives from
-      // current originalCwd.
-      switchSession(asSessionId(sessionId), log.fullPath ? dirname(log.fullPath) : null);
-      // Rename asciicast recording to match the resumed session ID
-      const {
-        renameRecordingForSession
-      } = await import('../utils/asciicast.js');
-      await renameRecordingForSession();
-      await resetSessionFilePointer();
-
-      // Clear then restore session metadata so it's re-appended on exit via
-      // reAppendSessionMetadata. clearSessionMetadata must be called first:
-      // restoreSessionMetadata only sets-if-truthy, so without the clear,
-      // a session without an agent name would inherit the previous session's
-      // cached name and write it to the wrong transcript on first message.
-      clearSessionMetadata();
-      restoreSessionMetadata(log);
-      // Resumed sessions shouldn't re-title from mid-conversation context
-      // (same reasoning as the useRef seed), and the previous session's
-      // Haiku title shouldn't carry over.
-      haikuTitleAttemptedRef.current = true;
-      setHaikuTitle(undefined);
-
-      // Exit any worktree a prior /resume entered, then cd into the one
-      // this session was in. Without the exit, resuming from worktree B
-      // to non-worktree C leaves cwd/currentWorktreeSession stale;
-      // resuming B→C where C is also a worktree fails entirely
-      // (getCurrentWorktreeSession guard blocks the switch).
-      //
-      // Skipped for /branch: forkLog doesn't carry worktreeSession, so
-      // this would kick the user out of a worktree they're still working
-      // in. Same fork skip as processResumedConversation for the adopt —
-      // fork materializes its own file via recordTranscript on REPL mount.
-      if (entrypoint !== 'fork') {
-        exitRestoredWorktree();
-        restoreWorktreeForResume(log.worktreeSession);
-        adoptResumedSessionFile();
-        void restoreRemoteAgentTasks({
-          abortController: new AbortController(),
-          getAppState: () => store.getState(),
-          setAppState
-        });
-      } else {
-        // Fork: same re-persist as /clear (conversation.ts). The clear
-        // above wiped currentSessionWorktree, forkLog doesn't carry it,
-        // and the process is still in the same worktree.
-        const ws = getCurrentWorktreeSession();
-        if (ws) saveWorktreeState(ws);
-      }
-
-      // Persist the current mode so future resumes know what mode this session was in
-      if (feature('COORDINATOR_MODE')) {
-        /* eslint-disable @typescript-eslint/no-require-imports */
-        const {
-          saveMode
-        } = require('../utils/sessionStorage.js');
-        const {
-          isCoordinatorMode
-        } = require('../coordinator/coordinatorMode.js') as typeof import('../coordinator/coordinatorMode.js');
-        /* eslint-enable @typescript-eslint/no-require-imports */
-        saveMode(isCoordinatorMode() ? 'coordinator' : 'normal');
-      }
-
-      // Restore target session's costs from the data we read earlier
-      if (targetSessionCosts) {
-        setCostStateForRestore(targetSessionCosts);
-      }
-
-      // Reconstruct replacement state for the resumed session. Runs after
-      // setSessionId so any NEW replacements post-resume write to the
-      // resumed session's tool-results dir. Gated on ref.current: the
-      // initial mount already read the feature flag, so we don't re-read
-      // it here (mid-session flag flips stay unobservable in both
-      // directions).
-      //
-      // Skipped for in-session /branch: the existing ref is already correct
-      // (branch preserves tool_use_ids), so there's no need to reconstruct.
-      // createFork() does write content-replacement entries to the forked
-      // JSONL with the fork's sessionId, so `claude -r {forkId}` also works.
-      if (contentReplacementStateRef.current && entrypoint !== 'fork') {
-        contentReplacementStateRef.current = reconstructContentReplacementState(messages, log.contentReplacements ?? []);
-      }
-      const hydratedMessages = contentReplacementStateRef.current ? applyToolResultReplacementsToMessages(messages, contentReplacementStateRef.current.replacements) : messages;
-
-      // Reset messages to the provided initial messages
-      // Use a callback to ensure we're not dependent on stale state
-      setMessages(() => hydratedMessages);
-
-      // Clear any active tool JSX
-      setToolJSX(null);
-
-      // Clear input to ensure no residual state
-      setInputValue('');
-
-      // Prompt to compact if the resumed session is large
-      if (feature('RESUME_COMPACT_PROMPT')) {
-        const { shouldPromptCompactOnResume } = await import('../services/compact/resumeCompactPrompt.js');
-        if (shouldPromptCompactOnResume(hydratedMessages, mainLoopModel, false)) {
-          const tokenCount = (await import('../utils/tokens.js')).tokenCountWithEstimation(hydratedMessages);
-          setResumeCompactPending({ tokenCount, model: mainLoopModel, messages: hydratedMessages });
+        // Restore target session's costs from the data we read earlier
+        if (targetSessionCosts) {
+          setCostStateForRestore(targetSessionCosts);
         }
-      }
 
-      logEvent('tengu_session_resumed', {
-        entrypoint: entrypoint as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        success: true,
-        resume_duration_ms: Math.round(performance.now() - resumeStart)
+        // Reconstruct replacement state for the resumed session. Runs after
+        // setSessionId so any NEW replacements post-resume write to the
+        // resumed session's tool-results dir. Gated on ref.current: the
+        // initial mount already read the feature flag, so we don't re-read
+        // it here (mid-session flag flips stay unobservable in both
+        // directions).
+        //
+        // Skipped for in-session /branch: the existing ref is already correct
+        // (branch preserves tool_use_ids), so there's no need to reconstruct.
+        // createFork() does write content-replacement entries to the forked
+        // JSONL with the fork's sessionId, so `claude -r {forkId}` also works.
+        if (contentReplacementStateRef.current && entrypoint !== 'fork') {
+          contentReplacementStateRef.current = reconstructContentReplacementState(messages, log.contentReplacements ?? []);
+        }
+        const hydratedMessages = contentReplacementStateRef.current ? applyToolResultReplacementsToMessages(messages, contentReplacementStateRef.current.replacements) : messages;
+
+        // Reset messages to the provided initial messages
+        // Use a callback to ensure we're not dependent on stale state
+        setMessages(() => hydratedMessages);
+
+        // Clear any active tool JSX
+        setToolJSX(null);
+
+        // Clear input to ensure no residual state
+        setInputValue('');
+
+        // Prompt to compact if the resumed session is large
+        if (feature('RESUME_COMPACT_PROMPT')) {
+          const { shouldPromptCompactOnResume } = await import('../services/compact/resumeCompactPrompt.js');
+          if (shouldPromptCompactOnResume(hydratedMessages, mainLoopModel, false)) {
+            const tokenCount = (await import('../utils/tokens.js')).tokenCountWithEstimation(hydratedMessages);
+            setResumeCompactPending({ tokenCount, model: mainLoopModel, messages: hydratedMessages });
+          }
+        }
+
+        logEvent('tengu_session_resumed', {
+          entrypoint: entrypoint as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          success: true,
+          resume_duration_ms: Math.round(performance.now() - resumeStart)
+        });
       });
     } catch (error) {
-      setReplModeForConversation(previousReplModeOverride);
       logEvent('tengu_session_resumed', {
         entrypoint: entrypoint as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         success: false

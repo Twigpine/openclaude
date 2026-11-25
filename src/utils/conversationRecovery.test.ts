@@ -12,6 +12,11 @@ import {
 } from '../test/sharedMutationLock.js'
 import type { NormalizedMessage } from '../types/message.js'
 import { snapshotEnv } from '../test/envSnapshot.js'
+import {
+  getReplModeConversationOverride,
+  setReplModeEnabledForSession,
+  setReplModeForConversation,
+} from '../tools/REPLTool/constants.js'
 
 const nonce = `${Date.now()}-${Math.random()}`
 const realProviders = {
@@ -178,6 +183,7 @@ afterEach(async () => {
         process.env[key] = value
       }
     }
+    setReplModeEnabledForSession(false)
     await Promise.all(
       tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })),
     )
@@ -354,6 +360,79 @@ test('loadConversationForResume rejects oversized reconstructed transcripts', as
   expect((caught as Error).message).toContain(
     'Reconstructed transcript is too large to resume safely',
   )
+})
+
+test('loadConversationForResume restores the prior mode override when resume fails after validation', async () => {
+  process.env.CLAUDE_CODE_SIMPLE = '1'
+  setReplModeEnabledForSession(true)
+  setReplModeForConversation(false)
+  const hugeContent = 'x'.repeat(8 * 1024 * 1024 + 32 * 1024)
+  const { loadConversationForResume } = await importFreshConversationRecovery()
+  const log = {
+    date: ts,
+    messages: [user(id(2), hugeContent)],
+    value: 0,
+    created: new Date(ts),
+    modified: new Date(ts),
+    firstPrompt: 'big',
+    messageCount: 1,
+    isSidechain: false,
+    sessionId,
+    codeMode: true,
+  }
+
+  await expect(
+    loadConversationForResume(log as never, undefined),
+  ).rejects.toThrow('too large')
+  expect(getReplModeConversationOverride()).toBe(false)
+})
+
+test('loadConversationForResume keeps the transcript mode active after a compatible resume', async () => {
+  process.env.CLAUDE_CODE_SIMPLE = '1'
+  setReplModeEnabledForSession(true)
+  setReplModeForConversation(false)
+  const { loadConversationForResume } = await importFreshConversationRecovery()
+  const log = {
+    date: ts,
+    messages: [user(id(3), 'small prompt')],
+    value: 0,
+    created: new Date(ts),
+    modified: new Date(ts),
+    firstPrompt: 'small prompt',
+    messageCount: 1,
+    isSidechain: false,
+    sessionId,
+    codeMode: true,
+  }
+
+  const result = await loadConversationForResume(log as never, undefined)
+
+  expect(result).not.toBeNull()
+  expect(getReplModeConversationOverride()).toBe(true)
+})
+
+test('loadConversationForResume validation failure never activates the transcript mode', async () => {
+  process.env.CLAUDE_CODE_SIMPLE = '1'
+  setReplModeEnabledForSession(false)
+  setReplModeForConversation(false)
+  const { loadConversationForResume } = await importFreshConversationRecovery()
+  const log = {
+    date: ts,
+    messages: [user(id(4), 'small prompt')],
+    value: 0,
+    created: new Date(ts),
+    modified: new Date(ts),
+    firstPrompt: 'small prompt',
+    messageCount: 1,
+    isSidechain: false,
+    sessionId,
+    codeMode: true,
+  }
+
+  await expect(
+    loadConversationForResume(log as never, undefined),
+  ).rejects.toThrow('cannot be resumed with direct tools')
+  expect(getReplModeConversationOverride()).toBe(false)
 })
 
 test('collectLiveBackgroundSessionIds includes local registry sessions when UDS is empty', async () => {

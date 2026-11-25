@@ -116,6 +116,7 @@ import {
   buildConversationChain as buildChain,
   stripExtraFields as stripChainFields,
 } from './transcript.js'
+import { enforceSdkCodeModeTranscriptCompatibility } from './sessions.js'
 import {
   buildSdkUserAgents,
   mergeSdkUserAgents,
@@ -1692,9 +1693,11 @@ export async function unstable_v2_resumeSession(
     let entries: JsonlEntry[]
     let preservedSegment: { headUuid: string; tailUuid: string; anchorUuid: string } | null = null
     let boundaryIndex = -1
+    let preBoundaryEndOffset = 0
 
     if (fileSize > SKIP_PRECOMPACT_THRESHOLD) {
       const scan = await readTranscriptForLoad(resolved.filePath, fileSize)
+      preBoundaryEndOffset = scan.boundaryStartOffset
       entries = parseJsonlEntries(scan.postBoundaryBuf.toString('utf8'))
       const boundary = findLastCompactBoundary(entries)
       preservedSegment = boundary.preservedSegment
@@ -1705,6 +1708,13 @@ export async function unstable_v2_resumeSession(
       preservedSegment = boundary.preservedSegment
       boundaryIndex = boundary.index
     }
+
+    await enforceSdkCodeModeTranscriptCompatibility({
+      filePath: resolved.filePath,
+      entries,
+      sessionId,
+      preBoundaryEndOffset,
+    })
 
     // Step 1: Index ALL non-sidechain entries by UUID (user, assistant, system, etc.)
     // CLI indexes all transcript-chain entries — we need system compact_boundary

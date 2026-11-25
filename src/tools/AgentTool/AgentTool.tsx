@@ -2,7 +2,7 @@ import { feature } from 'bun:bundle';
 import { statSync } from 'fs';
 import { isAbsolute } from 'path';
 import * as React from 'react';
-import { buildTool, type ToolDef, toolMatchesName } from 'src/Tool.js';
+import { buildTool, type ReplAgentConcurrencyBudget, type ToolDef, toolMatchesName } from 'src/Tool.js';
 import type { Message as MessageType, NormalizedUserMessage } from 'src/types/message.js';
 import { getQuerySourceForAgent } from 'src/utils/promptCategory.js';
 import { z } from 'zod/v4';
@@ -60,7 +60,7 @@ import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extra
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
-import { closeForegroundAgentForBackground, createForegroundAgentAbortController } from './foregroundAgentHandoff.js';
+import { closeForegroundAgentForBackground, createForegroundAgentAbortController, resolveReplAgentConcurrencyBudget } from './foregroundAgentHandoff.js';
 import type { AgentDefinition } from './loadAgentsDir.js';
 import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } from './loadAgentsDir.js';
 import { getPrompt } from './prompt.js';
@@ -995,9 +995,34 @@ export const AgentTool = buildTool({
         invocationEmitted: false
       };
 
+      // Foreground REPL scripts share a fail-fast concurrency budget across
+      // direct fanout and nested spawns. Nested agents bypass the inner tool
+      // runner's per-call Agent() caps, so acquisition must happen here,
+      // before the worker starts. The budget is pinned onto the worker's
+      // toolUseContext so createSubagentContext propagates it to nested
+      // spawns even if the prompt wait tracker is ever dropped.
+      let replAgentBudget: ReplAgentConcurrencyBudget | undefined;
+      if (replInnerExecution) {
+        try {
+          replAgentBudget = resolveReplAgentConcurrencyBudget(toolUseContext);
+          replAgentBudget?.tryAcquire();
+        } catch (error) {
+          // Acquisition happens after worktree setup, so a fail-fast rejection
+          // must still release the freshly created isolation worktree.
+          await cleanupWorktreeIfNeeded();
+          throw error;
+        }
+        if (replAgentBudget) {
+          runAgentParams.toolUseContext = {
+            ...toolUseContext,
+            replAgentConcurrencyBudget: replAgentBudget,
+          };
+        }
+      }
+
       // Wrap entire sync agent execution in context for analytics attribution
       // and optionally in a worktree cwd override for filesystem isolation
-      return runWithAgentContext(syncAgentContext, () => wrapWithCwd(async () => {
+      const syncWorkerPromise = runWithAgentContext(syncAgentContext, () => wrapWithCwd(async () => {
         const agentMessages: MessageType[] = [];
         const agentStartTime = Date.now();
         const syncTracker = createProgressTracker();
@@ -1485,6 +1510,12 @@ export const AgentTool = buildTool({
           }
         };
       }));
+      if (!replAgentBudget) return syncWorkerPromise;
+      const acquiredBudget = replAgentBudget;
+      // Inside a foreground REPL script the worker can never be backgrounded,
+      // so this promise settles exactly once on completion, failure, or abort.
+      // finally() releases the acquired slot exactly once in every outcome.
+      return syncWorkerPromise.finally(() => acquiredBudget.release());
     }
   },
   isReadOnly() {

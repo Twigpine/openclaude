@@ -10,7 +10,7 @@ import { createToolFixture } from '../../test/toolFixtures.js'
 import { getEmptyToolPermissionContext, type ToolUseContext } from '../../Tool.js'
 import { getAllBaseTools, getTools } from '../../tools.js'
 import { createAssistantMessage } from '../../utils/messages.js'
-import { REPLTool } from './REPLTool.js'
+import { __test as replTestHooks, REPLTool } from './REPLTool.js'
 import { isReplModeEnabled, setReplModeEnabledForSession } from './constants.js'
 import {
   renderToolResultMessage,
@@ -55,6 +55,100 @@ function createContext(
 }
 
 const allow: CanUseToolFn = async (_tool, input) => ({ behavior: 'allow', updatedInput: input })
+
+function createFixtureReplContext(tools: ToolUseContext['options']['tools']): ToolUseContext {
+  const context = createContext(tools)
+  context.options.replPrimitiveToolNames = []
+  return context
+}
+
+function createWriteBashFixtures(writeCall: () => { data: unknown } | Promise<{ data: unknown }>) {
+  const calls = { write: 0, bash: 0 }
+  const writeTool = createToolFixture(z.object({ file_path: z.string(), content: z.string() }), {
+    name: 'Write',
+    isMcp: true,
+    isReadOnly: () => false,
+    isConcurrencySafe: () => true,
+    async call() {
+      calls.write += 1
+      return writeCall()
+    },
+  })
+  const bashTool = createToolFixture(z.object({ command: z.string() }), {
+    name: 'Bash',
+    isMcp: true,
+    isReadOnly: () => false,
+    isConcurrencySafe: () => true,
+    async call() {
+      calls.bash += 1
+      await new Promise(resolve => setTimeout(resolve, 25))
+      return { data: 'bash-done' }
+    },
+  })
+  return { calls, writeTool, bashTool }
+}
+
+function createStartedSignal() {
+  let notify!: () => void
+  const promise = new Promise<void>(resolve => {
+    notify = resolve
+  })
+  return { promise, notify }
+}
+
+function createNonCooperativeFixtureTool(name: string) {
+  const started = createStartedSignal()
+  const state = { sawAbort: false }
+  const tool = createToolFixture(z.object({}), {
+    name,
+    isMcp: true,
+    isReadOnly: () => false,
+    isConcurrencySafe: () => true,
+    async call(_input, context) {
+      started.notify()
+      await new Promise<void>(() => {
+        const signal = context.abortController.signal
+        if (signal.aborted) {
+          state.sawAbort = true
+          return
+        }
+        signal.addEventListener('abort', () => {
+          state.sawAbort = true
+        }, { once: true })
+      })
+      return { data: 'done' }
+    },
+  })
+  return { tool, state, started: started.promise }
+}
+
+function createCooperativeFixtureTool(name: string) {
+  const started = createStartedSignal()
+  const state = { sawAbort: false }
+  const tool = createToolFixture(z.object({}), {
+    name,
+    isMcp: true,
+    isReadOnly: () => false,
+    isConcurrencySafe: () => true,
+    async call(_input, context) {
+      started.notify()
+      await new Promise<void>((_resolve, reject) => {
+        const cancel = () => {
+          state.sawAbort = true
+          reject(new Error('cancelled by abort signal'))
+        }
+        const signal = context.abortController.signal
+        if (signal.aborted) {
+          cancel()
+          return
+        }
+        signal.addEventListener('abort', cancel, { once: true })
+      })
+      return { data: 'done' }
+    },
+  })
+  return { tool, state, started: started.promise }
+}
 
 function parentFor(code: string) {
   return createAssistantMessage({
@@ -407,12 +501,6 @@ describe('REPLTool', () => {
     expect(rendered).not.toContain('bash old')
   })
 
-  test('documents PowerShell availability and alias in the REPL prompt', async () => {
-    const prompt = await REPLTool.prompt()
-    expect(prompt).toContain('PowerShell when enabled')
-    expect(prompt).toContain('powerShell')
-  })
-
   test('registers only when session mode is active and hides primitives only then', () => {
     const permissionContext = getEmptyToolPermissionContext()
     setReplModeEnabledForSession(false)
@@ -448,6 +536,189 @@ return 1`
     const serialized = JSON.stringify(rendered)
     expect(serialized).toContain('authoritative')
     expect(serialized).not.toContain('mutated')
+  })
+
+  test('rejects a fast rejecting unawaited Write that settles during a slower awaited Bash', async () => {
+    const fixtures = createWriteBashFixtures(() => { throw new Error('write rejected') })
+    const code = "Write({file_path: '/tmp/repl-unobserved', content: 'x'}); await Bash({command: 'slow'}); return 'done'"
+    const result = await REPLTool.call(
+      { code },
+      createFixtureReplContext([fixtures.writeTool, fixtures.bashTool]),
+      allow,
+      parentFor(code),
+      undefined,
+    )
+    expect(result.data.status).toBe('error')
+    expect(result.data.error?.message).toContain('without observing settled inner tool results: Write')
+    expect(result.data.result).not.toBe('done')
+    expect(fixtures.calls).toEqual({ write: 1, bash: 1 })
+  })
+
+  test('rejects a fast successful unawaited mutation that settles during a slower awaited Bash', async () => {
+    const fixtures = createWriteBashFixtures(() => ({ data: 'written' }))
+    const code = "Write({file_path: '/tmp/repl-unobserved', content: 'x'}); await Bash({command: 'slow'}); return 'done'"
+    const result = await REPLTool.call(
+      { code },
+      createFixtureReplContext([fixtures.writeTool, fixtures.bashTool]),
+      allow,
+      parentFor(code),
+      undefined,
+    )
+    expect(result.data.status).toBe('error')
+    expect(result.data.error?.message).toContain('without observing settled inner tool results: Write')
+    expect(result.data.result).not.toBe('done')
+    expect(fixtures.calls).toEqual({ write: 1, bash: 1 })
+  })
+
+  test('rejects an immediately settling unawaited mutation at completion', async () => {
+    const fixtures = createWriteBashFixtures(() => ({ data: 'written' }))
+    const code = "Write({file_path: '/tmp/repl-immediate-unobserved', content: 'x'}); return 'done'"
+    const result = await REPLTool.call(
+      { code },
+      createFixtureReplContext([fixtures.writeTool, fixtures.bashTool]),
+      allow,
+      parentFor(code),
+      undefined,
+    )
+    expect(result.data.status).toBe('error')
+    expect(result.data.error?.message).toMatch(/without (awaiting all inner tool calls|observing settled inner tool results)/)
+    expect(result.data.result).not.toBe('done')
+    expect(fixtures.calls.write).toBe(1)
+  })
+
+  test('keeps awaited mutation and shell calls passing', async () => {
+    const fixtures = createWriteBashFixtures(() => ({ data: 'written' }))
+    const code = "const written = await Write({file_path: '/tmp/repl-awaited', content: 'x'}); const bash = await Bash({command: 'slow'}); return [written, bash]"
+    const result = await REPLTool.call(
+      { code },
+      createFixtureReplContext([fixtures.writeTool, fixtures.bashTool]),
+      allow,
+      parentFor(code),
+      undefined,
+    )
+    expect(result.data.status).toBe('completed')
+    expect(result.data.result).toEqual(['written', 'bash-done'])
+  })
+
+  test('counts Promise.all as observation for independent mutation and shell calls', async () => {
+    const fixtures = createWriteBashFixtures(() => ({ data: 'written' }))
+    const code = "return await Promise.all([Write({file_path: '/tmp/repl-all', content: 'x'}), Bash({command: 'slow'})])"
+    const result = await REPLTool.call(
+      { code },
+      createFixtureReplContext([fixtures.writeTool, fixtures.bashTool]),
+      allow,
+      parentFor(code),
+      undefined,
+    )
+    expect(result.data.status).toBe('completed')
+    expect(result.data.result).toEqual(['written', 'bash-done'])
+  })
+
+  test('reports residual inner work after timeout when a tool ignores abort', async () => {
+    const warmupCode = 'return 1'
+    await REPLTool.call({ code: warmupCode }, createContext(), allow, parentFor(warmupCode), undefined)
+    const fixture = createNonCooperativeFixtureTool('TimeoutResidualFixture')
+    const code = "await TimeoutResidualFixture({}); return 'done'"
+
+    await replTestHooks.withExecutionLimits({ timeoutMs: 50, quiesceTimeoutMs: 30 }, async () => {
+      const result = await REPLTool.call(
+        { code },
+        createFixtureReplContext([fixture.tool]),
+        allow,
+        parentFor(code),
+        undefined,
+      )
+
+      expect(result.data.status).toBe('timeout')
+      expect(result.data.error?.message).toContain('Script execution timed out')
+      expect(result.data.error?.message).not.toContain('still running')
+      expect(result.data.residualInnerWork?.active).toBe(true)
+      expect(result.data.residualInnerWork?.activeInvocationCount).toBe(1)
+      expect(result.data.residualInnerWork?.warning).toContain('may still complete')
+      expect(result.data.residualInnerWork?.warning).toContain('Do not retry')
+      expect(REPLTool.outputSchema.safeParse(result.data).success).toBe(true)
+
+      const block = REPLTool.mapToolResultToToolResultBlockParam(result.data, 'toolu_timeout_residual')
+      expect(String(block.content)).toContain('error: Error: Script execution timed out')
+      expect(String(block.content)).toContain('warning: 1 inner tool invocation still running')
+      expect(String(block.content)).toContain('Do not retry')
+    })
+    expect(fixture.state.sawAbort).toBe(true)
+  })
+
+  test('reports residual inner work after outer abort when a tool ignores abort', async () => {
+    const fixture = createNonCooperativeFixtureTool('AbortResidualFixture')
+    const code = "await AbortResidualFixture({}); return 'done'"
+    const context = createFixtureReplContext([fixture.tool])
+
+    const result = await replTestHooks.withExecutionLimits({ quiesceTimeoutMs: 30 }, async () => {
+      const pending = REPLTool.call(
+        { code },
+        context,
+        allow,
+        parentFor(code),
+        undefined,
+      )
+      await fixture.started
+      context.abortController.abort(new Error('outer cancellation'))
+      return await pending
+    })
+
+    expect(result.data.status).toBe('aborted')
+    expect(result.data.error?.message).toContain('Script execution aborted')
+    expect(result.data.error?.message).not.toContain('still running')
+    expect(result.data.residualInnerWork?.active).toBe(true)
+    expect(result.data.residualInnerWork?.activeInvocationCount).toBe(1)
+    expect(REPLTool.outputSchema.safeParse(result.data).success).toBe(true)
+    expect(fixture.state.sawAbort).toBe(true)
+  })
+
+  test('does not report residual inner work when abort shutdown is cooperative', async () => {
+    const fixture = createCooperativeFixtureTool('AbortCooperativeFixture')
+    const code = "await AbortCooperativeFixture({}); return 'done'"
+    const context = createFixtureReplContext([fixture.tool])
+
+    const result = await replTestHooks.withExecutionLimits({ quiesceTimeoutMs: 50 }, async () => {
+      const pending = REPLTool.call(
+        { code },
+        context,
+        allow,
+        parentFor(code),
+        undefined,
+      )
+      await fixture.started
+      context.abortController.abort(new Error('outer cancellation'))
+      return await pending
+    })
+
+    expect(result.data.status).toBe('aborted')
+    expect(result.data.error?.message).toContain('Script execution aborted')
+    expect(result.data.residualInnerWork).toBeUndefined()
+    expect(REPLTool.outputSchema.safeParse(result.data).success).toBe(true)
+    expect(fixture.state.sawAbort).toBe(true)
+  })
+
+  test('does not report residual inner work when timeout shutdown is cooperative', async () => {
+    const warmupCode = 'return 1'
+    await REPLTool.call({ code: warmupCode }, createContext(), allow, parentFor(warmupCode), undefined)
+    const fixture = createCooperativeFixtureTool('TimeoutCooperativeFixture')
+    const code = "await TimeoutCooperativeFixture({}); return 'done'"
+
+    const result = await replTestHooks.withExecutionLimits({ timeoutMs: 50, quiesceTimeoutMs: 50 }, async () =>
+      await REPLTool.call(
+        { code },
+        createFixtureReplContext([fixture.tool]),
+        allow,
+        parentFor(code),
+        undefined,
+      ),
+    )
+
+    expect(result.data.status).toBe('timeout')
+    expect(result.data.error?.message).toContain('Script execution timed out')
+    expect(result.data.residualInnerWork).toBeUndefined()
+    expect(REPLTool.outputSchema.safeParse(result.data).success).toBe(true)
+    expect(fixture.state.sawAbort).toBe(true)
   })
 
   test('fails closed when script completion leaves inner tool work unawaited', async () => {

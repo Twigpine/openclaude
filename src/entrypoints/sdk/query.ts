@@ -83,9 +83,12 @@ import {
   type PermissionTarget,
 } from './permissions.js'
 import {
+  CodeModeTranscriptCompatibilityError,
+  enforceSdkCodeModeTranscriptCompatibility,
   listSessions,
   forkSession,
 } from './sessions.js'
+import { isReplModeEnabled } from '../../tools/REPLTool/constants.js'
 import {
   parseJsonlEntries as parseJsonlLines,
   findLastCompactBoundary,
@@ -253,10 +256,12 @@ async function loadAndInjectSessionMessages(
   let entries: JsonlEntry[]
   let preservedSegment: { headUuid: string; tailUuid: string; anchorUuid: string } | null = null
   let boundaryIndex = -1
+  let preBoundaryEndOffset = 0
 
   const { size: fileSize } = await stat(resolved.filePath)
   if (fileSize > SKIP_PRECOMPACT_THRESHOLD) {
     const scan = await readTranscriptForLoad(resolved.filePath, fileSize)
+    preBoundaryEndOffset = scan.boundaryStartOffset
     entries = parseJsonlLines(scan.postBoundaryBuf.toString('utf8'))
     // For large files, scan.hasPreservedSegment indicates preserved content exists
     // but we need to find the actual segment metadata in the post-boundary entries
@@ -269,6 +274,13 @@ async function loadAndInjectSessionMessages(
     preservedSegment = boundary.preservedSegment
     boundaryIndex = boundary.index
   }
+
+  await enforceSdkCodeModeTranscriptCompatibility({
+    filePath: resolved.filePath,
+    entries,
+    sessionId,
+    preBoundaryEndOffset,
+  })
 
   // Step 2: Index ALL non-sidechain entries by UUID (user, assistant, system, etc.)
   // This matches CLI's loadTranscriptFile() which indexes the full transcript chain.
@@ -412,6 +424,7 @@ class QueryImpl implements Query {
   private timeoutQueue: SDKPermissionTimeoutMessage[] = []
   private agentFailureQueue: SDKAgentLoadFailureMessage[] = []
   private hookCallbacks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {}
+  private readonly initialReplModeEnabled: boolean
 
   constructor(
     engine: QueryEngine | null,
@@ -444,6 +457,7 @@ class QueryImpl implements Query {
     this.userAgents = userAgents
     this.mcpServers = mcpServers
     this.permissionContext = permissionContext
+    this.initialReplModeEnabled = isReplModeEnabled()
     // Keep SDK callbacks on this query, never in the process-global registry.
     for (const [event, matchers] of Object.entries(hooks ?? {})) {
       if (!isHookEvent(event) || !Array.isArray(matchers)) continue
@@ -594,33 +608,6 @@ class QueryImpl implements Query {
           },
         )
         const mergedAgentDefs = mergeSdkUserAgents(agentDefs, userAgents)
-        if (mergedAgentDefs.activeAgents.length > 0) {
-          self.appStateStore.setState(prev => ({
-            ...prev,
-            agentDefinitions: mergedAgentDefs,
-          }))
-          try {
-            self.engine.injectAgents(mergedAgentDefs.activeAgents)
-          } catch (err) {
-            // Agent injection failed — continue without agents but emit failure event
-            const errorMessage = err instanceof Error ? err.message : String(err)
-            console.warn('SDK: agent injection failed:', errorMessage)
-            self.appStateStore.setState(prev => ({
-              ...prev,
-              agentDefinitions: { activeAgents: [], allAgents: [] },
-            }))
-            self.pushAgentFailure({
-              type: 'agent_load_failure',
-              stage: 'injection',
-              error_message: errorMessage,
-            })
-          }
-        } else {
-          self.appStateStore.setState(prev => ({
-            ...prev,
-            agentDefinitions: mergedAgentDefs,
-          }))
-        }
 
         let envMutexAcquired = false
         let acceptingCredentialWork = true
@@ -703,6 +690,7 @@ class QueryImpl implements Query {
           // Handle continue/fork/resume session resolution
           let effectiveSessionId: string | undefined = self._sessionId
           let resolvedTranscriptDir: string | null = null
+          let transcriptLoaded = false
 
           if (self.continueSession && !self._sessionIdExplicitlyProvided) {
             const sessions = await listSessions({ dir: self.cwd, limit: 1 })
@@ -711,6 +699,7 @@ class QueryImpl implements Query {
               const result = await loadAndInjectSessionMessages(effectiveSessionId, self.cwd, self.engine, self.resumeSessionAt)
               if (result.loaded) {
                 resolvedTranscriptDir = result.transcriptDir
+                transcriptLoaded = true
               } else {
                 effectiveSessionId = undefined
               }
@@ -730,20 +719,65 @@ class QueryImpl implements Query {
               const result = await loadAndInjectSessionMessages(effectiveSessionId, self.cwd, self.engine)
               if (result.loaded) {
                 resolvedTranscriptDir = result.transcriptDir
+                transcriptLoaded = true
               } else {
                 effectiveSessionId = undefined
               }
-            } catch {
+            } catch (error) {
+              if (error instanceof CodeModeTranscriptCompatibilityError) throw error
               effectiveSessionId = undefined
             }
           } else if (self._sessionId) {
             const result = await loadAndInjectSessionMessages(self._sessionId, self.cwd, self.engine, self.resumeSessionAt)
             if (result.loaded) {
               resolvedTranscriptDir = result.transcriptDir
+              transcriptLoaded = true
             } else {
               // Session file not found — preserve constructor UUID for fresh session
               effectiveSessionId = self._sessionId
             }
+          }
+
+          // The engine is created before the transcript can be read. If the
+          // transcript boundary changed the conversation's tool contract,
+          // rebuild the pool before the first submitted turn.
+          if (
+            transcriptLoaded &&
+            isReplModeEnabled() !== self.initialReplModeEnabled
+          ) {
+            self.engine.updateTools(
+              assembleToolPool(self.permissionContext, self.sdkMcpTools),
+            )
+          }
+
+          // Inject agents only after the transcript boundary has selected the
+          // tool surface, since injection validates agent tool references.
+          if (mergedAgentDefs.activeAgents.length > 0) {
+            self.appStateStore.setState(prev => ({
+              ...prev,
+              agentDefinitions: mergedAgentDefs,
+            }))
+            try {
+              self.engine.injectAgents(mergedAgentDefs.activeAgents)
+            } catch (err) {
+              // Agent injection failed, so continue without agents but emit a failure event
+              const errorMessage = err instanceof Error ? err.message : String(err)
+              console.warn('SDK: agent injection failed:', errorMessage)
+              self.appStateStore.setState(prev => ({
+                ...prev,
+                agentDefinitions: { activeAgents: [], allAgents: [] },
+              }))
+              self.pushAgentFailure({
+                type: 'agent_load_failure',
+                stage: 'injection',
+                error_message: errorMessage,
+              })
+            }
+          } else {
+            self.appStateStore.setState(prev => ({
+              ...prev,
+              agentDefinitions: mergedAgentDefs,
+            }))
           }
 
           // Switch session for transcript writes using the resolved transcript dir

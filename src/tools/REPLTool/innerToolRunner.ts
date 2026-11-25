@@ -7,12 +7,13 @@ import type { Message } from '../../types/message.js'
 import { createAssistantMessage } from '../../utils/messages.js'
 import { createChildAbortController } from '../../utils/abortController.js'
 import { serializeBridgeValue } from './serialization.js'
+import { jsonStringify } from '../../utils/slowOperations.js'
 import type { PromptWaitTracker, QuickJSHostFunction } from './quickjsRuntime.js'
 import { isLegalGuestIdentifier } from './guestIdentifiers.js'
 import { validateReplForegroundOnlyInput } from './foregroundValidation.js'
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js'
 import { POWERSHELL_TOOL_NAME } from '../PowerShellTool/toolName.js'
-import { REPL_TOOL_NAME } from './constants.js'
+import { REPL_ERGONOMIC_ALIASES, REPL_TOOL_NAME } from './constants.js'
 
 export interface ReplResourceCaps {
   maxConcurrentCalls: number
@@ -20,7 +21,15 @@ export interface ReplResourceCaps {
   maxMutationCalls: number
   maxShellCalls: number
   maxAgentCalls: number
+  /**
+   * Aggregate UTF-8 byte budget for virtual audit messages emitted by one
+   * REPL invocation. Part of the budget is reserved for a compact elision
+   * summary so the transcript stays bounded even at maximal fanout.
+   */
+  maxProvenanceBytes: number
 }
+
+export const DEFAULT_REPL_PROVENANCE_BUDGET_BYTES = 256 * 1024
 
 export const DEFAULT_REPL_RESOURCE_CAPS: ReplResourceCaps = {
   maxConcurrentCalls: 8,
@@ -28,6 +37,7 @@ export const DEFAULT_REPL_RESOURCE_CAPS: ReplResourceCaps = {
   maxMutationCalls: 50,
   maxShellCalls: 25,
   maxAgentCalls: 5,
+  maxProvenanceBytes: DEFAULT_REPL_PROVENANCE_BUDGET_BYTES,
 }
 
 export interface ReplInnerToolRunnerOptions {
@@ -45,7 +55,10 @@ export interface ReplInnerToolRunnerOptions {
 
 class Semaphore {
   private available: number
-  private readonly waiters: Array<() => void> = []
+  private readonly waiters: Array<{
+    grant: () => void
+    reject: (error: Error) => void
+  }> = []
 
   constructor(count: number) {
     this.available = count
@@ -56,23 +69,34 @@ class Semaphore {
       this.available -= 1
       return
     }
-    await new Promise<void>(resolve => this.waiters.push(resolve))
+    await new Promise<void>((resolve, reject) => {
+      this.waiters.push({ grant: resolve, reject })
+    })
   }
 
   release(): void {
     const next = this.waiters.shift()
     if (next) {
-      next()
+      next.grant()
     } else {
       this.available += 1
     }
+  }
+
+  rejectPending(error: Error): void {
+    const pending = this.waiters.splice(0)
+    for (const waiter of pending) waiter.reject(error)
   }
 }
 
 class ReadWriteLock {
   private readers = 0
   private writerActive = false
-  private readonly waiters: Array<{ kind: 'read' | 'write'; grant: () => void }> = []
+  private readonly waiters: Array<{
+    kind: 'read' | 'write'
+    grant: () => void
+    reject: (error: Error) => void
+  }> = []
 
   private pump(): void {
     if (this.waiters.length === 0 || this.writerActive || this.readers > 0) return
@@ -94,8 +118,8 @@ class ReadWriteLock {
       this.readers += 1
       return Promise.resolve()
     }
-    return new Promise(resolve => {
-      this.waiters.push({ kind: 'read', grant: resolve })
+    return new Promise((resolve, reject) => {
+      this.waiters.push({ kind: 'read', grant: resolve, reject })
     })
   }
 
@@ -109,14 +133,19 @@ class ReadWriteLock {
       this.writerActive = true
       return Promise.resolve()
     }
-    return new Promise(resolve => {
-      this.waiters.push({ kind: 'write', grant: resolve })
+    return new Promise((resolve, reject) => {
+      this.waiters.push({ kind: 'write', grant: resolve, reject })
     })
   }
 
   releaseWrite(): void {
     this.writerActive = false
     this.pump()
+  }
+
+  rejectPending(error: Error): void {
+    const pending = this.waiters.splice(0)
+    for (const waiter of pending) waiter.reject(error)
   }
 }
 
@@ -138,9 +167,99 @@ function isObjectInput(input: unknown): input is Record<string, unknown> {
   return typeof input === 'object' && input !== null && !Array.isArray(input)
 }
 
-function omitAttachmentPayloads(value: unknown, depth = 0): unknown {
-  if (depth > 8 || value === null || typeof value !== 'object') return value
-  if (Array.isArray(value)) return value.map(item => omitAttachmentPayloads(item, depth + 1))
+const OMIT_ATTACHMENT_MAX_DEPTH = 8
+const OMIT_ATTACHMENT_MAX_ITEMS = 200
+const OMIT_ATTACHMENT_MAX_NODES = 2_000
+
+interface OmitAttachmentState {
+  nodes: number
+  seen: WeakSet<object>
+}
+
+function omitAttachmentObjectEntries(
+  input: Record<string, unknown>,
+  state: OmitAttachmentState,
+  depth: number,
+  isAttachment: boolean,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  let hasOmittedProperties = false
+  let copiedProperties = 0
+  for (const key in input) {
+    if (!Object.prototype.hasOwnProperty.call(input, key)) continue
+    if (copiedProperties >= OMIT_ATTACHMENT_MAX_ITEMS) {
+      hasOmittedProperties = true
+      break
+    }
+    copiedProperties += 1
+    const entryValue = input[key]
+    if (
+      isAttachment &&
+      (key === 'data' || key === 'source' || key === 'content' || key === 'base64')
+    ) {
+      out[key] = '[attachment payload omitted from REPL result]'
+    } else if (isAttachment && key === 'file' && typeof entryValue === 'object' && entryValue !== null) {
+      out[key] = omitAttachmentFilePayloads(entryValue as Record<string, unknown>, state, depth + 1)
+    } else {
+      out[key] = omitAttachmentPayloads(entryValue, depth + 1, state)
+    }
+  }
+  if (hasOmittedProperties) {
+    out.__truncated__ = '1 or more properties omitted'
+  }
+  return out
+}
+
+function omitAttachmentFilePayloads(
+  file: Record<string, unknown>,
+  state: OmitAttachmentState,
+  depth: number,
+): unknown {
+  if (state.nodes >= OMIT_ATTACHMENT_MAX_NODES) return '[SerializationBudget]'
+  state.nodes += 1
+  if (state.seen.has(file)) return '[Circular]'
+  if (depth >= OMIT_ATTACHMENT_MAX_DEPTH) return '[MaxDepth]'
+  state.seen.add(file)
+  const out: Record<string, unknown> = {}
+  let hasOmittedProperties = false
+  let copiedProperties = 0
+  for (const key in file) {
+    if (!Object.prototype.hasOwnProperty.call(file, key)) continue
+    if (copiedProperties >= OMIT_ATTACHMENT_MAX_ITEMS) {
+      hasOmittedProperties = true
+      break
+    }
+    copiedProperties += 1
+    out[key] = key === 'base64'
+      ? '[attachment payload omitted from REPL result]'
+      : omitAttachmentPayloads(file[key], depth + 1, state)
+  }
+  if (hasOmittedProperties) {
+    out.__truncated__ = '1 or more properties omitted'
+  }
+  return out
+}
+
+function omitAttachmentPayloads(
+  value: unknown,
+  depth = 0,
+  state: OmitAttachmentState = { nodes: 0, seen: new WeakSet<object>() },
+): unknown {
+  if (value === null || typeof value !== 'object') return value
+  if (state.nodes >= OMIT_ATTACHMENT_MAX_NODES) return '[SerializationBudget]'
+  state.nodes += 1
+  if (state.seen.has(value)) return '[Circular]'
+  if (depth >= OMIT_ATTACHMENT_MAX_DEPTH) return '[MaxDepth]'
+  state.seen.add(value)
+  if (Array.isArray(value)) {
+    const items = value
+      .slice(0, OMIT_ATTACHMENT_MAX_ITEMS)
+      .map(item => omitAttachmentPayloads(item, depth + 1, state))
+    if (value.length > OMIT_ATTACHMENT_MAX_ITEMS) {
+      items.push(`[truncated ${value.length - OMIT_ATTACHMENT_MAX_ITEMS} items]`)
+    }
+    return items
+  }
   const input = value as Record<string, unknown>
   const type = typeof input.type === 'string' ? input.type : undefined
   const file = typeof input.file === 'object' && input.file !== null
@@ -153,47 +272,13 @@ function omitAttachmentPayloads(value: unknown, depth = 0): unknown {
       : typeof file?.type === 'string'
         ? file.type
         : undefined
-  if (
-    type === 'image' ||
+  const isAttachment = type === 'image' ||
     type === 'document' ||
     type === 'pdf' ||
     mimeType?.startsWith('image/') === true ||
     mimeType === 'application/pdf'
-  ) {
-    const out: Record<string, unknown> = {}
-    for (const [key, entryValue] of Object.entries(input)) {
-      if (key === 'data' || key === 'source' || key === 'content' || key === 'base64') {
-        out[key] = '[attachment payload omitted from REPL result]'
-      } else if (key === 'file' && typeof entryValue === 'object' && entryValue !== null) {
-        const file = entryValue as Record<string, unknown>
-        out[key] = {
-          ...file,
-          ...(file.base64 !== undefined ? { base64: '[attachment payload omitted from REPL result]' } : {}),
-        }
-      } else {
-        out[key] = omitAttachmentPayloads(entryValue, depth + 1)
-      }
-    }
-    return out
-  }
-  const out: Record<string, unknown> = {}
-  for (const [key, entryValue] of Object.entries(input)) {
-    out[key] = omitAttachmentPayloads(entryValue, depth + 1)
-  }
-  return out
+  return omitAttachmentObjectEntries(input, state, depth, isAttachment)
 }
-
-const REPL_ERGONOMIC_ALIASES = new Map([
-  ['Read', 'read'],
-  ['Write', 'write'],
-  ['Edit', 'edit'],
-  ['Glob', 'glob'],
-  ['Grep', 'grep'],
-  ['Bash', 'bash'],
-  ['NotebookEdit', 'notebookEdit'],
-  ['PowerShell', 'powerShell'],
-  ['Agent', 'agent'],
-])
 
 function validateForegroundOnlyInput(tool: Tool, input: unknown): void {
   validateReplForegroundOnlyInput(tool.name, input)
@@ -250,12 +335,23 @@ function capProvenanceValue(
     return items
   }
   const out: Record<string, unknown> = {}
-  const entries = Object.entries(value as Record<string, unknown>)
-  for (const [key, entryValue] of entries.slice(0, PROVENANCE_MAX_ITEMS)) {
-    out[capProvenanceString(key, state)] = capProvenanceValue(entryValue, state, depth + 1)
+  let hasOmittedProperties = false
+  let copiedProperties = 0
+  for (const key in value as Record<string, unknown>) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue
+    if (copiedProperties >= PROVENANCE_MAX_ITEMS) {
+      hasOmittedProperties = true
+      break
+    }
+    copiedProperties += 1
+    out[capProvenanceString(key, state)] = capProvenanceValue(
+      (value as Record<string, unknown>)[key],
+      state,
+      depth + 1,
+    )
   }
-  if (entries.length > PROVENANCE_MAX_ITEMS) {
-    out.__truncated__ = `${entries.length - PROVENANCE_MAX_ITEMS} properties omitted`
+  if (hasOmittedProperties) {
+    out.__truncated__ = '1 or more properties omitted'
   }
   return out
 }
@@ -266,6 +362,58 @@ function capInnerMessageProvenance(message: Message): Message {
     stringChars: 0,
     seen: new WeakSet<object>(),
   }) as Message
+}
+
+const PROVENANCE_ELISION_RESERVE_MAX_BYTES = 32 * 1024
+const PROVENANCE_ELISION_MAX_STORED_ENTRIES = 256
+const PROVENANCE_EVIDENCE_CHARS = 140
+const PROVENANCE_SUMMARY_STRUCTURE_BYTES = 512
+
+function splitProvenanceBudget(maxBytes: number): {
+  fullBytes: number
+  summaryReserveBytes: number
+} {
+  const normalized = Math.max(1, Math.floor(maxBytes))
+  const desiredReserve = Math.min(
+    PROVENANCE_ELISION_RESERVE_MAX_BYTES,
+    Math.max(256, Math.floor(normalized / 8)),
+  )
+  const summaryReserveBytes = Math.min(normalized, desiredReserve)
+  return {
+    fullBytes: normalized - summaryReserveBytes,
+    summaryReserveBytes,
+  }
+}
+
+function provenanceMessageBytes(message: Message): number {
+  try {
+    return Buffer.byteLength(jsonStringify(message) ?? '', 'utf8')
+  } catch {
+    return PROVENANCE_MAX_TOTAL_CHARS
+  }
+}
+
+function escapedJsonStringBytes(value: string): number {
+  const serialized = jsonStringify(value)
+  return Math.max(0, Buffer.byteLength(serialized ?? '', 'utf8') - 2)
+}
+
+function compactEvidenceText(value: unknown, maxChars = PROVENANCE_EVIDENCE_CHARS): string {
+  const serialized = typeof value === 'string'
+    ? value
+    : jsonStringify(value) ?? String(serializeBridgeValue(value))
+  const compact = serialized.replace(/\s+/g, ' ').trim()
+  return compact.length <= maxChars
+    ? compact
+    : `${compact.slice(0, maxChars)}... [truncated ${compact.length - maxChars} chars]`
+}
+
+interface ReplProvenanceElisionState {
+  elidedMessages: number
+  elidedBytes: number
+  entries: Array<{ text: string; escapedBytes: number; isError: boolean }>
+  entriesNotStored: number
+  summaryMessage?: Message
 }
 
 function extractTextFromToolResultContent(content: unknown): string {
@@ -291,6 +439,16 @@ export class ReplInnerToolRunner {
   private readonly abortListener: () => void
   private readonly activeInvocations = new Set<Promise<unknown>>()
   private readonly toolNamesByUseId = new Map<string, string>()
+  private readonly mutationByUseId = new Map<string, boolean>()
+  private readonly provenanceFullBudgetBytes: number
+  private readonly provenanceSummaryReserveBytes: number
+  private readonly provenanceElision: ReplProvenanceElisionState = {
+    elidedMessages: 0,
+    elidedBytes: 0,
+    entries: [],
+    entriesNotStored: 0,
+  }
+  private provenanceBytesUsed = 0
   private totalCalls = 0
   private mutationCalls = 0
   private shellCalls = 0
@@ -301,9 +459,16 @@ export class ReplInnerToolRunner {
   constructor(private readonly options: ReplInnerToolRunnerOptions) {
     for (const tool of options.inventory) this.inventoryByName.set(tool.name, tool)
     this.caps = { ...DEFAULT_REPL_RESOURCE_CAPS, ...options.caps }
+    const provenanceBudget = splitProvenanceBudget(this.caps.maxProvenanceBytes)
+    this.provenanceFullBudgetBytes = provenanceBudget.fullBytes
+    this.provenanceSummaryReserveBytes = provenanceBudget.summaryReserveBytes
     this.concurrency = new Semaphore(this.caps.maxConcurrentCalls)
     this.abortListener = () => this.abort(options.abortSignal?.reason)
-    options.abortSignal?.addEventListener('abort', this.abortListener, { once: true })
+    if (options.abortSignal?.aborted) {
+      this.abort(options.abortSignal.reason)
+    } else {
+      options.abortSignal?.addEventListener('abort', this.abortListener, { once: true })
+    }
   }
 
   createHostFunctions(): Record<string, QuickJSHostFunction> {
@@ -341,6 +506,10 @@ export class ReplInnerToolRunner {
     return this.activeInvocations.size > 0
   }
 
+  getActiveInvocationCount(): number {
+    return this.activeInvocations.size
+  }
+
   async quiesce(timeoutMs = 2_000): Promise<boolean> {
     const deadline = Date.now() + timeoutMs
     while (this.activeInvocations.size > 0 && Date.now() < deadline) {
@@ -363,19 +532,22 @@ export class ReplInnerToolRunner {
     if (this.aborted) throw new Error('REPL execution aborted')
     await this.concurrency.acquire()
     const needsExclusiveLane = !tool.isConcurrencySafe(isObjectInput(input) ? input : {})
-    if (needsExclusiveLane) {
-      await this.executionLane.acquireWrite()
-    } else {
-      await this.executionLane.acquireRead()
-    }
+    let acquiredLane: 'read' | 'write' | undefined
     try {
+      if (needsExclusiveLane) {
+        await this.executionLane.acquireWrite()
+        acquiredLane = 'write'
+      } else {
+        await this.executionLane.acquireRead()
+        acquiredLane = 'read'
+      }
       if (this.terminalError) throw this.terminalError
       if (this.aborted) throw new Error('REPL execution aborted')
       return await this.executeCanonical(tool, input)
     } finally {
-      if (needsExclusiveLane) {
+      if (acquiredLane === 'write') {
         this.executionLane.releaseWrite()
-      } else {
+      } else if (acquiredLane === 'read') {
         this.executionLane.releaseRead()
       }
       this.concurrency.release()
@@ -385,6 +557,9 @@ export class ReplInnerToolRunner {
   abort(reason?: unknown): void {
     if (this.aborted) return
     this.aborted = true
+    const error = this.terminalError ?? (reason instanceof Error ? reason : new Error('REPL execution aborted'))
+    this.concurrency.rejectPending(error)
+    this.executionLane.rejectPending(error)
     for (const controller of this.childControllers) controller.abort(reason)
   }
 
@@ -439,6 +614,178 @@ export class ReplInnerToolRunner {
     }
   }
 
+  private isMutationToolUse(toolName: string, input: unknown): boolean {
+    const inventoryTool = this.inventoryByName.get(toolName)
+    if (!inventoryTool) return false
+    try {
+      return !inventoryTool.isReadOnly(isObjectInput(input) ? input : {})
+    } catch {
+      return false
+    }
+  }
+
+  private summarizeElidedVirtualMessage(message: Message, bytes: number): string {
+    if (message.type === 'assistant' && Array.isArray(message.message.content)) {
+      const toolUseBlock = message.message.content.find(block =>
+        typeof block === 'object' && block !== null &&
+        (block as { type?: string }).type === 'tool_use',
+      ) as { id?: string; name?: string; input?: unknown } | undefined
+      if (toolUseBlock?.id && toolUseBlock.name) {
+        const mutation = this.isMutationToolUse(toolUseBlock.name, toolUseBlock.input)
+        return `${toolUseBlock.id} use ${toolUseBlock.name}${mutation ? ' mutation' : ''} input=${compactEvidenceText(toolUseBlock.input)} (${bytes} bytes)`
+      }
+    }
+
+    if (message.type === 'user' && Array.isArray(message.message.content)) {
+      const resultBlock = message.message.content.find(block =>
+        typeof block === 'object' && block !== null &&
+        (block as { type?: string }).type === 'tool_result',
+      ) as { tool_use_id?: string; is_error?: boolean; content?: unknown } | undefined
+      if (resultBlock?.tool_use_id) {
+        const toolName = this.toolNamesByUseId.get(resultBlock.tool_use_id) ?? 'unknown-tool'
+        const mutation = this.mutationByUseId.get(resultBlock.tool_use_id) === true
+        const isError = resultBlock.is_error === true
+        const resultText = extractTextFromToolResultContent(resultBlock.content)
+        const evidence = isError || mutation
+          ? ` content=${compactEvidenceText(resultText || '[empty tool result]')}`
+          : ''
+        return `${resultBlock.tool_use_id} result ${toolName}${mutation ? ' mutation' : ''} ${isError ? 'error' : 'ok'}${evidence} (${bytes} bytes)`
+      }
+    }
+
+    const toolUseID = 'toolUseID' in message && typeof message.toolUseID === 'string'
+      ? ` toolUseID=${message.toolUseID}`
+      : ''
+    const subtype = 'subtype' in message && typeof message.subtype === 'string'
+      ? ` ${message.subtype}`
+      : ''
+    const content = 'content' in message
+      ? compactEvidenceText(message.content, 100)
+      : '[no content field]'
+    return `${message.type}${subtype}${toolUseID} content=${content} (${bytes} bytes)`
+  }
+
+  private rebuildProvenanceElisionSummary(): void {
+    const summaryMessage = this.provenanceElision.summaryMessage
+    if (!summaryMessage) return
+
+    const prefix = [
+      `REPL virtual provenance elided: ${this.provenanceElision.elidedMessages} messages `,
+      `(${this.provenanceElision.elidedBytes} bytes) exceeded the aggregate budget `,
+      `of ${this.caps.maxProvenanceBytes} bytes. Compact audit entries:`,
+    ].join('')
+    const orderedEntries = [...this.provenanceElision.entries].sort((left, right) =>
+      Number(right.isError) - Number(left.isError),
+    )
+    const escapedPrefixBytes = escapedJsonStringBytes(prefix)
+    const escapedNewlineBytes = escapedJsonStringBytes('\n')
+    const escapedEntryPrefixSums = [0]
+    for (const entry of orderedEntries) {
+      escapedEntryPrefixSums.push(
+        (escapedEntryPrefixSums.at(-1) ?? 0) + entry.escapedBytes,
+      )
+    }
+
+    const summaryBytes = (entryCount: number): number => {
+      const omittedEntries = this.provenanceElision.entriesNotStored +
+        orderedEntries.length - entryCount
+      const suffix = omittedEntries > 0
+        ? `\n${omittedEntries} additional compact audit entries omitted to keep this marker bounded.`
+        : ''
+      const entrySeparatorBytes = entryCount > 0
+        ? (entryCount - 1) * escapedNewlineBytes
+        : 0
+      return PROVENANCE_SUMMARY_STRUCTURE_BYTES +
+        escapedPrefixBytes +
+        escapedNewlineBytes +
+        (escapedEntryPrefixSums[entryCount] ?? 0) +
+        entrySeparatorBytes +
+        escapedJsonStringBytes(suffix)
+    }
+
+    // Entry strings are immutable once stored, so their escaped sizes can be
+    // reused. The fixed envelope reserve covers message metadata and numeric
+    // count growth while avoiding repeated serialization of the whole marker.
+    let low = 0
+    let high = orderedEntries.length
+    let bestEntryCount = 0
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2)
+      if (summaryBytes(middle) <= this.provenanceSummaryReserveBytes) {
+        bestEntryCount = middle
+        low = middle + 1
+      } else {
+        high = middle - 1
+      }
+    }
+
+    const omittedEntries = this.provenanceElision.entriesNotStored +
+      orderedEntries.length - bestEntryCount
+    const suffix = omittedEntries > 0
+      ? `\n${omittedEntries} additional compact audit entries omitted to keep this marker bounded.`
+      : ''
+    const mutableSummary = summaryMessage as unknown as Record<string, unknown>
+    mutableSummary.content = `${prefix}\n${orderedEntries.slice(0, bestEntryCount).map(entry => entry.text).join('\n')}${suffix}`
+    mutableSummary.replProvenanceElision = {
+      marker: 'repl-provenance-elision-v1',
+      budgetBytes: this.caps.maxProvenanceBytes,
+      retainedBytes: this.provenanceBytesUsed,
+      elidedMessages: this.provenanceElision.elidedMessages,
+      elidedBytes: this.provenanceElision.elidedBytes,
+      omittedEntries,
+    }
+  }
+
+  private recordProvenanceElision(message: Message, bytes: number): void {
+    this.provenanceElision.elidedMessages += 1
+    this.provenanceElision.elidedBytes += bytes
+    const entry = this.summarizeElidedVirtualMessage(message, bytes)
+    const isError = message.type === 'user' && Array.isArray(message.message.content) &&
+      message.message.content.some(block =>
+        typeof block === 'object' && block !== null &&
+        (block as { type?: string }).type === 'tool_result' &&
+        (block as { is_error?: boolean }).is_error === true,
+      )
+    if (this.provenanceElision.entries.length < PROVENANCE_ELISION_MAX_STORED_ENTRIES) {
+      this.provenanceElision.entries.push({
+        text: entry,
+        escapedBytes: escapedJsonStringBytes(entry),
+        isError,
+      })
+    } else {
+      this.provenanceElision.entriesNotStored += 1
+    }
+
+    if (!this.provenanceElision.summaryMessage) {
+      this.provenanceElision.summaryMessage = {
+        type: 'system',
+        subtype: 'informational',
+        content: '',
+        level: 'warning',
+        isMeta: false,
+        isVirtual: true,
+        timestamp: new Date().toISOString(),
+        uuid: randomUUID(),
+      } as Message
+      this.options.onVirtualMessage?.(this.provenanceElision.summaryMessage)
+    }
+    this.rebuildProvenanceElisionSummary()
+  }
+
+  private emitVirtualMessage(message: Message): void {
+    const capped = capInnerMessageProvenance(message)
+    const bytes = provenanceMessageBytes(capped)
+    if (this.provenanceBytesUsed + bytes <= this.provenanceFullBudgetBytes) {
+      this.provenanceBytesUsed += bytes
+      this.options.onVirtualMessage?.(capped)
+      if (this.provenanceElision.summaryMessage) {
+        this.rebuildProvenanceElisionSummary()
+      }
+      return
+    }
+    this.recordProvenanceElision(capped, bytes)
+  }
+
   private async executeCanonical(tool: Tool, input: unknown): Promise<unknown> {
     const toolUse: ToolUseBlock = {
       type: 'tool_use',
@@ -449,11 +796,12 @@ export class ReplInnerToolRunner {
     }
     this.options.onInnerToolUse?.(tool.name)
     this.toolNamesByUseId.set(toolUse.id, tool.name)
+    this.mutationByUseId.set(toolUse.id, this.isMutationToolUse(tool.name, toolUse.input))
     const assistantMessage = createAssistantMessage({
       content: [toolUse],
       isVirtual: true,
     })
-    this.options.onVirtualMessage?.(capInnerMessageProvenance(assistantMessage))
+    this.emitVirtualMessage(assistantMessage)
 
     const childController = createChildAbortController(this.options.toolUseContext.abortController)
     this.childControllers.add(childController)
@@ -491,8 +839,7 @@ export class ReplInnerToolRunner {
           })
           continue
         }
-        const virtualMessage = capInnerMessageProvenance(markInnerMessageVirtual(message))
-        this.options.onVirtualMessage?.(virtualMessage)
+        this.emitVirtualMessage(markInnerMessageVirtual(message))
         if (message.type !== 'user') continue
         const content = message.message.content
         if (Array.isArray(content)) {

@@ -41,6 +41,7 @@ import { NOTEBOOK_EDIT_TOOL_NAME } from '../../tools/NotebookEditTool/constants.
 import { POWERSHELL_TOOL_NAME } from '../../tools/PowerShellTool/toolName.js'
 import { REPL_TOOL_NAME } from '../../tools/REPLTool/constants.js'
 import { validateReplForegroundOnlyInput } from '../../tools/REPLTool/foregroundValidation.js'
+import { boundReplToolUseResultForPersistence } from '../../tools/REPLTool/outputPersistence.js'
 import { SKILL_TOOL_NAME } from '../../tools/SkillTool/constants.js'
 import { parseGitCommitId } from '../../tools/shared/gitOperationTracking.js'
 import {
@@ -1821,6 +1822,29 @@ export async function checkPermissionsAndCallTool(
 
     if (isMcpTool(tool)) {
       await addToolResult(toolOutput)
+    }
+
+    // REPL output is committed optimistically before hooks so replacement hooks
+    // can redact it. Spill only the final post-hook output, never the original
+    // pre-hook payload, then replace the committed message in place.
+    if (tool.name === REPL_TOOL_NAME && committedToolResultIndex !== undefined) {
+      const committedUpdate = resultingMessages[committedToolResultIndex]
+      if (committedUpdate?.message.type === 'user') {
+        const preserveToolUseResult = !toolUseContext.agentId || toolUseContext.preserveToolUseResults === true
+        const boundedToolUseResult = preserveToolUseResult
+          ? await boundReplToolUseResultForPersistence(
+              toolOutput,
+              toolUseID,
+            )
+          : undefined
+        resultingMessages[committedToolResultIndex] = {
+          ...committedUpdate,
+          message: {
+            ...committedUpdate.message,
+            toolUseResult: boundedToolUseResult,
+          },
+        }
+      }
     }
 
     // Show PostToolUse hook timing inline below tool result when > 500ms.

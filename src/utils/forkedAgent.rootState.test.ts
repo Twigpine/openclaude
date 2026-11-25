@@ -36,6 +36,11 @@ describe('createRootAppStateGetter', () => {
 describe('createSubagentContext', () => {
   test('propagates foreground REPL execution state into nested agents', () => {
     const tracker = { begin: () => {}, end: () => {} }
+    const budget = {
+      cap: 8,
+      tryAcquire: () => {},
+      release: () => {},
+    }
     const parent = {
       options: {
         commands: [],
@@ -52,6 +57,7 @@ describe('createSubagentContext', () => {
       abortController: new AbortController(),
       replInnerExecution: true,
       replPromptWaitTracker: tracker,
+      replAgentConcurrencyBudget: budget,
       readFileState: createFileStateCacheWithSizeLimit(100, 1000),
       messages: [],
       getAppState: () => ({
@@ -69,5 +75,6 @@ describe('createSubagentContext', () => {
     const child = createSubagentContext(parent)
     expect(child.replInnerExecution).toBe(true)
     expect(child.replPromptWaitTracker).toBe(tracker)
+    expect(child.replAgentConcurrencyBudget).toBe(budget)
   })
 })

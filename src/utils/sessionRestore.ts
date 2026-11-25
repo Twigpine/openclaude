@@ -22,6 +22,7 @@ import {
 } from '../tools/AgentTool/loadAgentsDir.js'
 import {
   CODE_MODE_ENV_VAR,
+  getReplModeConversationOverride,
   isReplModeEligibleForSession,
   setReplModeForConversation,
 } from '../tools/REPLTool/constants.js'
@@ -443,22 +444,59 @@ export function exitRestoredWorktree(): void {
 }
 
 /**
- * Enforce the Code Mode resume contract before any resume side effects.
+ * Validate the Code Mode resume contract. Pure check with no side effects.
  * Code Mode transcripts require the orchestration surface that wrote them.
  * Direct transcripts keep their original direct-tool contract even when the
  * current process has Code Mode enabled, so the resumed session never switches
  * tool contracts mid-history.
  */
-export function enforceCodeModeResumeCompatibility(
+export function validateCodeModeResumeCompatibility(
   sessionCodeMode: boolean | undefined,
 ): void {
-  const transcriptUsedCodeMode = sessionCodeMode === true
-  if (transcriptUsedCodeMode && !isReplModeEligibleForSession()) {
+  if (sessionCodeMode === true && !isReplModeEligibleForSession()) {
     throw new Error(
       `This session was created in Code Mode and cannot be resumed with direct tools. Restart with ${CODE_MODE_ENV_VAR}=1 to resume it.`,
     )
   }
-  setReplModeForConversation(transcriptUsedCodeMode)
+}
+
+/**
+ * Validate the Code Mode resume contract and activate the resumed session's
+ * conversation mode as a side effect. Retained for callers that manage the
+ * activation lifetime themselves (for example non-interactive entrypoints);
+ * interactive resume paths should use withCodeModeResumeActivation, which
+ * rolls the activation back when the resume fails.
+ */
+export function enforceCodeModeResumeCompatibility(
+  sessionCodeMode: boolean | undefined,
+): void {
+  validateCodeModeResumeCompatibility(sessionCodeMode)
+  setReplModeForConversation(sessionCodeMode === true)
+}
+
+/**
+ * Transactional Code Mode resume activation. Validates the compatibility
+ * contract, snapshots the current conversation mode override, activates the
+ * resumed transcript's mode, and runs `work`. The activation is in place
+ * before any transcript writes or message processing inside `work` that
+ * depend on it. If validation fails or `work` throws, the prior override is
+ * restored, so the current conversation never inherits the resumed session's
+ * mode after a failed resume. On success the activation stays in place for
+ * the resumed conversation.
+ */
+export async function withCodeModeResumeActivation<T>(
+  sessionCodeMode: boolean | undefined,
+  work: () => Promise<T>,
+): Promise<T> {
+  validateCodeModeResumeCompatibility(sessionCodeMode)
+  const previousOverride = getReplModeConversationOverride()
+  setReplModeForConversation(sessionCodeMode === true)
+  try {
+    return await work()
+  } catch (error) {
+    setReplModeForConversation(previousOverride)
+    throw error
+  }
 }
 
 /**
@@ -485,8 +523,34 @@ export async function processResumedConversation(
     initialState: AppState
   },
 ): Promise<ProcessedResume> {
-  enforceCodeModeResumeCompatibility(result.codeMode)
+  // Validate and activate transactionally: if any resume side effect below
+  // fails, the helper restores the prior conversation mode override.
+  return withCodeModeResumeActivation(result.codeMode, () =>
+    processResumedConversationActivated(result, opts, context),
+  )
+}
 
+/**
+ * Body of processResumedConversation, run inside the Code Mode activation
+ * transaction owned by withCodeModeResumeActivation.
+ */
+async function processResumedConversationActivated(
+  result: ResumeLoadResult,
+  opts: {
+    forkSession: boolean
+    sessionIdOverride?: string
+    transcriptPath?: string
+    includeAttribution?: boolean
+  },
+  context: {
+    modeApi: CoordinatorModeApi | null
+    mainThreadAgentDefinition: AgentDefinition | undefined
+    agentDefinitions: AgentDefinitionsResult
+    currentCwd: string
+    cliAgents: AgentDefinition[]
+    initialState: AppState
+  },
+): Promise<ProcessedResume> {
   // Match coordinator/normal mode to the resumed session
   let modeWarning: string | undefined
   if (feature('COORDINATOR_MODE')) {

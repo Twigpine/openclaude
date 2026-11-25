@@ -30,14 +30,17 @@ import {
 import {
   enforceCodeModeResumeCompatibility,
   processResumedConversation,
+  withCodeModeResumeActivation,
   type ProcessedResume,
 } from './sessionRestore.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
 import { loadConversationForResume } from './conversationRecovery.js'
 import {
+  getReplModeConversationOverride,
   isReplModeEnabled,
   resetReplModeToSessionEligibility,
   setReplModeEnabledForSession,
+  setReplModeForConversation,
 } from '../tools/REPLTool/constants.js'
 
 const tempDirs: string[] = []
@@ -370,6 +373,112 @@ describe('Code Mode resume compatibility', () => {
 
     enforceCodeModeResumeCompatibility(true)
     expect(isReplModeEnabled()).toBe(true)
+  })
+
+  test('withCodeModeResumeActivation keeps the activation on success', async () => {
+    setReplModeEnabledForSession(true)
+    const result = await withCodeModeResumeActivation(true, async () => {
+      expect(isReplModeEnabled()).toBe(true)
+      return 'done'
+    })
+    expect(result).toBe('done')
+    expect(getReplModeConversationOverride()).toBe(true)
+  })
+
+  test('withCodeModeResumeActivation restores the prior override when work fails after validation', async () => {
+    setReplModeEnabledForSession(true)
+    setReplModeForConversation(false)
+    await expect(
+      withCodeModeResumeActivation(true, async () => {
+        expect(isReplModeEnabled()).toBe(true)
+        throw new Error('resume failed mid-flight')
+      }),
+    ).rejects.toThrow('resume failed mid-flight')
+    expect(getReplModeConversationOverride()).toBe(false)
+  })
+
+  test('withCodeModeResumeActivation restores an undefined prior override on failure', async () => {
+    setReplModeEnabledForSession(true)
+    setReplModeForConversation(undefined)
+    await expect(
+      withCodeModeResumeActivation(false, async () => {
+        throw new Error('resume failed mid-flight')
+      }),
+    ).rejects.toThrow('resume failed mid-flight')
+    expect(getReplModeConversationOverride()).toBeUndefined()
+  })
+
+  test('withCodeModeResumeActivation validation failure never activates', async () => {
+    setReplModeEnabledForSession(false)
+    setReplModeForConversation(false)
+    let workRan = false
+    await expect(
+      withCodeModeResumeActivation(true, async () => {
+        workRan = true
+      }),
+    ).rejects.toThrow('cannot be resumed with direct tools')
+    expect(workRan).toBe(false)
+    expect(getReplModeConversationOverride()).toBe(false)
+  })
+
+  test('processResumedConversation restores the prior mode override when resume fails after validation', async () => {
+    setReplModeEnabledForSession(true)
+    setReplModeForConversation(false)
+    const failingResult = {
+      messages: sourceMessages(),
+      sessionId: sourceSessionId as UUID,
+      codeMode: true,
+      get contentReplacements(): ContentReplacementRecord[] | undefined {
+        throw new Error('injected post-validation failure')
+      },
+    }
+
+    await expect(
+      processResumedConversation(
+        failingResult,
+        { forkSession: true },
+        testContext(),
+      ),
+    ).rejects.toThrow('injected post-validation failure')
+    expect(getReplModeConversationOverride()).toBe(false)
+  })
+
+  test('processResumedConversation keeps the transcript mode active after a compatible resume', async () => {
+    setReplModeEnabledForSession(true)
+    setReplModeForConversation(false)
+    const dir = await createTempProject()
+    switchSession(forkSessionId as never, dir)
+    await resetSessionFilePointer()
+
+    await processResumedConversation(
+      {
+        messages: sourceMessages(),
+        sessionId: sourceSessionId as UUID,
+        codeMode: true,
+      },
+      { forkSession: true },
+      testContext(),
+    )
+
+    expect(getReplModeConversationOverride()).toBe(true)
+    expect(isReplModeEnabled()).toBe(true)
+  })
+
+  test('processResumedConversation validation failure never activates the transcript mode', async () => {
+    setReplModeEnabledForSession(false)
+    setReplModeForConversation(false)
+    await expect(
+      processResumedConversation(
+        {
+          messages: sourceMessages(),
+          sessionId: sourceSessionId as UUID,
+          codeMode: true,
+        },
+        { forkSession: true },
+        testContext(),
+      ),
+    ).rejects.toThrow('cannot be resumed with direct tools')
+    expect(getReplModeConversationOverride()).toBe(false)
   })
 })
 

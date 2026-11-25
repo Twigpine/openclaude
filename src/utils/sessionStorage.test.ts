@@ -1092,3 +1092,204 @@ test('recurring heartbeat progress types are ephemeral', () => {
   expect(isEphemeralToolProgress('agent_progress')).toBe(false)
   expect(isEphemeralToolProgress(undefined)).toBe(false)
 })
+
+// recordTranscript consumes runtime messages, which carry no persisted
+// parentUuid/isSidechain/session bookkeeping (insertMessageChain computes and
+// stamps those). The user()/assistant() helpers above shape JSONL rows, so
+// strip the persisted-only fields to mimic the runtime objects useLogMessages
+// actually passes.
+function runtimeMessage<T extends Record<string, unknown>>(message: T): T {
+  const copy = { ...message }
+  delete copy.parentUuid
+  delete copy.isSidechain
+  delete copy.cwd
+  delete copy.sessionId
+  delete copy.version
+  delete copy.userType
+  return copy
+}
+
+test('insertMessageChain keeps REPL virtual inner provenance on the resumed chain in write order', async () => {
+  await withSessionPersistence(async () => {
+    setReplModeEnabledForSession(true)
+    try {
+      const dir = await mkdtemp(join(tmpdir(), 'openclaude-session-storage-'))
+      tempDirs.push(dir)
+      switchSession(sessionId as never, dir)
+      await resetSessionFilePointer()
+
+      // Matches the topology a Code Mode REPL turn produces (verified against
+      // runToolUse): the outer assistant is written in an earlier batch, then
+      // one batch carries the virtual inner assistant, the virtual inner
+      // tool_result (sourceToolAssistantUUID = inner assistant), and the outer
+      // tool_result (sourceToolAssistantUUID = outer assistant) in that order.
+      const prompt = {
+        uuid: id(900),
+        type: 'user',
+        message: { role: 'user', content: 'run the script' },
+        timestamp: ts,
+        isMeta: false,
+      } as never
+      const outerUse = {
+        ...assistant(id(901), null, ''),
+        message: {
+          ...assistant(id(901), null, '').message,
+          content: [
+            {
+              type: 'tool_use',
+              id: 'repl-use-1',
+              name: 'REPL',
+              input: { code: "await Write({file_path:'a.txt',content:'x'})" },
+            },
+          ],
+        },
+      } as never
+      await recordTranscript([prompt, outerUse].map(m => runtimeMessage(m as unknown as Record<string, unknown>)) as never)
+
+      const innerUse = {
+        ...assistant(id(902), null, ''),
+        isVirtual: true,
+        message: {
+          ...assistant(id(902), null, '').message,
+          id: 'inner-msg-1',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'inner-use-1',
+              name: 'Write',
+              input: { file_path: 'a.txt', content: 'x' },
+            },
+          ],
+        },
+      } as never
+      const innerResult = {
+        ...user(id(903), null, [
+          {
+            type: 'tool_result',
+            tool_use_id: 'inner-use-1',
+            content: 'file written',
+            is_error: false,
+          } as ToolResultBlockParam,
+        ]),
+        isVirtual: true,
+        sourceToolAssistantUUID: id(902),
+      } as never
+      const outerResult = {
+        ...user(id(904), null, [
+          {
+            type: 'tool_result',
+            tool_use_id: 'repl-use-1',
+            content: 'REPL completed',
+            is_error: false,
+          } as ToolResultBlockParam,
+        ]),
+        sourceToolAssistantUUID: id(901),
+      } as never
+      const followUp = assistant(id(905), null, 'done') as never
+      // Production writes incremental slices of the full message array; the
+      // replayed prefix is deduped and only the new tail is appended.
+      await recordTranscript([prompt, outerUse, innerUse, innerResult, outerResult, followUp].map(m => runtimeMessage(m as unknown as Record<string, unknown>)) as never)
+      await flushSessionStorage()
+
+      const filePath = join(dir, `${sessionId}.jsonl`)
+      const { messages } = await loadTranscriptFile(filePath)
+      const leaf = messages.get(id(905))!
+      expect(leaf).toBeDefined()
+      const chain = buildConversationChain(messages, leaf)
+      expect(chain.map(m => m.uuid)).toEqual([
+        id(900),
+        id(901),
+        id(902),
+        id(903),
+        id(904),
+        id(905),
+      ])
+      // The outer result still pairs the outer REPL tool_use by tool_use_id,
+      // and both virtual inner messages survive the resume with provenance.
+      const outer = chain.find(m => m.uuid === id(904))
+      expect(outer?.type).toBe('user')
+      const inner = chain.find(m => m.uuid === id(903))
+      expect((inner as { isVirtual?: boolean })?.isVirtual).toBe(true)
+    } finally {
+      setReplModeEnabledForSession(false)
+    }
+  })
+})
+
+test('insertMessageChain preserves parallel tool result pairing across interleaved batches', async () => {
+  await withSessionPersistence(async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openclaude-session-storage-'))
+    tempDirs.push(dir)
+    switchSession(sessionId as never, dir)
+    await resetSessionFilePointer()
+
+    // Streaming emits one assistant message per content block, sharing the
+    // response message.id; parallel tool results complete out of order and
+    // land in separate write batches.
+    const parallelAssistant = (
+      uuid: UUID,
+      toolUseId: string,
+      name: string,
+    ) => ({
+      ...assistant(uuid, null, ''),
+      message: {
+        ...assistant(uuid, null, '').message,
+        id: 'parallel-msg',
+        content: [
+          { type: 'tool_use', id: toolUseId, name, input: {} },
+        ],
+      },
+    }) as never
+    const toolResult = (uuid: UUID, toolUseId: string, source: UUID) => ({
+      ...user(uuid, null, [
+        {
+          type: 'tool_result',
+          tool_use_id: toolUseId,
+          content: 'ok',
+          is_error: false,
+        } as ToolResultBlockParam,
+      ]),
+      sourceToolAssistantUUID: source,
+    }) as never
+
+    const prompt = {
+      uuid: id(910),
+      type: 'user',
+      message: { role: 'user', content: 'do two things' },
+      timestamp: ts,
+      isMeta: false,
+    } as never
+    const asstA = parallelAssistant(id(911), 'tu-a', 'Read')
+    const asstB = parallelAssistant(id(912), 'tu-b', 'Read')
+    const trB = toolResult(id(913), 'tu-b', id(912))
+    const trA = toolResult(id(914), 'tu-a', id(911))
+    const followUp = assistant(id(915), null, 'both done') as never
+
+    await recordTranscript([prompt, asstA, asstB].map(m => runtimeMessage(m as unknown as Record<string, unknown>)) as never)
+    await recordTranscript([prompt, asstA, asstB, trB].map(m => runtimeMessage(m as unknown as Record<string, unknown>)) as never)
+    await recordTranscript([prompt, asstA, asstB, trB, trA].map(m => runtimeMessage(m as unknown as Record<string, unknown>)) as never)
+    await recordTranscript([prompt, asstA, asstB, trB, trA, followUp].map(m => runtimeMessage(m as unknown as Record<string, unknown>)) as never)
+    await flushSessionStorage()
+
+    const filePath = join(dir, `${sessionId}.jsonl`)
+    const { messages } = await loadTranscriptFile(filePath)
+    const leaf = messages.get(id(915))!
+    const chain = buildConversationChain(messages, leaf)
+    const uuids = chain.map(m => m.uuid)
+    for (const expected of [id(910), id(911), id(912), id(913), id(914), id(915)]) {
+      expect(uuids).toContain(expected)
+    }
+    // Both results land after both assistant blocks so every tool_result
+    // follows its tool_use once the sibling blocks merge for the API.
+    expect(uuids.indexOf(id(913))).toBeGreaterThan(uuids.indexOf(id(912)))
+    expect(uuids.indexOf(id(914))).toBeGreaterThan(uuids.indexOf(id(912)))
+    const toolUseIds = new Set<string>()
+    for (const m of chain) {
+      if (m.type !== 'user' || !Array.isArray(m.message.content)) continue
+      for (const block of m.message.content) {
+        if (block.type === 'tool_result') toolUseIds.add(block.tool_use_id)
+      }
+    }
+    expect(toolUseIds).toEqual(new Set(['tu-a', 'tu-b']))
+  })
+})

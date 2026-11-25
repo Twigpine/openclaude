@@ -56,6 +56,29 @@ describe('serializeBridgeValue', () => {
     expect(JSON.stringify(output).length).toBeLessThan(500)
   })
 
+  test('counts host Error message and stack toward aggregate string budgets', () => {
+    const error = new Error('m'.repeat(500))
+    error.stack = 's'.repeat(500)
+    const output = serializeBridgeValue(error, {
+      maxStringLength: 1_000,
+      maxTotalStringLength: 120,
+      maxTotalNodes: 100,
+    }) as { name: string; message: string; stack?: string }
+    expect(output.name).toBe('Error')
+    expect(output.message).toContain('truncated')
+    expect(JSON.stringify(output).length).toBeLessThan(500)
+  })
+
+  test('counts host Error fields toward aggregate node budgets', () => {
+    const error = new Error('message')
+    error.stack = 'stack'
+    const output = serializeBridgeValue({ error, after: 'x' }, {
+      maxTotalNodes: 4,
+    }) as { error: { message: string }; after: string }
+    expect(output.error.message).toBe('message')
+    expect(output.after).toBe('[SerializationBudget]')
+  })
+
   test('bounds strings, arrays, objects, and depth', () => {
     const deep: Record<string, unknown> = {}
     let cursor = deep

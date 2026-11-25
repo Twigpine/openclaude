@@ -7,8 +7,11 @@ import { getEmptyToolPermissionContext, type Tool, type ToolUseContext } from '.
 import type { Message } from '../../types/message.js'
 import { resetDoomLoop } from '../../utils/doomLoop.js'
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js'
-import { ReplInnerToolRunner } from './innerToolRunner.js'
-import { PromptWaitTracker } from './quickjsRuntime.js'
+import {
+  DEFAULT_REPL_PROVENANCE_BUDGET_BYTES,
+  ReplInnerToolRunner,
+} from './innerToolRunner.js'
+import { executeQuickJSScript, PromptWaitTracker } from './quickjsRuntime.js'
 
 function createContext(tools: readonly Tool[]): ToolUseContext {
   const appState = getDefaultAppState()
@@ -307,6 +310,68 @@ describe('ReplInnerToolRunner', () => {
     expect(sawAbort).toBe(true)
   })
 
+  test('rejects queued semaphore acquisitions when the runner aborts', async () => {
+    resetDoomLoop()
+    const tool = createToolFixture(z.object({}), {
+      name: 'AbortSemaphoreFixture',
+      isReadOnly: () => true,
+      isConcurrencySafe: () => true,
+      async call(_input, context) {
+        await new Promise<void>((_resolve, reject) => {
+          context.abortController.signal.addEventListener('abort', () => {
+            reject(new Error('cancelled by abort signal'))
+          }, { once: true })
+        })
+        return { data: 'done' }
+      },
+    })
+    const controller = new AbortController()
+    const runner = createRunner([tool], {
+      caps: { maxConcurrentCalls: 1 },
+      abortSignal: controller.signal,
+    })
+    const first = runner.callTool('AbortSemaphoreFixture', {})
+    const second = runner.callTool('AbortSemaphoreFixture', {})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    controller.abort()
+    const results = await Promise.allSettled([first, second])
+    expect(results[0]?.status).toBe('rejected')
+    expect(results[1]?.status).toBe('rejected')
+    const secondReason = results[1]?.status === 'rejected' ? results[1].reason : undefined
+    expect((secondReason as Error).message).toContain('aborted')
+  })
+
+  test('rejects queued read-write lane acquisitions when the runner aborts', async () => {
+    resetDoomLoop()
+    const tool = createToolFixture(z.object({}), {
+      name: 'AbortWriteLaneFixture',
+      isReadOnly: () => false,
+      isConcurrencySafe: () => false,
+      async call(_input, context) {
+        await new Promise<void>((_resolve, reject) => {
+          context.abortController.signal.addEventListener('abort', () => {
+            reject(new Error('cancelled by abort signal'))
+          }, { once: true })
+        })
+        return { data: 'done' }
+      },
+    })
+    const controller = new AbortController()
+    const runner = createRunner([tool], {
+      caps: { maxConcurrentCalls: 2 },
+      abortSignal: controller.signal,
+    })
+    const first = runner.callTool('AbortWriteLaneFixture', {})
+    const second = runner.callTool('AbortWriteLaneFixture', {})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    controller.abort()
+    const results = await Promise.allSettled([first, second])
+    expect(results[0]?.status).toBe('rejected')
+    expect(results[1]?.status).toBe('rejected')
+    const secondReason = results[1]?.status === 'rejected' ? results[1].reason : undefined
+    expect((secondReason as Error).message).toContain('aborted')
+  })
+
   test('omits binary attachment payloads from guest results', async () => {
     resetDoomLoop()
     const tool = createToolFixture(z.object({}), {
@@ -402,6 +467,89 @@ describe('ReplInnerToolRunner', () => {
     expect(JSON.stringify(assistant)).not.toContain(longKey)
   })
 
+  test('rejects multi-MB Write and Bash fanout before queued concurrency slots open', async () => {
+    resetDoomLoop()
+    let started = 0
+    const writeTool = createToolFixture(z.object({ file_path: z.string(), content: z.string() }), {
+      name: 'Write',
+      isReadOnly: () => false,
+      isConcurrencySafe: () => false,
+      async call() {
+        started += 1
+        await new Promise(resolve => setTimeout(resolve, 2))
+        return { data: 'ok' }
+      },
+    })
+    const bashTool = createToolFixture(z.object({ command: z.string() }), {
+      name: BASH_TOOL_NAME,
+      async call() {
+        started += 1
+        await new Promise(resolve => setTimeout(resolve, 2))
+        return { data: 'ok' }
+      },
+    })
+    const runner = createRunner([writeTool, bashTool], {
+      caps: { maxConcurrentCalls: 1, maxTotalCalls: 100, maxMutationCalls: 100, maxShellCalls: 100 },
+    })
+    let execution
+    try {
+      execution = await executeQuickJSScript({
+        code: [
+          "const chunk = 'x'.repeat(600 * 1024)",
+          'const pending = []',
+          'const errors = []',
+          'for (let index = 0; index < 20; index++) {',
+          '  const call = index % 2 === 0',
+          '    ? Write({ file_path: `/tmp/repl-queued-${index}`, content: chunk })',
+          '    : Bash({ command: chunk })',
+          '  pending.push(call.then(',
+          "    () => 'ok',",
+          "    error => { errors.push(error.message); return 'rejected' },",
+          '  ))',
+          '}',
+          'const outcomes = await Promise.all(pending)',
+          "return { accepted: outcomes.filter(outcome => outcome === 'ok').length, errors: errors.length, firstError: errors[0] || '' }",
+        ].join('\n'),
+        hostFunctions: runner.createHostFunctions(),
+      })
+    } finally {
+      runner.dispose()
+    }
+    expect(execution.status).toBe('completed')
+    const outcome = execution.result as { accepted: number; errors: number; firstError: string }
+    expect(outcome.errors).toBeGreaterThan(0)
+    expect(outcome.firstError).toContain('per-script serialized input budget')
+    expect(outcome.accepted).toBe(started)
+    expect(started).toBeLessThan(20)
+    expect(started + outcome.errors).toBe(20)
+  })
+
+  test('bounds large attachment arrays in input provenance redaction', async () => {
+    resetDoomLoop()
+    const messages: Message[] = []
+    const tool = createToolFixture(z.object({ command: z.string() }), {
+      name: BASH_TOOL_NAME,
+      async call() { return { data: 'ok' } },
+    })
+    const runner = createRunner([tool], {
+      onVirtualMessage: message => messages.push(message),
+    })
+    const payload = 'a'.repeat(1_000)
+    const attachments = Array.from({ length: 5_000 }, () => ({
+      type: 'image',
+      mimeType: 'image/png',
+      data: payload,
+    }))
+    await runner.callTool(BASH_TOOL_NAME, { command: 'echo ok', attachments })
+    const assistant = messages.find(message => message.type === 'assistant')
+    const block = assistant?.message.content[0] as { input?: { attachments?: unknown[] } }
+    const items = block.input?.attachments ?? []
+    expect(items).toHaveLength(51)
+    expect((items[0] as { data?: string }).data).toBe('[attachment payload omitted from REPL result]')
+    expect(String(items[50])).toContain('truncated')
+    expect(JSON.stringify(block.input)).not.toContain(payload)
+  })
+
   test('rejects background execution introduced by permission input rewriting', async () => {
     resetDoomLoop()
     let called = false
@@ -420,4 +568,71 @@ describe('ReplInnerToolRunner', () => {
     await expect(runner.callTool(BASH_TOOL_NAME, { command: 'sleep 10' })).rejects.toThrow('run_in_background is unavailable')
     expect(called).toBe(false)
   })
+
+  test('bounds maximal fanout virtual provenance and preserves elision audit metadata', async () => {
+    resetDoomLoop()
+    const messages: Message[] = []
+    const tool = createToolFixture(z.object({ value: z.string() }), {
+      name: 'FanoutMutation',
+      isReadOnly: () => false,
+      isConcurrencySafe: () => true,
+      maxResultSizeChars: 100_000,
+      async call(input) {
+        if (input.value.includes('error-me')) {
+          throw new Error(`mutation failed ${'e'.repeat(4_000)}`)
+        }
+        return { data: `result:${input.value}` }
+      },
+    })
+    const runner = createRunner([tool], {
+      caps: { maxTotalCalls: 100, maxMutationCalls: 100 },
+      onVirtualMessage: message => messages.push(message),
+    })
+    try {
+      await Promise.allSettled(Array.from({ length: 100 }, (_, index) =>
+        runner.callTool('FanoutMutation', {
+          value: `${index}:${index % 3 === 0 ? 'error-me' : 'ok'}:${'x'.repeat(4_000)}`,
+        }),
+      ))
+    } finally {
+      runner.dispose()
+    }
+
+    const serializedBytes = messages.reduce(
+      (sum, message) => sum + Buffer.byteLength(JSON.stringify(message), 'utf8'),
+      0,
+    )
+    expect(serializedBytes).toBeLessThanOrEqual(DEFAULT_REPL_PROVENANCE_BUDGET_BYTES)
+    expect(messages.filter(message => message.type === 'assistant').length).toBeLessThan(100)
+
+    const summary = messages.find(message =>
+      message.type === 'system' &&
+      (message as { replProvenanceElision?: unknown }).replProvenanceElision !== undefined,
+    )
+    expect(summary).toBeDefined()
+    if (!summary) throw new Error('Expected provenance elision summary')
+    const detail = (summary as unknown as {
+      replProvenanceElision: {
+        marker: string
+        budgetBytes: number
+        retainedBytes: number
+        elidedMessages: number
+        elidedBytes: number
+        omittedEntries: number
+      }
+    }).replProvenanceElision
+    expect(detail.marker).toBe('repl-provenance-elision-v1')
+    expect(detail.budgetBytes).toBe(DEFAULT_REPL_PROVENANCE_BUDGET_BYTES)
+    expect(detail.elidedMessages).toBeGreaterThan(0)
+    expect(detail.elidedBytes).toBeGreaterThan(0)
+    expect(detail.retainedBytes).toBeGreaterThan(0)
+
+    const content = String((summary as { content?: unknown }).content)
+    expect(content).toContain('REPL virtual provenance elided')
+    expect(content).toContain('aggregate budget')
+    expect(content).toMatch(/repl_tool_[0-9a-f-]+ use FanoutMutation mutation/)
+    expect(content).toMatch(/repl_tool_[0-9a-f-]+ result FanoutMutation mutation error/)
+    expect(content).toContain('input=')
+  })
+
 })

@@ -1,6 +1,5 @@
-import type { Tool, Tools } from '../../Tool.js'
+import type { Tool, ToolPermissionContext, Tools } from '../../Tool.js'
 import { filterToolsByDenyRules } from '../../tools.js'
-import type { ToolPermissionContext } from '../../types/permissions.js'
 import { POWERSHELL_TOOL_NAME } from '../PowerShellTool/toolName.js'
 import { isLegalGuestIdentifier } from './guestIdentifiers.js'
 import { getReplPrimitiveTools } from './primitiveTools.js'
@@ -15,7 +14,7 @@ export const REPL_NON_PRIMITIVE_ALLOWLIST = new Set([
   'RepoMap',
 ])
 
-const REPL_EXCLUDED_TOOLS = new Set([
+export const REPL_EXCLUDED_TOOLS: ReadonlySet<string> = new Set([
   'REPL',
   'Skill',
   'TodoWrite',

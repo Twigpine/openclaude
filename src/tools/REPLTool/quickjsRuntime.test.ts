@@ -90,6 +90,74 @@ describe('executeQuickJSScript', () => {
     expect(result.result).toBe(3)
   }, TEST_TIMEOUT)
 
+  test('rejects a fulfilled host call that settles before completion without observation', async () => {
+    const result = await executeQuickJSScript({
+      code: "hostFast(); await hostSlow(); return 'done'",
+      hostFunctions: {
+        hostFast: async () => 'fast-result',
+        hostSlow: async () => {
+          await new Promise(resolve => setTimeout(resolve, 25))
+          return 'slow-result'
+        },
+      },
+    })
+    expect(result.status).toBe('error')
+    expect(result.error?.message).toContain('without observing settled inner tool results: hostFast')
+  }, TEST_TIMEOUT)
+
+  test('rejects a rejected host call that settles before completion without observation', async () => {
+    const result = await executeQuickJSScript({
+      code: "hostFast(); await hostSlow(); return 'done'",
+      hostFunctions: {
+        hostFast: async () => { throw new Error('fast failure') },
+        hostSlow: async () => {
+          await new Promise(resolve => setTimeout(resolve, 25))
+          return 'slow-result'
+        },
+      },
+    })
+    expect(result.status).toBe('error')
+    expect(result.error?.message).toContain('without observing settled inner tool results: hostFast')
+  }, TEST_TIMEOUT)
+
+  test('counts then handlers as observation before completion', async () => {
+    const result = await executeQuickJSScript({
+      code: "hostFast().then(() => {}); await hostSlow(); return 'done'",
+      hostFunctions: {
+        hostFast: async () => 'fast-result',
+        hostSlow: async () => {
+          await new Promise(resolve => setTimeout(resolve, 25))
+          return 'slow-result'
+        },
+      },
+    })
+    expect(result.status).toBe('completed')
+    expect(result.result).toBe('done')
+  }, TEST_TIMEOUT)
+
+  test('returning a host promise observes it through async result assimilation', async () => {
+    const result = await executeQuickJSScript({
+      code: 'return hostValue(4)',
+      hostFunctions: {
+        hostValue: async args => args[0],
+      },
+    })
+    expect(result.status).toBe('completed')
+    expect(result.result).toBe(4)
+  }, TEST_TIMEOUT)
+
+  test('keeps host promises native-shaped to guest inspection', async () => {
+    const result = await executeQuickJSScript({
+      code: "const pending = hostNever(); return [pending instanceof Promise, typeof pending.then, Object.prototype.toString.call(pending)]",
+      timeoutMs: 100,
+      hostFunctions: {
+        hostNever: () => new Promise(() => {}),
+      },
+    })
+    expect(result.status).toBe('completed')
+    expect(result.result).toEqual([true, 'function', '[object Promise]'])
+  }, TEST_TIMEOUT)
+
   test('times out an infinite loop under a test-shortened budget', async () => {
     const started = Date.now()
     const result = await executeQuickJSScript({ code: 'while (true) {}', timeoutMs: 40 })
@@ -118,7 +186,7 @@ describe('executeQuickJSScript', () => {
   test('memory exhaustion produces a controlled error', async () => {
     const result = await executeQuickJSScript({
       code: 'const a=[]; while (true) { a.push(new Array(1000).fill(1)) }',
-      timeoutMs: 2_000,
+      timeoutMs: 10_000,
       memoryLimitBytes: 2 * 1024 * 1024,
     })
     expect(result.status).toBe('error')
@@ -140,6 +208,106 @@ describe('executeQuickJSScript', () => {
     expect(result.error?.name).toBe('Error')
     expect(result.error?.message).toBe('QuickJS guest value could not be serialized')
   })
+
+  test('rejects oversized Write and Bash inputs as catchable tool errors', async () => {
+    const calls: string[] = []
+    const result = await executeQuickJSScript({
+      code: [
+        "const content = 'x'.repeat(1100 * 1024)",
+        'const errors = []',
+        "try { await Write({ file_path: '/tmp/repl-large-write', content }) } catch (error) { errors.push(error.message) }",
+        'try { await Bash({ command: content }) } catch (error) { errors.push(error.message) }',
+        'return errors',
+      ].join('\n'),
+      hostFunctions: {
+        Write: () => {
+          calls.push('Write')
+          return 'unexpected'
+        },
+        Bash: () => {
+          calls.push('Bash')
+          return 'unexpected'
+        },
+      },
+    })
+    expect(result.status).toBe('completed')
+    expect(calls).toEqual([])
+    const errors = result.result as string[]
+    expect(errors).toHaveLength(2)
+    expect(errors[0]).toContain('per-call serialized input budget')
+    expect(errors[1]).toContain('per-call serialized input budget')
+  }, TEST_TIMEOUT)
+
+  test('honors configured serialized input byte budgets', async () => {
+    const result = await executeQuickJSScript({
+      code: [
+        "const first = await capture({ text: 'first' })",
+        "let message = ''",
+        "try { await capture({ text: 'second' }) } catch (error) { message = error.message }",
+        'return [first, message]',
+      ].join('\n'),
+      maxInputBytesPerCall: 100,
+      maxInputBytesPerScript: 20,
+      hostFunctions: {
+        capture: args => (args[0] as { text: string }).text,
+      },
+    })
+    expect(result.status).toBe('completed')
+    const [first, message] = result.result as [string, string]
+    expect(first).toBe('first')
+    expect(message).toContain('per-script serialized input budget')
+  }, TEST_TIMEOUT)
+
+  test('measures serialized input budgets as UTF-8 bytes', async () => {
+    let called = false
+    const result = await executeQuickJSScript({
+      code: "try { await capture({ text: 'é'.repeat(6) }); return 'accepted' } catch (error) { return error.message }",
+      maxInputBytesPerCall: 15,
+      hostFunctions: {
+        capture: () => {
+          called = true
+          return 'unexpected'
+        },
+      },
+    })
+    expect(result.status).toBe('completed')
+    expect(result.result).toContain('per-call serialized input budget')
+    expect(called).toBe(false)
+  }, TEST_TIMEOUT)
+
+  test('enforces the aggregate input budget across queued multi-MB fanout', async () => {
+    let started = 0
+    const result = await executeQuickJSScript({
+      code: [
+        "const chunk = 'x'.repeat(600 * 1024)",
+        'const pending = []',
+        'const errors = []',
+        'for (let index = 0; index < 20; index++) {',
+        '  const call = Write({ file_path: `/tmp/repl-fanout-${index}`, content: chunk }).then(',
+        "    () => 'ok',",
+        "    error => { errors.push(error.message); return 'rejected' },",
+        '  )',
+        '  pending.push(call)',
+        '}',
+        'const outcomes = await Promise.all(pending)',
+        "return { accepted: outcomes.filter(outcome => outcome === 'ok').length, errors: errors.length, firstError: errors[0] || '' }",
+      ].join('\n'),
+      hostFunctions: {
+        Write: async () => {
+          started += 1
+          await new Promise(resolve => setTimeout(resolve, 5))
+          return 'ok'
+        },
+      },
+    })
+    expect(result.status).toBe('completed')
+    const outcome = result.result as { accepted: number; errors: number; firstError: string }
+    expect(outcome.errors).toBeGreaterThan(0)
+    expect(outcome.firstError).toContain('per-script serialized input budget')
+    expect(outcome.accepted).toBe(started)
+    expect(started).toBeLessThan(20)
+    expect(started + outcome.errors).toBe(20)
+  }, TEST_TIMEOUT)
 
   test('host errors become catchable guest rejections', async () => {
     const result = await executeQuickJSScript({

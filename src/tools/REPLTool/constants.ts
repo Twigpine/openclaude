@@ -112,3 +112,24 @@ export const REPL_ONLY_TOOLS = new Set([
   'PowerShell',
   'Agent',
 ])
+
+/**
+ * Guest-facing ergonomic aliases for primitive tools. Canonical names remain
+ * the authoritative tool identity; these aliases only affect function names
+ * installed inside the QuickJS guest.
+ */
+export const REPL_ERGONOMIC_ALIASES: ReadonlyMap<string, string> = new Map([
+  ['Read', 'read'],
+  ['Write', 'write'],
+  ['Edit', 'edit'],
+  ['Glob', 'glob'],
+  ['Grep', 'grep'],
+  ['Bash', 'bash'],
+  ['NotebookEdit', 'notebookEdit'],
+  ['PowerShell', 'powerShell'],
+  ['Agent', 'agent'],
+])
+
+export function getReplErgonomicAlias(toolName: string): string | undefined {
+  return REPL_ERGONOMIC_ALIASES.get(toolName)
+}

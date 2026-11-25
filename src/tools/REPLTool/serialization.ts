@@ -19,6 +19,23 @@ function truncateString(value: string, maxLength: number): string {
   return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`
 }
 
+function errorStringField(error: Error, key: 'name' | 'message' | 'stack'): string | undefined {
+  try {
+    const value = error[key]
+    return typeof value === 'string' ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function safeToString(value: unknown): string {
+  try {
+    return String(value)
+  } catch {
+    return '[unprintable value]'
+  }
+}
+
 export function serializeBridgeValue(
   value: unknown,
   options: BridgeSerializationOptions = {},
@@ -39,9 +56,29 @@ export function serializeBridgeValue(
     return serialized
   }
 
-  function serializeInner(current: unknown, depth: number): unknown {
-    if (nodes >= maxTotalNodes) return '[SerializationBudget]'
+  function consumeNode(): boolean {
+    if (nodes >= maxTotalNodes) return false
     nodes += 1
+    return true
+  }
+
+  function capErrorPart(value: string): string {
+    if (!consumeNode()) return '[SerializationBudget]'
+    return capString(value)
+  }
+
+  function serializeErrorValue(error: Error): SerializedBridgeError {
+    const message = errorStringField(error, 'message') || safeToString(error)
+    const stack = errorStringField(error, 'stack')
+    return {
+      name: capErrorPart(errorStringField(error, 'name') || 'Error'),
+      message: capErrorPart(message),
+      ...(stack ? { stack: capErrorPart(stack) } : {}),
+    }
+  }
+
+  function serializeInner(current: unknown, depth: number): unknown {
+    if (!consumeNode()) return '[SerializationBudget]'
     if (current === null) return null
     if (typeof current === 'string') {
       return capString(current)
@@ -55,7 +92,7 @@ export function serializeBridgeValue(
       return `[function${fn.name ? ` ${fn.name}` : ''}]`
     }
     if (current instanceof Date) return current.toISOString()
-    if (current instanceof Error) return serializeBridgeError(current, options)
+    if (current instanceof Error) return serializeErrorValue(current)
     if (ArrayBuffer.isView(current)) {
       const view = current as { constructor?: { name?: string }; byteLength?: number }
       return {
@@ -81,12 +118,17 @@ export function serializeBridgeValue(
         return items
       }
       const out: Record<string, unknown> = {}
-      const entries = Object.entries(current as Record<string, unknown>)
-      for (const [key, entryValue] of entries.slice(0, maxObjectProperties)) {
-        out[capString(key)] = serializeInner(entryValue, depth + 1)
+      let propertyCount = 0
+      let serializedProperties = 0
+      for (const key in current as Record<string, unknown>) {
+        if (!Object.prototype.hasOwnProperty.call(current, key)) continue
+        propertyCount += 1
+        if (serializedProperties >= maxObjectProperties) continue
+        serializedProperties += 1
+        out[capString(key)] = serializeInner((current as Record<string, unknown>)[key], depth + 1)
       }
-      if (entries.length > maxObjectProperties) {
-        out.__truncated__ = `${entries.length - maxObjectProperties} properties omitted`
+      if (propertyCount > maxObjectProperties) {
+        out.__truncated__ = `${propertyCount - maxObjectProperties} properties omitted`
       }
       return out
     }
@@ -107,26 +149,41 @@ export function serializeBridgeError(
 ): SerializedBridgeError {
   const maxStringLength = options.maxStringLength ?? DEFAULT_MAX_STRING_LENGTH
   if (error instanceof Error) {
+    const message = errorStringField(error, 'message') || safeToString(error)
+    const stack = errorStringField(error, 'stack')
     return {
-      name: error.name || 'Error',
-      message: truncateString(error.message || String(error), maxStringLength),
-      ...(error.stack ? { stack: truncateString(error.stack, maxStringLength) } : {}),
+      name: truncateString(errorStringField(error, 'name') || 'Error', maxStringLength),
+      message: truncateString(message, maxStringLength),
+      ...(stack ? { stack: truncateString(stack, maxStringLength) } : {}),
     }
   }
   if (typeof error === 'object' && error !== null) {
-    const serialized = error as { name?: unknown; message?: unknown; stack?: unknown }
-    if (typeof serialized.name === 'string' && typeof serialized.message === 'string') {
+    try {
+      const serialized = error as { name?: unknown; message?: unknown; stack?: unknown }
+      if (typeof serialized.name === 'string' && typeof serialized.message === 'string') {
+        return {
+          name: truncateString(serialized.name || 'Error', maxStringLength),
+          message: truncateString(serialized.message, maxStringLength),
+          ...(typeof serialized.stack === 'string'
+            ? { stack: truncateString(serialized.stack, maxStringLength) }
+            : {}),
+        }
+      }
+    } catch {
       return {
-        name: truncateString(serialized.name || 'Error', maxStringLength),
-        message: truncateString(serialized.message, maxStringLength),
-        ...(typeof serialized.stack === 'string'
-          ? { stack: truncateString(serialized.stack, maxStringLength) }
-          : {}),
+        name: 'Error',
+        message: 'Error object could not be serialized',
       }
     }
   }
+  let message: string
+  try {
+    message = String(serializeBridgeValue(error, options) ?? error)
+  } catch {
+    message = safeToString(error)
+  }
   return {
     name: 'Error',
-    message: truncateString(String(serializeBridgeValue(error, options) ?? error), maxStringLength),
+    message: truncateString(message, maxStringLength),
   }
 }

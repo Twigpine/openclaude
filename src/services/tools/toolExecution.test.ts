@@ -199,6 +199,121 @@ test('PostToolUse updatedToolOutput replaces non-MCP output before commit', asyn
   expect(JSON.stringify(toolResult)).not.toContain('original-sensitive-output')
 })
 
+function postToolOutputHookSession(
+  toolName: string,
+  hookSpecificOutput: Record<string, unknown>,
+) {
+  const hookOutputJson = JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PostToolUse',
+      ...hookSpecificOutput,
+    },
+  })
+  return new Map([
+    [
+      getSessionId(),
+      {
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: toolName,
+              hooks: [
+                {
+                  hook: {
+                    type: 'command',
+                    command: `printf '%s' '${hookOutputJson}'`,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  ])
+}
+
+function createSchemaValidatedHookOutputTool() {
+  return createToolFixture(z.object({ value: z.string() }), {
+    name: 'SchemaValidatedHookOutputTool',
+    outputSchema: z.object({
+      status: z.literal('completed'),
+      result: z.string(),
+    }),
+    async call() {
+      return {
+        data: {
+          status: 'completed' as const,
+          result: 'original-output',
+        },
+      }
+    },
+    mapToolResultToToolResultBlockParam(content, toolUseID) {
+      return {
+        type: 'tool_result',
+        tool_use_id: toolUseID,
+        content: JSON.stringify(content),
+      }
+    },
+  })
+}
+
+function hookErrorContents(updates: MessageUpdateLazy[]): string[] {
+  return updates.flatMap(update =>
+    update.message.type === 'attachment' &&
+    update.message.attachment.type === 'hook_error_during_execution'
+      ? [update.message.attachment.content]
+      : [],
+  )
+}
+
+test('PostToolUse updatedToolOutput applies a schema-valid replacement', async () => {
+  const tool = createSchemaValidatedHookOutputTool()
+  const replacement = {
+    status: 'completed' as const,
+    result: 'redacted-output',
+  }
+  const context = createLifecycleToolUseContext(
+    [tool],
+    new CountingQueryLifecycleTracker(),
+    new AbortController(),
+    postToolOutputHookSession(tool.name, { updatedToolOutput: replacement }),
+  )
+
+  const updates = await collectRunToolUse(tool, { value: 'x' }, context)
+  const toolResult = updates.find(update => update.message.type === 'user')?.message
+
+  expect((toolResult as { toolUseResult?: unknown })?.toolUseResult).toEqual(replacement)
+  expect(hookErrorContents(updates)).toEqual([])
+})
+
+test('PostToolUse updatedToolOutput rejects a schema-invalid replacement', async () => {
+  const tool = createSchemaValidatedHookOutputTool()
+  const context = createLifecycleToolUseContext(
+    [tool],
+    new CountingQueryLifecycleTracker(),
+    new AbortController(),
+    postToolOutputHookSession(tool.name, {
+      updatedToolOutput: {
+        status: 'completed',
+        result: 42,
+      },
+    }),
+  )
+
+  const updates = await collectRunToolUse(tool, { value: 'x' }, context)
+  const toolResult = updates.find(update => update.message.type === 'user')?.message
+
+  expect((toolResult as { toolUseResult?: unknown })?.toolUseResult).toEqual({
+    status: 'completed',
+    result: 'original-output',
+  })
+  const hookErrors = hookErrorContents(updates)
+  expect(hookErrors).toHaveLength(1)
+  expect(hookErrors[0]).toContain('failed output schema validation')
+  expect(hookErrors[0]).toContain('result')
+})
+
 test('a late successful tool result resets doom blocks without clearing another agent', async () => {
   const agentId = asAgentId('doom-loop-late-success')
   const siblingId = asAgentId('doom-loop-sibling')

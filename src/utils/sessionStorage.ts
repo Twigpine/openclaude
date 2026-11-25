@@ -2904,6 +2904,12 @@ class Project {
       const sessionId = sidechainDestination?.sessionId ?? getSessionId()
       const slug = getPlanSlugCache().get(sessionId)
 
+      // Resolved parentUuid of each chain participant written in this batch,
+      // keyed by message uuid. Used to detect when the sourceToolAssistantUUID
+      // override would fork a sibling branch off a chain this batch already
+      // extended past the assistant (REPL virtual inner provenance).
+      const resolvedParentByUuid = new Map<UUID, UUID | null>()
+
       for (const message of messages) {
         const isCompactBoundary = isCompactBoundaryMessage(message)
 
@@ -2915,7 +2921,32 @@ class Project {
           'sourceToolAssistantUUID' in message &&
           message.sourceToolAssistantUUID
         ) {
-          effectiveParentUuid = message.sourceToolAssistantUUID
+          const sourceUuid = message.sourceToolAssistantUUID
+          effectiveParentUuid = sourceUuid
+          // The override exists for late-arriving parallel tool results that
+          // must attach back to their own assistant across separate inserts.
+          // Within one batch it can instead fork a sibling branch: a Code
+          // Mode REPL batch writes the virtual inner provenance chain off the
+          // outer assistant first, then the outer tool_result last. Pointing
+          // the outer result back at the outer assistant makes it a sibling
+          // of the virtual chain root, and buildConversationChain's single
+          // parent walk drops the entire virtual branch on resume. When the
+          // sequential parent already descends from the source assistant
+          // within this batch, the linear write-order parent preserves both
+          // the pairing (carried by tool_use_id) and every intermediate
+          // message, so keep it.
+          let cursor: UUID | null = parentUuid
+          let hops = resolvedParentByUuid.size + 1
+          while (cursor !== null && hops > 0) {
+            if (cursor === sourceUuid) {
+              effectiveParentUuid = parentUuid
+              break
+            }
+            const next = resolvedParentByUuid.get(cursor)
+            if (next === undefined) break
+            cursor = next
+            hops--
+          }
         }
 
         const transcriptMessage: TranscriptMessage = {
@@ -2987,6 +3018,10 @@ class Project {
           }
         }
         if (isChainParticipant(message)) {
+          resolvedParentByUuid.set(
+            message.uuid as UUID,
+            transcriptMessage.parentUuid ?? null,
+          )
           parentUuid = message.uuid
         }
       }
