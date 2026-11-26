@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   utimes,
   writeFile,
@@ -42,6 +43,51 @@ const realFs = await import('node:fs')
 const realLinkSync = realFs.linkSync
 const realRenameSync = realFs.renameSync
 const realWriteFileSync = realFs.writeFileSync
+const realOpenSync = realFs.openSync
+const realUnlink = realFsPromises.unlink
+const realUnlinkSync = realFs.unlinkSync
+const realUtimes = realFsPromises.utimes
+const realUtimesSync = realFs.utimesSync
+const realRm = realFsPromises.rm
+const realRmSync = realFs.rmSync
+let beforeReclaimUnlink: ((path: string) => void) | undefined
+let beforeInstallStamp: ((path: string) => void) | undefined
+let beforePendingCleanup: (() => void) | undefined
+
+function injectPendingCleanup(path: unknown): void {
+  if (typeof path !== 'string' || !basename(path).startsWith('.publish-')) return
+  const inject = beforePendingCleanup
+  beforePendingCleanup = undefined
+  inject?.()
+}
+
+function injectStamp(path: string): void {
+  if (!basename(path).startsWith('installing.')) return
+  const inject = beforeInstallStamp
+  beforeInstallStamp = undefined
+  inject?.(path)
+}
+
+// One-shot fault at the open of the private staged record, before it
+// can be synced in either runtime.
+let stagedOpenInjection: ((path: string) => void) | undefined
+
+function injectStagedOpen(path: unknown): void {
+  if (typeof path !== 'string' || !basename(path).startsWith('installing.')) return
+  const inject = stagedOpenInjection
+  stagedOpenInjection = undefined
+  inject?.(path)
+}
+
+const mockedOpen: typeof realOpen = ((...args: Parameters<typeof realOpen>) => {
+  injectStagedOpen(args[0])
+  return realOpen(...args)
+}) as typeof realOpen
+
+const mockedOpenSync: typeof realOpenSync = ((...args: Parameters<typeof realOpenSync>) => {
+  injectStagedOpen(args[0])
+  return realOpenSync(...args)
+}) as typeof realOpenSync
 
 const TEST_PROCESS_MARKER = 'a'.repeat(64)
 
@@ -112,6 +158,15 @@ type CommitInjection = {
   fired: () => void
 }
 let commitInjection: CommitInjection | undefined
+// A one-shot interleaving immediately before installing the staged claim.
+let claimInstallInjection: ((from: string, to: string) => void) | undefined
+
+function injectClaimInstall(from: string, to: string): void {
+  if (!basename(from).startsWith('.publish-') || !to.endsWith('.commit')) return
+  const inject = claimInstallInjection
+  claimInstallInjection = undefined
+  inject?.(from, to)
+}
 
 // Commit-pause control for the writeNewSession race test. When armed,
 // every commit call for the given target waits on a gate the test
@@ -130,6 +185,7 @@ let commitPause: CommitPause | undefined
 // concurrent-create and delayed-commit regressions can run the
 // rename() fallback path (CodeRabbit #2497 review 5945720742).
 let linkUnsupported = false
+let beforeUnsupportedLink: ((path: string) => void) | undefined
 const linkUnsupportedError = Object.assign(
   new Error('Operation not permitted'),
   { code: 'EPERM' },
@@ -148,7 +204,10 @@ async function mockedLink(oldPath: string, newPath: string): Promise<void> {
     await realWriteFile(newPath, JSON.stringify(injection.successor))
     injection.fired()
   }
-  if (linkUnsupported) throw linkUnsupportedError
+  if (linkUnsupported) {
+    beforeUnsupportedLink?.(oldPath)
+    throw linkUnsupportedError
+  }
   if (commitPause && newPath === commitPause.target) {
     let release!: () => void
     const gate = new Promise<void>(resolve => {
@@ -164,6 +223,7 @@ async function mockedRename(
   oldPath: string,
   newPath: string,
 ): Promise<void> {
+  injectClaimInstall(oldPath, newPath)
   if (commitInjection && newPath === commitInjection.target) {
     const injection = commitInjection
     commitInjection = undefined
@@ -188,11 +248,15 @@ function mockedLinkSync(oldPath: string, newPath: string): void {
     realWriteFileSync(newPath, JSON.stringify(injection.successor))
     injection.fired()
   }
-  if (linkUnsupported) throw linkUnsupportedError
+  if (linkUnsupported) {
+    beforeUnsupportedLink?.(oldPath)
+    throw linkUnsupportedError
+  }
   realLinkSync(oldPath, newPath)
 }
 
 function mockedRenameSync(oldPath: string, newPath: string): void {
+  injectClaimInstall(oldPath, newPath)
   if (commitInjection && newPath === commitInjection.target) {
     const injection = commitInjection
     commitInjection = undefined
@@ -200,6 +264,24 @@ function mockedRenameSync(oldPath: string, newPath: string): void {
     injection.fired()
   }
   realRenameSync(oldPath, newPath)
+}
+
+// Pins process.platform for the rest of the current test; afterEach
+// restores every pin, so a Windows-only error classification can be
+// exercised deterministically on every platform (CodeRabbit review on
+// #2564).
+const pendingPlatformRestores: Array<() => void> = []
+function pinProcessPlatform(platform: NodeJS.Platform): void {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+  Object.defineProperty(process, 'platform', {
+    value: platform,
+    configurable: true,
+  })
+  if (descriptor) {
+    pendingPlatformRestores.push(() => {
+      Object.defineProperty(process, 'platform', descriptor)
+    })
+  }
 }
 
 describe('terminal-fact publish across withdrawn claims', () => {
@@ -222,16 +304,23 @@ describe('terminal-fact publish across withdrawn claims', () => {
   const ISOLATED_CHILD =
     process.env.OPENCLAUDE_BG_CLAIM_RACE_ISOLATED === '1'
 
-  // Runs one stale-lock scenario in an isolated `bun test` child process
-  // (this file, filtered to the scenario, ISOLATED_CHILD=1) and fails
-  // with the child's output when it does not exit 0.
-  async function runStaleLockScenarioInChild(name: string): Promise<void> {
+  // Runs one scenario in an isolated `bun test` child process (this
+  // file, filtered to the scenario, ISOLATED_CHILD=1) and reports a
+  // nonzero exit with the child's output.
+  async function runIsolatedScenario(name: string): Promise<void> {
+    // Bun treats -t as a regex. Anchor the end so a longer scenario
+    // with this name as its prefix cannot share the lock-stealing child.
+    const pattern = `${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`
     const child = Bun.spawn(
-      [process.execPath, 'test', fileURLToPath(import.meta.url), '-t', name],
+      [process.execPath, 'test', fileURLToPath(import.meta.url), '-t', pattern],
       {
+        cwd: fileURLToPath(new URL('../../', import.meta.url)),
         env: { ...process.env, OPENCLAUDE_BG_CLAIM_RACE_ISOLATED: '1' },
+        stdin: 'ignore',
         stdout: 'pipe',
         stderr: 'pipe',
+        // Leave five seconds for reporting and cleanup inside the 30 s test.
+        timeout: 25_000,
       },
     )
     const [exitCode, stdout, stderr] = await Promise.all([
@@ -241,7 +330,7 @@ describe('terminal-fact publish across withdrawn claims', () => {
     ])
     if (exitCode !== 0) {
       throw new Error(
-        `isolated stale-lock scenario "${name}" failed (exit ${exitCode}):\n${stdout}\n${stderr}`,
+        `isolated publish scenario "${name}" failed (exit ${exitCode}):\n${stdout}\n${stderr}`,
       )
     }
   }
@@ -298,7 +387,10 @@ describe('terminal-fact publish across withdrawn claims', () => {
   // the stale-claim probe from maintainer review 5948202472 on #2497.
   async function ageCommitClaim(target: string): Promise<void> {
     const stale = new Date(Date.now() - 11_000)
-    await utimes(`${target}.commit`, stale, stale)
+    const dir = `${target}.commit`
+    const entries = await readdir(dir)
+    for (const entry of entries) await utimes(join(dir, entry), stale, stale)
+    await utimes(dir, stale, stale)
   }
 
   // Arms the commit-publish hook so only the first commit call pauses:
@@ -319,6 +411,34 @@ describe('terminal-fact publish across withdrawn claims', () => {
     })
     let calls = 0
     registry._setCommitPublishHookForTesting(async () => {
+      calls += 1
+      if (calls === 1) {
+        enteredResolve()
+        await gate
+      }
+    })
+    return { entered, release }
+  }
+
+  // Arms the owned-commit hook so only the first commit call pauses:
+  // the holder stalls after the final claim ownership check has passed
+  // and immediately before its rename publishes, and every later
+  // commit (the successor's) proceeds normally. `entered` resolves
+  // once the holder has reached the hook (issue #2556).
+  function armCommitOwnedHookPause(): {
+    entered: Promise<void>
+    release: () => void
+  } {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    let enteredResolve!: () => void
+    const entered = new Promise<void>(resolve => {
+      enteredResolve = resolve
+    })
+    let calls = 0
+    registry._setCommitPublishOwnedHookForTesting(async () => {
       calls += 1
       if (calls === 1) {
         enteredResolve()
@@ -449,14 +569,40 @@ describe('terminal-fact publish across withdrawn claims', () => {
     mock.module('node:fs/promises', () => ({
       ...realFsPromises,
       readFile: mockedReadFile,
+      open: mockedOpen,
+      unlink: (...args: Parameters<typeof realUnlink>) => {
+        if (typeof args[0] === 'string') beforeReclaimUnlink?.(args[0])
+        return realUnlink(...args)
+      },
+      utimes: async (...args: Parameters<typeof realUtimes>) => {
+        if (typeof args[0] === 'string') injectStamp(args[0])
+        await realUtimes(...args)
+      },
       writeFile: mockedWriteFile,
       link: mockedLink,
       rename: mockedRename,
+      rm: async (...args: Parameters<typeof realRm>) => {
+        injectPendingCleanup(args[0])
+        await realRm(...args)
+      },
     }))
     mock.module('node:fs', () => ({
       ...realFs,
       linkSync: mockedLinkSync,
+      openSync: mockedOpenSync,
+      unlinkSync: (...args: Parameters<typeof realUnlinkSync>) => {
+        if (typeof args[0] === 'string') beforeReclaimUnlink?.(args[0])
+        realUnlinkSync(...args)
+      },
+      utimesSync: (...args: Parameters<typeof realUtimesSync>) => {
+        if (typeof args[0] === 'string') injectStamp(args[0])
+        realUtimesSync(...args)
+      },
       renameSync: mockedRenameSync,
+      rmSync: (...args: Parameters<typeof realRmSync>) => {
+        injectPendingCleanup(args[0])
+        realRmSync(...args)
+      },
     }))
     registry = await import('./bgRegistry.js')
     registry._setBackgroundSessionsRootForTesting(
@@ -466,13 +612,28 @@ describe('terminal-fact publish across withdrawn claims', () => {
 
   afterEach(async () => {
     pausedClaimWrite = undefined
+    stagedOpenInjection = undefined
+    beforeReclaimUnlink = undefined
+    beforeInstallStamp = undefined
+    beforePendingCleanup = undefined
     onClaimRead = undefined
     commitInjection = undefined
+    claimInstallInjection = undefined
     commitPause = undefined
     linkUnsupported = false
+    beforeUnsupportedLink = undefined
     linkCallTargets.length = 0
     registry?._setCommitPublishHookForTesting(undefined)
     registry?._setCommitPublishHookForTestingSync(undefined)
+    registry?._setCommitPublishOwnedHookForTesting(undefined)
+    registry?._setCommitPublishOwnedHookForTestingSync(undefined)
+    registry?._setCommitPublishReclaimHookForTesting(undefined)
+    registry?._setCommitPublishReclaimHookForTestingSync(undefined)
+    registry?._setCommitPublishClaimMaxPollsForTesting(undefined)
+    registry?._setCommitPublishDenialMaxRetriesForTesting(undefined)
+    while (pendingPlatformRestores.length > 0) {
+      pendingPlatformRestores.pop()!()
+    }
     mock.restore()
     // See bgRegistry.noHardLinks.test.ts: mock.restore() does not undo a
     // mock.module registration, so re-register the real module explicitly
@@ -480,14 +641,22 @@ describe('terminal-fact publish across withdrawn claims', () => {
     mock.module('node:fs/promises', () => ({
       ...realFsPromises,
       readFile: realReadFile,
+      open: realOpen,
+      unlink: realUnlink,
+      utimes: realUtimes,
       writeFile: realWriteFile,
       link: realLink,
       rename: realRename,
+      rm: realRm,
     }))
     mock.module('node:fs', () => ({
       ...realFs,
       linkSync: realLinkSync,
+      openSync: realOpenSync,
+      unlinkSync: realUnlinkSync,
+      utimesSync: realUtimesSync,
       renameSync: realRenameSync,
+      rmSync: realRmSync,
     }))
     registry?._setBackgroundSessionsRootForTesting(undefined)
     await rm(configDir, { force: true, recursive: true })
@@ -1320,7 +1489,11 @@ describe('terminal-fact publish across withdrawn claims', () => {
       const target = terminalFactPath(session.id, 'natural')
       realFs.rmSync(`${target}.claim`, { force: true, recursive: true })
       const stale = new Date(Date.now() - 11_000)
-      realFs.utimesSync(`${target}.commit`, stale, stale)
+      const dir = `${target}.commit`
+      for (const entry of realFs.readdirSync(dir)) {
+        realUtimesSync(join(dir, entry), stale, stale)
+      }
+      realUtimesSync(dir, stale, stale)
       // The holder's per-ID lock is held, so this sync termination
       // takes the ELOCKED fallback and publishes without it.
       registry.recordBackgroundSessionNaturalTerminationSync(
@@ -1345,19 +1518,1063 @@ describe('terminal-fact publish across withdrawn claims', () => {
     }
       },
     },
+    {
+      name: 'keeps the successor metadata when a stalled holder is superseded after the final ownership check without hard links',
+      run: async () => {
+    // Regression test for issue #2556: with link() rejected (EPERM), a
+    // session create that stalls past the stale threshold AFTER the
+    // final commit-claim ownership check — between that check and its
+    // rename — is superseded by a second create that reclaims the claim
+    // and publishes first. The stalled holder's publish source must die
+    // with its superseded claim, so the resumed rename cannot overwrite
+    // the successor's row: the holder reports the duplicate instead.
+    // The successor (second create, pid 424242) wins.
+    const id = 'bg-commit-race-post-check-create-no-link'
+    const logDir = join(
+      configDir,
+      'bg-commit-race-post-check-create-no-link-logs',
+    )
+    await mkdir(logDir, { recursive: true })
+    const stdoutLogPath = join(logDir, 'stdout.log')
+    const stderrLogPath = join(logDir, 'stderr.log')
+    await writeFile(stdoutLogPath, '')
+    await writeFile(stderrLogPath, '')
+    linkUnsupported = true
+    const { entered, release } = armCommitOwnedHookPause()
+    const firstCreate = registry.createBackgroundSession({
+      id,
+      pid: 424243,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-post-check-create-no-link',
+      logFilesPrecreated: true,
+      stdoutLogPath,
+      stderrLogPath,
+    })
+    firstCreate.catch(() => {})
+    const writers = [firstCreate]
+    try {
+      await awaitCommitHookEntered(entered)
+      // The first create holds the per-ID lock and has passed the final
+      // ownership check: age both past their stale thresholds so the
+      // second create reclaims the commit claim and publishes while the
+      // first is paused right before its rename.
+      await ageSessionLock(id)
+      await ageCommitClaim(metadataPath(id))
+      const secondCreate = registry.createBackgroundSession({
+        id,
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-commit-race-post-check-create-no-link-2',
+        logFilesPrecreated: true,
+        stdoutLogPath,
+        stderrLogPath,
+      })
+      const second = await secondCreate
+      expect(second.pid).toBe(424242)
+      // The superseded holder must not overwrite the successor's row.
+      release()
+      await expect(firstCreate).rejects.toThrow('already exists')
+      const stored = await registry.readBackgroundSessionForOwner(id)
+      expect(stored?.pid).toBe(424242)
+    } finally {
+      linkUnsupported = false
+      release()
+      await Promise.allSettled(writers)
+    }
+      },
+    },
+    {
+      name: 'keeps the successor fact when a stalled holder is superseded after the final ownership check without hard links',
+      run: async () => {
+    // Regression test for issue #2556: same post-ownership-check race
+    // as the metadata scenario above, but for an async terminal fact.
+    // The holder (exitCode 0) stalls after the final ownership check
+    // and before its rename; the successor (exitCode 3) reclaims the
+    // claim and publishes its own fact — the holder's terminal-fact
+    // claim is withdrawn first so the successor does not adopt the
+    // holder's tmp. The holder's resumed rename must not overwrite the
+    // successor's fact, and the holder must return it.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-commit-race-post-check-fact-no-link',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-post-check-fact-no-link',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    linkUnsupported = true
+    const { entered, release } = armCommitOwnedHookPause()
+    const firstTermination =
+      registry.recordBackgroundSessionNaturalTermination(
+        session.id,
+        { exitCode: 0 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+    firstTermination.catch(() => {})
+    try {
+      await awaitCommitHookEntered(entered)
+      // Withdraw the holder's terminal-fact claim and age its commit
+      // claim, so the successor claims the publish itself (with its own
+      // fact) instead of adopting the holder's tmp; age the per-ID lock
+      // so the successor can proceed while the holder is paused.
+      await rm(`${terminalFactPath(session.id, 'natural')}.claim`, {
+        force: true,
+        recursive: true,
+      })
+      await ageCommitClaim(terminalFactPath(session.id, 'natural'))
+      await ageSessionLock(session.id)
+      const secondTermination =
+        await registry.recordBackgroundSessionNaturalTermination(
+          session.id,
+          { exitCode: 3 },
+          { ownerPid: session.pid, expectedSession: session },
+        )
+      expect(secondTermination).toMatchObject({
+        status: 'failed',
+        exitCode: 3,
+      })
+      // The superseded holder must not overwrite the successor's fact.
+      release()
+      const first = await firstTermination
+      expect(first).toMatchObject({ status: 'failed', exitCode: 3 })
+      expect(await storedExitCode(session.id)).toBe(3)
+    } finally {
+      linkUnsupported = false
+      release()
+      await firstTermination.catch(() => {})
+    }
+      },
+    },
+    {
+      name: 'keeps the successor fact when a sync stalled holder is superseded after the final ownership check without hard links',
+      run: async () => {
+    // Same post-ownership-check race as the async fact scenario above,
+    // but through the synchronous exit fallback: the holder is a sync
+    // termination paused after the final ownership check, and the
+    // successor is a second sync termination run from inside the sync
+    // owned-commit hook (the holder's per-ID lock forces the ELOCKED
+    // fallback). The hook withdraws the holder's terminal-fact claim
+    // and ages its commit claim, then publishes the successor's fact
+    // inline; the resumed holder must return the successor's fact, not
+    // overwrite it.
+    const session = await registry.createBackgroundSession({
+      id: 'bg-commit-race-post-check-fact-sync-no-link',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-commit-race-post-check-fact-sync-no-link',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    linkUnsupported = true
+    let calls = 0
+    registry._setCommitPublishOwnedHookForTestingSync(() => {
+      calls += 1
+      if (calls !== 1) return
+      const target = terminalFactPath(session.id, 'natural')
+      realFs.rmSync(`${target}.claim`, { force: true, recursive: true })
+      const stale = new Date(Date.now() - 11_000)
+      const dir = `${target}.commit`
+      for (const entry of realFs.readdirSync(dir)) {
+        realUtimesSync(join(dir, entry), stale, stale)
+      }
+      realUtimesSync(dir, stale, stale)
+      // The holder's per-ID lock is held, so this sync termination
+      // takes the ELOCKED fallback and publishes without it.
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 3 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+    })
+    try {
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id,
+        { exitCode: 0 },
+        { ownerPid: session.pid, expectedSession: session },
+      )
+      expect(await storedExitCode(session.id)).toBe(3)
+      expect(
+        await registry.resolveBackgroundSessionForWait(session.id),
+      ).toMatchObject({ status: 'failed', exitCode: 3 })
+    } finally {
+      linkUnsupported = false
+      registry._setCommitPublishOwnedHookForTestingSync(undefined)
+    }
+      },
+    },
   ]
 
   for (const scenario of staleLockScenarios) {
-    // A child `bun test` run takes ~1 s; allow 30 s so a slow runner
-    // cannot flake the wrapper on spawn or startup time.
+    // The child has a 25 s deadline; allow 30 s for spawn, assertions,
+    // and cleanup even on a slow runner.
     it(
       scenario.name,
       async () => {
         if (!ISOLATED_CHILD) {
-          await runStaleLockScenarioInChild(scenario.name)
+          await runIsolatedScenario(scenario.name)
           return
         }
         await scenario.run()
+      },
+      30_000,
+    )
+  }
+
+  for (const synchronous of [false, true]) {
+    it(`keeps the winner when a commit claim's inode is reused (${synchronous ? 'sync' : 'async'})`, async () => {
+      const session = await registry.createBackgroundSession({
+        id: 'bg-commit-claim-reused-inode',
+        pid: 424242,
+        cwd: '/repo',
+        command: ['sleep', '30'],
+        sessionId: 'sess-commit-claim-reused-inode',
+        processMarker: TEST_PROCESS_MARKER,
+      })
+      const target = terminalFactPath(session.id, 'natural')
+      const claimDir = `${target}.commit`
+      const retired = `${claimDir}.retired`
+      const options = { ownerPid: session.pid, expectedSession: session }
+      let recycled = false
+      const reclaim = () => {
+        // Model immediate inode reuse without depending on the native
+        // allocator. Retire the original claim and discard its payload.
+        realRenameSync(claimDir, retired)
+        for (const name of realFs.readdirSync(retired)) {
+          realFs.unlinkSync(join(retired, name))
+        }
+        realFs.rmSync(`${target}.claim`, { recursive: true, force: true })
+        registry.recordBackgroundSessionNaturalTerminationSync(
+          session.id, { exitCode: 3 }, options,
+        )
+        expect(JSON.parse(realFs.readFileSync(target, 'utf8'))).toMatchObject({
+          exitCode: 3,
+        })
+        // A newly allocated claim gets the same (dev, ino), but it
+        // cannot contain the previous holder's unique staged source.
+        realRenameSync(retired, claimDir)
+        recycled = true
+      }
+      linkUnsupported = true
+      if (synchronous) {
+        registry._setCommitPublishHookForTestingSync(() => {
+          registry._setCommitPublishHookForTestingSync(undefined)
+          reclaim()
+        })
+        registry.recordBackgroundSessionNaturalTerminationSync(
+          session.id, { exitCode: 0 }, options,
+        )
+      } else {
+        registry._setCommitPublishHookForTesting(async () => reclaim())
+        const terminated = await registry.recordBackgroundSessionNaturalTermination(
+          session.id, { exitCode: 0 }, options,
+        )
+        expect(terminated).toMatchObject({ status: 'failed', exitCode: 3 })
+      }
+      expect(recycled).toBe(true)
+      expect(await storedExitCode(session.id)).toBe(3)
+    })
+  }
+
+  for (const synchronous of [false, true]) {
+    for (const outcome of ['collision', 'reclaimed'] as const) {
+      it(`handles claim ${outcome} during ${synchronous ? 'sync' : 'async'} publication`, async () => {
+        const session = await registry.createBackgroundSession({
+          id: 'bg-claim-install-race',
+          pid: 424242,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: 'sess-claim-install-race',
+          processMarker: TEST_PROCESS_MARKER,
+        })
+        const target = terminalFactPath(session.id, 'natural')
+        const options = { ownerPid: session.pid, expectedSession: session }
+        let injected = false
+        let collision: unknown
+        linkUnsupported = true
+        if (outcome === 'reclaimed') {
+          const reclaim = () => {
+            if (injected) return
+            injected = true
+            realFs.rmSync(`${target}.commit`, { recursive: true })
+          }
+          registry._setCommitPublishOwnedHookForTesting(async () => reclaim())
+          registry._setCommitPublishOwnedHookForTestingSync(reclaim)
+        } else {
+          claimInstallInjection = (from, to) => {
+            injected = true
+            expect(to).toBe(`${target}.commit`)
+            // Another cooperating writer acquires the claim between the
+            // contender's stat and directory rename. Attempt the actual
+            // rename while the winner's complete staged source is live.
+            realFs.rmSync(`${target}.claim`, { recursive: true })
+            registry._setCommitPublishOwnedHookForTestingSync(() => {
+              try {
+                realRenameSync(from, to)
+              } catch (error) {
+                collision = error
+              }
+              expect(collision).toBeDefined()
+              expect(realFs.existsSync(target)).toBe(false)
+            })
+            registry.recordBackgroundSessionNaturalTerminationSync(
+              session.id, { exitCode: 3 }, options,
+            )
+            // Report the native error after the winner has cleaned up.
+            // Windows can use access denied for this collision.
+            throw collision
+          }
+        }
+        const exitCode = outcome === 'collision' ? 3 : 0
+        // The real rename can report a Windows denial instead of
+        // EEXIST/ENOTEMPTY. The winner has already published and cleaned
+        // up by the time the contender classifies that denial, so the
+        // denial resolves to the winner's existing record; in either
+        // case the winner's bytes must survive (CodeRabbit follow-up
+        // on #2564).
+        const result = await publishForTest(synchronous, session).then(
+          value => ({ value }),
+          (error: unknown) => ({ error }),
+        )
+        if (synchronous) {
+          expect(result).toEqual({ value: undefined })
+        } else {
+          expect(result).toMatchObject({ value: { exitCode } })
+        }
+        expect(injected).toBe(true)
+        expect(await storedExitCode(session.id)).toBe(exitCode)
+        expect(realFs.existsSync(`${target}.commit`)).toBe(false)
+        expect(realFs.readdirSync(dirname(target)).filter(name => name.startsWith('.publish-'))).toEqual([])
+      })
+    }
+  }
+
+  async function publishForTest(
+    synchronous: boolean,
+    session: Awaited<ReturnType<typeof registry.createBackgroundSession>>,
+  ) {
+    const options = { ownerPid: session.pid, expectedSession: session }
+    if (synchronous) {
+      registry.recordBackgroundSessionNaturalTerminationSync(
+        session.id, { exitCode: 0 }, options,
+      )
+      return
+    }
+    return registry.recordBackgroundSessionNaturalTermination(
+      session.id, { exitCode: 0 }, options,
+    )
+  }
+
+  async function createPublishFixture() {
+    const session = await registry.createBackgroundSession({
+      id: 'bg-claim-boundary',
+      pid: 424242,
+      cwd: '/repo',
+      command: ['sleep', '30'],
+      sessionId: 'sess-claim-boundary',
+      processMarker: TEST_PROCESS_MARKER,
+    })
+    const target = terminalFactPath(session.id, 'natural')
+    linkUnsupported = true
+    return { session, target, claimDir: `${target}.commit` }
+  }
+
+  const staleStagedName = `staged.${randomUUID()}`
+  const liveStagedName = `staged.${randomUUID()}`
+  const unsealedName = `installing.${randomUUID()}`
+
+  async function seedStaleClaim(claimDir: string, name = staleStagedName) {
+    const stale = new Date(Date.now() - 11_000)
+    await mkdir(claimDir)
+    await writeFile(join(claimDir, name), '{}')
+    await realUtimes(join(claimDir, name), stale, stale)
+    await realUtimes(claimDir, stale, stale)
+  }
+
+  for (const synchronous of [false, true]) {
+    const runtime = synchronous ? 'sync' : 'async'
+    it(`ages only the sealed payload from claim installation (${runtime})`, async () => {
+      const { session, target, claimDir } = await createPublishFixture()
+      claimInstallInjection = from => {
+        const stale = new Date(Date.now() - 11_000)
+        for (const entry of realFs.readdirSync(from)) {
+          realUtimesSync(join(from, entry), stale, stale)
+        }
+        realUtimesSync(from, stale, stale)
+      }
+      const startedAt = Date.now()
+      const checkStamp = mock(() => {
+        const entries = realFs.readdirSync(claimDir)
+        expect(entries).toHaveLength(1)
+        expect(entries[0]).toStartWith('staged.')
+        expect(realFs.statSync(join(claimDir, entries[0]!)).mtimeMs)
+          .toBeGreaterThanOrEqual(startedAt - 1000)
+        expect(realFs.existsSync(target)).toBe(false)
+      })
+      registry._setCommitPublishOwnedHookForTesting(async () => checkStamp())
+      registry._setCommitPublishOwnedHookForTestingSync(checkStamp)
+      await publishForTest(synchronous, session)
+      expect(checkStamp).toHaveBeenCalledTimes(1)
+      expect(await storedExitCode(session.id)).toBe(0)
+    })
+
+    it(`preserves a fresh sealed payload in a stale directory (${runtime})`, async () => {
+      const { session, target, claimDir } = await createPublishFixture()
+      await seedStaleClaim(claimDir)
+      const payload = join(claimDir, staleStagedName)
+      const now = new Date()
+      await realUtimes(payload, now, now)
+      registry._setCommitPublishClaimMaxPollsForTesting(2)
+
+      await expect(publishForTest(synchronous, session))
+        .rejects.toThrow(`Timed out waiting for a concurrent publish to ${target}`)
+      expect(await readFile(payload, 'utf8')).toBe('{}')
+      expect(realFs.existsSync(target)).toBe(false)
+    })
+
+    for (const abandoned of [false, true]) {
+      it(`handles an unsealed ${abandoned ? 'abandoned' : 'fresh'} claim (${runtime})`, async () => {
+        const { session, target, claimDir } = await createPublishFixture()
+        await seedStaleClaim(claimDir, unsealedName)
+        // Ignore inherited mtime. Age the same observed installing name
+        // without sleeping for the stale threshold.
+        registry._setCommitPublishClaimMaxPollsForTesting(abandoned ? 3 : 1)
+        let observations = 0
+        const clock = spyOn(performance, 'now').mockImplementation(() =>
+          abandoned && observations++ > 0 ? 11_000 : 0,
+        )
+        try {
+          if (abandoned) {
+            await publishForTest(synchronous, session)
+            expect(await storedExitCode(session.id)).toBe(0)
+            expect(realFs.existsSync(claimDir)).toBe(false)
+          } else {
+            await expect(publishForTest(synchronous, session))
+              .rejects.toThrow('Timed out waiting for a concurrent publish')
+            expect(realFs.existsSync(join(claimDir, unsealedName))).toBe(true)
+            expect(realFs.existsSync(target)).toBe(false)
+          }
+        } finally {
+          clock.mockRestore()
+        }
+      })
+    }
+
+    for (const outcome of ['withdrawn', 'denied'] as const) {
+      it(`handles a ${outcome} claim before acquisition stamping (${runtime})`, async () => {
+        const { session, target, claimDir } = await createPublishFixture()
+        const inject = mock((path: string) => {
+          expect(dirname(path)).toBe(claimDir)
+          if (outcome === 'denied') {
+            throw Object.assign(new Error('claim stamp denied'), { code: 'EACCES' })
+          }
+          realUnlinkSync(path)
+          realFs.rmdirSync(claimDir)
+        })
+        beforeInstallStamp = inject
+        if (outcome === 'denied') {
+          await expect(publishForTest(synchronous, session))
+            .rejects.toMatchObject({ code: 'EACCES' })
+          expect(realFs.existsSync(target)).toBe(false)
+        } else {
+          await publishForTest(synchronous, session)
+          expect(await storedExitCode(session.id)).toBe(0)
+        }
+        expect(inject).toHaveBeenCalledTimes(1)
+        expect(realFs.existsSync(claimDir)).toBe(false)
+        expect((await readdir(dirname(target))).filter(name => name.startsWith('.publish-')))
+          .toEqual([])
+      })
+    }
+
+    it(`rejects a malformed pre-existing claim without replacing it (${runtime})`, async () => {
+      const { session, target, claimDir } = await createPublishFixture()
+      await writeFile(claimDir, 'not a directory')
+      await expect(publishForTest(synchronous, session))
+        .rejects.toThrow('Expected a commit claim directory')
+      expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
+      expect(realFs.existsSync(target)).toBe(false)
+    })
+
+    it(`reclaims an empty stale commit claim (${runtime})`, async () => {
+      const { session, claimDir } = await createPublishFixture()
+      await mkdir(claimDir)
+      const stale = new Date(Date.now() - 11_000)
+      await realUtimes(claimDir, stale, stale)
+      registry._setCommitPublishClaimMaxPollsForTesting(2)
+
+      await publishForTest(synchronous, session)
+
+      expect(await storedExitCode(session.id)).toBe(0)
+      expect(realFs.existsSync(claimDir)).toBe(false)
+    })
+
+    for (const shape of ['foreign name', 'multiple entries', 'non-file payload'] as const) {
+      it(`preserves unexpected contents of a stale commit claim: ${shape} (${runtime})`, async () => {
+        const { session, target, claimDir } = await createPublishFixture()
+        await seedStaleClaim(claimDir, shape === 'foreign name' ? 'staged.not-a-uuid' : staleStagedName)
+        const stale = new Date(Date.now() - 11_000)
+        const payload = join(claimDir, staleStagedName)
+        if (shape === 'multiple entries') {
+          await writeFile(join(claimDir, 'unrelated'), 'keep me')
+        } else if (shape === 'non-file payload') {
+          await realUnlink(payload)
+          await mkdir(payload)
+          await realUtimes(payload, stale, stale)
+        }
+        await realUtimes(claimDir, stale, stale)
+        const before = (await readdir(claimDir)).sort()
+        registry._setCommitPublishClaimMaxPollsForTesting(2)
+
+        const result: unknown = await publishForTest(synchronous, session)
+          .catch((error: unknown) => error)
+
+        const after = realFs.existsSync(claimDir) ? (await readdir(claimDir)).sort() : null
+        expect(after).toEqual(before)
+        expect(realFs.existsSync(target)).toBe(false)
+        expect(result).toBeInstanceOf(Error)
+        expect(result).toHaveProperty('message', `Timed out waiting for a concurrent publish to ${target}`)
+      })
+    }
+
+    for (const code of ['EACCES', 'EPERM']) {
+      for (const outcome of [
+        'retry', 'winner', 'active', 'both', 'winner-with-malformed-claim',
+        'not-directory', 'persistent', 'late-winner', 'non-Windows',
+      ] as const) {
+        it(`classifies ${code} at claim installation: ${outcome} (${runtime})`, async () => {
+          const { session, target, claimDir } = await createPublishFixture()
+          pinProcessPlatform(outcome === 'non-Windows' ? 'linux' : 'win32')
+          registry._setCommitPublishClaimMaxPollsForTesting(2)
+          const denial = Object.assign(new Error('claim install denied'), { code })
+          const exhaustsBudget = outcome === 'persistent' || outcome === 'late-winner'
+          const malformedClaim = outcome === 'not-directory' || outcome === 'winner-with-malformed-claim'
+          const hasWinner = outcome === 'winner' || outcome === 'both' ||
+            outcome === 'winner-with-malformed-claim' || outcome === 'non-Windows'
+          const publishWinner = () => {
+            realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+          }
+          let attempts = 0
+          claimInstallInjection = function deny() {
+            attempts++
+            if (outcome === 'active' || outcome === 'both') {
+              realFs.mkdirSync(claimDir)
+              realWriteFileSync(join(claimDir, liveStagedName), '{}')
+            } else if (malformedClaim) {
+              realWriteFileSync(claimDir, 'not a directory')
+            } else if (exhaustsBudget && attempts === 1) {
+              claimInstallInjection = deny
+            }
+            if (hasWinner) publishWinner()
+            if (outcome === 'late-winner' && attempts === 2) {
+              // Both paths are absent at classification. Another writer
+              // publishes while this attempt cleans up its private copy.
+              beforePendingCleanup = publishWinner
+            }
+            throw denial
+          }
+          const publication = publishForTest(synchronous, session)
+          // A denial that arrives after the winner committed resolves to
+          // the winner's existing record; a denial beside a live claim
+          // routes through the claim loop (CodeRabbit follow-up on #2564).
+          if (outcome === 'retry' || outcome === 'late-winner' ||
+            (hasWinner && outcome !== 'non-Windows')) {
+            const exitCode = outcome === 'retry' ? 0 : 3
+            const result = await publication
+            if (!synchronous) expect(result).toMatchObject({ exitCode })
+            expect(await storedExitCode(session.id)).toBe(exitCode)
+            if (outcome === 'both') {
+              // The live claim belongs to the winning publisher.
+              expect(await readFile(join(claimDir, liveStagedName), 'utf8')).toBe('{}')
+            } else if (malformedClaim) {
+              expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
+            } else {
+              expect(realFs.existsSync(claimDir)).toBe(false)
+            }
+          } else if (outcome === 'active') {
+            // Poll the live claim within the budget instead of
+            // surfacing the denial; the holder can still publish.
+            await expect(publication).rejects.toThrow(
+              `Timed out waiting for a concurrent publish to ${target}`)
+            expect(await readFile(join(claimDir, liveStagedName), 'utf8')).toBe('{}')
+            expect(realFs.existsSync(target)).toBe(false)
+          } else if (outcome === 'not-directory') {
+            // The denial handler rejects a non-directory claim immediately.
+            await expect(publication).rejects.toThrow(
+              `Expected a commit claim directory at ${claimDir}`)
+            expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
+            expect(realFs.existsSync(target)).toBe(false)
+          } else {
+            await expect(publication).rejects.toBe(denial)
+            if (hasWinner) expect(await storedExitCode(session.id)).toBe(3)
+            else expect(realFs.existsSync(target)).toBe(false)
+          }
+          expect(attempts).toBe(exhaustsBudget ? 2 : 1)
+          expect((await readdir(dirname(target))).filter(name => name.startsWith('.publish-')))
+            .toEqual([])
+        })
+      }
+    }
+
+    it(`preserves other Windows install errors even when a winner exists (${runtime})`, async () => {
+      const { session, target } = await createPublishFixture()
+      pinProcessPlatform('win32')
+      const failure = Object.assign(new Error('claim install I/O error'), { code: 'EIO' })
+      const failInstall = mock(() => {
+        realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+        throw failure
+      })
+      claimInstallInjection = failInstall
+
+      await expect(publishForTest(synchronous, session)).rejects.toBe(failure)
+      expect(failInstall).toHaveBeenCalledTimes(1)
+      expect(await storedExitCode(session.id)).toBe(3)
+    })
+
+    it(`reclaims a stale claim after a Windows install denial (${runtime})`, async () => {
+      // CodeRabbit follow-up on #2564: when a Windows denial leaves
+      // another holder's claim installed and that holder died long
+      // ago, routing the denial through the claim loop lets stale
+      // recovery reclaim the claim and complete the publication
+      // instead of failing a publishable record.
+      const { session, target, claimDir } = await createPublishFixture()
+      pinProcessPlatform('win32')
+      const denial = Object.assign(new Error('claim install denied'), { code: 'EACCES' })
+      const stale = new Date(Date.now() - 11_000)
+      let attempts = 0
+      claimInstallInjection = () => {
+        attempts++
+        realFs.mkdirSync(claimDir)
+        realWriteFileSync(join(claimDir, staleStagedName), '{}')
+        realUtimesSync(join(claimDir, staleStagedName), stale, stale)
+        realUtimesSync(claimDir, stale, stale)
+        throw denial
+      }
+      const result = await publishForTest(synchronous, session)
+      if (!synchronous) expect(result).toMatchObject({ exitCode: 0 })
+      expect(await storedExitCode(session.id)).toBe(0)
+      expect(attempts).toBe(1)
+      expect(realFs.existsSync(claimDir)).toBe(false)
+      expect(realFs.existsSync(target)).toBe(true)
+    })
+
+    for (const outcome of ['persistent', 'withdrawn-claim', 'late-winner'] as const) {
+      // The production-budget case syncs a fresh private copy on each
+      // attempt. Allow for slow local I/O without using timing as an oracle.
+      const timeout = outcome === 'persistent' ? 15_000 : 5000
+      it(`handles the short Windows denial budget: ${outcome} (${runtime})`, async () => {
+        const { session, target, claimDir } = await createPublishFixture()
+        pinProcessPlatform('win32')
+        if (outcome === 'persistent') {
+          // Do not override the short budget: the production default
+          // must fail before the independently bounded overall loop.
+          registry._setCommitPublishClaimMaxPollsForTesting(60)
+        } else {
+          registry._setCommitPublishClaimMaxPollsForTesting(10)
+          registry._setCommitPublishDenialMaxRetriesForTesting(3)
+        }
+        const denial = Object.assign(new Error('claim install denied'), { code: 'EPERM' })
+        let attempts = 0
+        claimInstallInjection = function deny() {
+          attempts++
+          if (attempts === 4 && outcome === 'withdrawn-claim') {
+            // Only the denial handler sees the claim. It is gone by the
+            // next poll, but separates two runs of contentless denials.
+            realFs.mkdirSync(claimDir)
+            beforePendingCleanup = () => realFs.rmdirSync(claimDir)
+          } else if (attempts === 4 && outcome === 'late-winner') {
+            beforePendingCleanup = () => {
+              realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+            }
+          }
+          claimInstallInjection = deny
+          throw denial
+        }
+        const publication = publishForTest(synchronous, session)
+        if (outcome === 'late-winner') {
+          const result = await publication
+          if (!synchronous) expect(result).toMatchObject({ exitCode: 3 })
+          expect(await storedExitCode(session.id)).toBe(3)
+        } else {
+          await expect(publication).rejects.toBe(denial)
+          expect(realFs.existsSync(target)).toBe(false)
+        }
+        const expectedAttempts = outcome === 'persistent' ? 51 : outcome === 'withdrawn-claim' ? 8 : 4
+        expect(attempts).toBe(expectedAttempts)
+        expect(realFs.existsSync(claimDir)).toBe(false)
+        expect((await readdir(dirname(target))).filter(name => name.startsWith('.publish-')))
+          .toEqual([])
+      }, timeout)
+    }
+
+    it(`rejects a malformed claim observed at a Windows denial (${runtime})`, async () => {
+      // A non-directory at the claim path is not contention evidence:
+      // it must be rejected at the observation point with the same
+      // malformed-claim error the poll loop uses, not reset the short
+      // budget or surface a contention timeout on the final poll.
+      const { session, target, claimDir } = await createPublishFixture()
+      pinProcessPlatform('win32')
+      registry._setCommitPublishClaimMaxPollsForTesting(2)
+      registry._setCommitPublishDenialMaxRetriesForTesting(1)
+      const denial = Object.assign(new Error('claim install denied'), { code: 'EACCES' })
+      let attempts = 0
+      claimInstallInjection = function deny() {
+        attempts++
+        if (attempts === 2) realWriteFileSync(claimDir, 'not a directory')
+        else claimInstallInjection = deny
+        throw denial
+      }
+      await expect(publishForTest(synchronous, session))
+        .rejects.toThrow(`Expected a commit claim directory at ${claimDir}`)
+      expect(attempts).toBe(2)
+      expect(await readFile(claimDir, 'utf8')).toBe('not a directory')
+      expect(realFs.existsSync(target)).toBe(false)
+    })
+
+    it(`returns the winner when a Windows denial interrupts ${runtime} claim adoption`, async () => {
+      const { session, target, claimDir } = await createPublishFixture()
+      pinProcessPlatform('win32')
+      const ownerClaim = `${target}.claim`
+      const ownedTmp = join(dirname(target), `${session.id}.${session.pid}.${randomUUID()}.tmp`)
+      await writeFile(ownedTmp, JSON.stringify(successorFact(session.id, 5)))
+      await mkdir(ownerClaim)
+      await writeFile(join(ownerClaim, 'tmp'), ownedTmp)
+      const deny = mock((from: string) => {
+        const [entry] = realFs.readdirSync(from)
+        // The publish source must be the owner's pending fact, not the
+        // adopter's draft. A third publisher wins during the rename.
+        expect(JSON.parse(realFs.readFileSync(join(from, entry!), 'utf8')))
+          .toMatchObject({ exitCode: 5 })
+        realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+        throw Object.assign(new Error('claim install denied'), { code: 'EACCES' })
+      })
+      claimInstallInjection = deny
+      const result = await publishForTest(synchronous, session)
+      if (!synchronous) expect(result).toMatchObject({ exitCode: 3 })
+      expect(deny).toHaveBeenCalledTimes(1)
+      expect(await storedExitCode(session.id)).toBe(3)
+      expect(await readFile(join(ownerClaim, 'tmp'), 'utf8')).toBe(ownedTmp)
+      expect(realFs.existsSync(claimDir)).toBe(false)
+    })
+
+    it(`keeps the full claim budget after a denial observes a live claim (${runtime})`, async () => {
+      // An observed live claim is contention evidence: it earns the
+      // full claim-poll budget and resets the short denial budget.
+      const { session, target, claimDir } = await createPublishFixture()
+      pinProcessPlatform('win32')
+      registry._setCommitPublishClaimMaxPollsForTesting(4)
+      registry._setCommitPublishDenialMaxRetriesForTesting(1)
+      const denial = Object.assign(new Error('claim install denied'), { code: 'EACCES' })
+      let attempts = 0
+      claimInstallInjection = function deny() {
+        attempts++
+        if (attempts === 2) {
+          realFs.mkdirSync(claimDir)
+          realWriteFileSync(join(claimDir, liveStagedName), '{}')
+        } else {
+          claimInstallInjection = deny
+        }
+        throw denial
+      }
+      const readClaim = synchronous
+        ? spyOn(realFs, 'readdirSync')
+        : spyOn(realFsPromises, 'readdir')
+      await expect(publishForTest(synchronous, session)).rejects.toThrow(
+        `Timed out waiting for a concurrent publish to ${target}`)
+      // Two of four polls were spent attempting installation. The
+      // remaining two must inspect the live claim before timing out.
+      expect(readClaim.mock.calls.filter(([path]) => path === claimDir)).toHaveLength(2)
+      expect(attempts).toBe(2)
+      expect(await readFile(join(claimDir, liveStagedName), 'utf8')).toBe('{}')
+      expect(realFs.existsSync(target)).toBe(false)
+    })
+  }
+
+  for (const synchronous of [false, true]) {
+    it(
+      `returns the concurrent publish instead of timing out when a successor publishes during the final claim poll (${synchronous ? 'sync' : 'async'})`,
+      async () => {
+        // Regression test for the CodeRabbit review on #2564: when the
+        // publish-wait loop exhausts, the last iteration can miss a
+        // successor that reclaimed the staged source and published
+        // during that poll. The target then holds a complete record,
+        // so callers expecting 'exists' must not receive the timeout.
+        const session = await registry.createBackgroundSession({
+          id: `bg-final-poll-target-${synchronous ? 'sync' : 'async'}`,
+          pid: 424242,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: `sess-final-poll-target-${synchronous ? 'sync' : 'async'}`,
+          processMarker: TEST_PROCESS_MARKER,
+        })
+        const target = terminalFactPath(session.id, 'natural')
+        const options = { ownerPid: session.pid, expectedSession: session }
+        linkUnsupported = true
+        registry._setCommitPublishClaimMaxPollsForTesting(1)
+        // One stale claim: the only poll iteration takes the
+        // stale-reclaim branch after its target check.
+        const claimDir = `${target}.commit`
+        await seedStaleClaim(claimDir)
+        // During that only iteration — after its target check, inside
+        // the reclaim window — a successor publishes the target.
+        if (synchronous) {
+          registry._setCommitPublishReclaimHookForTestingSync(() => {
+            realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+          })
+        } else {
+          registry._setCommitPublishReclaimHookForTesting(async () => {
+            await realWriteFile(target, JSON.stringify(successorFact(session.id, 3)))
+          })
+        }
+        try {
+          if (synchronous) {
+            registry.recordBackgroundSessionNaturalTerminationSync(
+              session.id,
+              { exitCode: 0 },
+              options,
+            )
+          } else {
+            const terminated =
+              await registry.recordBackgroundSessionNaturalTermination(
+                session.id,
+                { exitCode: 0 },
+                options,
+              )
+            expect(terminated).toMatchObject({ status: 'failed', exitCode: 3 })
+          }
+          expect(await storedExitCode(session.id)).toBe(3)
+          expect(realFs.existsSync(claimDir)).toBe(false)
+        } finally {
+          linkUnsupported = false
+        }
+      },
+    )
+  }
+
+  for (const synchronous of [false, true]) {
+    for (const afterIdentityCheck of [false, true]) {
+      it(`preserves a successor at stale reclaim ${afterIdentityCheck ? 'unlink' : 'identity check'} (${synchronous ? 'sync' : 'async'})`, async () => {
+        const { session, target, claimDir } = await createPublishFixture()
+        registry._setCommitPublishClaimMaxPollsForTesting(1)
+        await seedStaleClaim(claimDir)
+        const replacement = mock(() => {
+          realUnlinkSync(join(claimDir, staleStagedName))
+          realFs.rmdirSync(claimDir)
+          const pending = realFs.mkdtempSync(join(dirname(claimDir), '.publish-'))
+          realWriteFileSync(join(pending, liveStagedName), JSON.stringify(successorFact(session.id, 3)))
+          realRenameSync(pending, claimDir)
+        })
+        if (afterIdentityCheck) {
+          beforeReclaimUnlink = path => {
+            if (path === join(claimDir, staleStagedName)) replacement()
+          }
+        } else {
+          registry._setCommitPublishReclaimHookForTesting(async () => replacement())
+          registry._setCommitPublishReclaimHookForTestingSync(replacement)
+        }
+        await expect(publishForTest(synchronous, session))
+          .rejects.toThrow('Timed out waiting for a concurrent publish')
+        expect(replacement).toHaveBeenCalledTimes(1)
+        expect(realFs.existsSync(target)).toBe(false)
+        realRenameSync(join(claimDir, liveStagedName), target)
+        realFs.rmdirSync(claimDir)
+        expect(await storedExitCode(session.id)).toBe(3)
+      })
+    }
+  }
+
+  // POSIX modes are meaningful here. The source is already synced, and
+  // a read-only record can be published by renaming it without ever
+  // reopening it for write. Staging must retain that property and mode.
+  for (const synchronous of [false, true]) {
+    for (const mode of [0o400, 0o600, 0o640]) {
+      const runtime = synchronous ? 'sync' : 'async'
+      it.skipIf(process.platform === 'win32')(
+        `preserves source mode ${mode.toString(8)} during ${runtime} fallback publication`,
+        async () => {
+          const { session, target, claimDir } = await createPublishFixture()
+          const setSourceMode = mock((path: string) => realFs.chmodSync(path, mode))
+          beforeUnsupportedLink = setSourceMode
+          // Simulate staging in a process whose umask is more restrictive
+          // than the source's mode (e.g. an adopter of a pending publish).
+          const previousUmask = process.umask(0o077)
+          try {
+            await publishForTest(synchronous, session)
+          } finally {
+            process.umask(previousUmask)
+          }
+
+          expect(setSourceMode).toHaveBeenCalledTimes(1)
+          expect((await realFsPromises.stat(target)).mode & 0o777).toBe(mode)
+          expect(await storedExitCode(session.id)).toBe(0)
+          expect(realFs.existsSync(claimDir)).toBe(false)
+        },
+      )
+    }
+  }
+
+  for (const synchronous of [false, true]) {
+    for (const kind of ['directory', 'FIFO'] as const) {
+      const runtime = synchronous ? 'sync' : 'async'
+      const name = `rejects a ${kind} in place of a regular staging source (${runtime})`
+      // These fixtures exercise POSIX file types. Run the FIFO test in
+      // a child: a blocking open regression could otherwise stall Bun's
+      // own test timeout. Leave five seconds after the child deadline.
+      it.skipIf(process.platform === 'win32')(
+        name,
+        async () => {
+          if (kind === 'FIFO' && !ISOLATED_CHILD) {
+            await runIsolatedScenario(name)
+            return
+          }
+          const { session, target, claimDir } = await createPublishFixture()
+          const replaceSource = mock((path: string) => {
+            realUnlinkSync(path)
+            if (kind === 'directory') {
+              realFs.mkdirSync(path)
+            } else {
+              const child = Bun.spawnSync(['mkfifo', path], {
+                cwd: configDir,
+                env: { ...process.env },
+                stdin: 'ignore',
+                stdout: 'pipe',
+                stderr: 'pipe',
+                timeout: 1000,
+              })
+              expect(child.exitCode).toBe(0)
+            }
+          })
+          beforeUnsupportedLink = replaceSource
+
+          await expect(publishForTest(synchronous, session))
+            .rejects.toThrow('Expected a regular publish source')
+          expect(replaceSource).toHaveBeenCalledTimes(1)
+          expect(realFs.existsSync(target)).toBe(false)
+          expect(realFs.existsSync(claimDir)).toBe(false)
+          expect((await readdir(dirname(target))).some(name => name.startsWith('.publish-')))
+            .toBe(false)
+        },
+        kind === 'FIFO' ? 30_000 : 5000,
+      )
+    }
+  }
+
+  // ENOENT recovers; permission failures and a pre-existing private
+  // staging path must propagate without publishing any bytes.
+  for (const synchronous of [false, true]) {
+    for (const outcome of ['winner', 'retry', 'EACCES', 'EEXIST'] as const) {
+      it(`handles staged-open ${outcome} through the ${synchronous ? 'sync' : 'async'} fallback`, async () => {
+        const session = await registry.createBackgroundSession({
+          id: `bg-stage-open-${synchronous}-${outcome}`,
+          pid: 424242,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: 'sess-stage-open',
+          processMarker: TEST_PROCESS_MARKER,
+        })
+        const target = terminalFactPath(session.id, 'natural')
+        let injected = false
+        const sentinel = 'already present'
+        let stagedContentsBeforeCleanup: string | undefined
+        stagedOpenInjection = path => {
+          injected = true
+          if (outcome === 'EACCES') {
+            throw Object.assign(new Error('staged open denied'), { code: 'EACCES' })
+          }
+          if (outcome === 'EEXIST') {
+            // Use a real open collision: a nonexclusive open would
+            // truncate this entry and could publish over it.
+            realWriteFileSync(path, sentinel, { flag: 'wx' })
+            beforePendingCleanup = () => {
+              stagedContentsBeforeCleanup = realFs.readFileSync(path, 'utf8')
+            }
+            return
+          }
+          realFs.rmSync(dirname(path), { recursive: true, force: true })
+          if (outcome === 'winner') {
+            realWriteFileSync(target, JSON.stringify(successorFact(session.id, 3)))
+          }
+        }
+        linkUnsupported = true
+        const publication = publishForTest(synchronous, session)
+        if (outcome === 'EACCES' || outcome === 'EEXIST') {
+          await expect(publication).rejects.toMatchObject({ code: outcome })
+          await expect(readFile(target, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+        } else {
+          const exitCode = outcome === 'winner' ? 3 : 0
+          const result = await publication
+          if (!synchronous) expect(result).toMatchObject({ exitCode })
+          expect(await storedExitCode(session.id)).toBe(exitCode)
+          expect(await registry.resolveBackgroundSessionForWait(session.id)).toMatchObject({
+            exitCode,
+          })
+        }
+        expect(injected).toBe(true)
+        if (outcome === 'EEXIST') expect(stagedContentsBeforeCleanup).toBe(sentinel)
+        expect(realFs.existsSync(`${target}.commit`)).toBe(false)
+        expect(realFs.readdirSync(dirname(target)).filter(name => name.startsWith('.publish-'))).toEqual([])
+      })
+    }
+  }
+
+  for (const synchronous of [false, true]) {
+    it(
+      `reclaims a stale commit claim left with a staged record through the ${synchronous ? 'sync' : 'async'} fallback`,
+      async () => {
+        // Regression test for issue #2556 (recovery): a publisher that
+        // died mid-publication leaves its commit claim behind, holding
+        // the staged record it never renamed into place. A later
+        // publisher must reclaim the stale claim — staged file included —
+        // and publish, so an abandoned writer never blocks the target and
+        // readers see either an absent target or the successor's complete
+        // record.
+        const session = await registry.createBackgroundSession({
+          id: 'bg-commit-reclaim-staged-no-link',
+          pid: 424242,
+          cwd: '/repo',
+          command: ['sleep', '30'],
+          sessionId: 'sess-commit-reclaim-staged-no-link',
+          processMarker: TEST_PROCESS_MARKER,
+        })
+        linkUnsupported = true
+        try {
+          const target = terminalFactPath(session.id, 'natural')
+          const claimDir = `${target}.commit`
+          await seedStaleClaim(claimDir)
+          let visibilityChecked = false
+          const checkVisibility = () => {
+            // Inspect the actual reader-visible pathname at the last
+            // pre-rename boundary, not just the eventual final result.
+            expect(realFs.existsSync(target)).toBe(false)
+            const staged = realFs.readdirSync(claimDir)
+            expect(staged).toHaveLength(1)
+            expect(JSON.parse(realFs.readFileSync(join(claimDir, staged[0]!), 'utf8'))).toMatchObject({
+              id: session.id, status: 'failed', exitCode: 5,
+            })
+            visibilityChecked = true
+          }
+          registry._setCommitPublishOwnedHookForTesting(async () => checkVisibility())
+          registry._setCommitPublishOwnedHookForTestingSync(checkVisibility)
+          const options = { ownerPid: session.pid, expectedSession: session }
+          if (synchronous) {
+            registry.recordBackgroundSessionNaturalTerminationSync(
+              session.id, { exitCode: 5 }, options,
+            )
+          } else {
+            const terminated = await registry.recordBackgroundSessionNaturalTermination(
+              session.id, { exitCode: 5 }, options,
+            )
+            expect(terminated).toMatchObject({ status: 'failed', exitCode: 5 })
+          }
+          expect(visibilityChecked).toBe(true)
+          expect(await storedExitCode(session.id)).toBe(5)
+          expect(
+            await registry.resolveBackgroundSessionForWait(session.id),
+          ).toMatchObject({ status: 'failed', exitCode: 5 })
+        } finally {
+          linkUnsupported = false
+        }
       },
       30_000,
     )

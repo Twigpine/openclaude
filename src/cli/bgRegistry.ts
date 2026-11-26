@@ -2,35 +2,43 @@ import {
   link,
   lstat,
   mkdir,
+  mkdtemp,
   open,
   opendir,
   readFile,
   readdir,
   rename,
+  rm,
   rmdir,
   stat,
   unlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises'
 import {
   closeSync,
   constants as fsConstants,
+  fchmodSync,
   fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   rmdirSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
   type Dirent,
   type Stats,
 } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import {
   getProcessCommand,
@@ -1577,6 +1585,11 @@ const TERMINAL_FACT_PUBLISH_ATTEMPTS = 3
 // stale after COMMIT_PUBLISH_CLAIM_STALE_MS and is reclaimed first.
 // 3000 polls at 10 ms is about 30 s.
 const COMMIT_PUBLISH_CLAIM_MAX_POLLS = 3000
+// A Windows claim-install denial with neither an observed claim nor a
+// published target carries no evidence of contention: bound its retries
+// to a short budget so a persistent ACL denial surfaces quickly instead
+// of consuming the full claim-poll budget.
+const COMMIT_PUBLISH_DENIAL_MAX_RETRIES = 50
 // A commit claim older than this belongs to a dead or suspended
 // holder: the waiter reclaims it. Matches proper-lockfile's 10 s stale
 // threshold used by the per-ID locks in this file.
@@ -1710,6 +1723,68 @@ export function _setCommitPublishHookForTestingSync(
   hook: (() => void) | undefined,
 ): void {
   commitPublishHookForTestingSync = hook
+}
+
+// Test-only hook invoked by commitPublishFile after the final claim
+// ownership check has passed and immediately before the rename makes
+// the record visible, so a test can pause the holder past the stale
+// threshold while a successor reclaims the claim and publishes
+// (issue #2556). Never set outside tests.
+let commitPublishOwnedHookForTesting: (() => Promise<void>) | undefined
+
+export function _setCommitPublishOwnedHookForTesting(
+  hook: (() => Promise<void>) | undefined,
+): void {
+  commitPublishOwnedHookForTesting = hook
+}
+
+// Synchronous counterpart of the hook above, for commitPublishFileSync.
+// Never set outside tests.
+let commitPublishOwnedHookForTestingSync: (() => void) | undefined
+
+export function _setCommitPublishOwnedHookForTestingSync(
+  hook: (() => void) | undefined,
+): void {
+  commitPublishOwnedHookForTestingSync = hook
+}
+
+// Test-only hook invoked by commitPublishFile and commitPublishFileSync
+// after a commit claim has been observed stale and before that claim is
+// removed, so a test can interleave inside the reclaim window: pause the
+// reclaimer, install a successor claim, or publish the target
+// (CodeRabbit review on #2564). Never set outside tests.
+let commitPublishReclaimHookForTesting: (() => Promise<void>) | undefined
+let commitPublishReclaimHookForTestingSync: (() => void) | undefined
+
+export function _setCommitPublishReclaimHookForTesting(
+  hook: (() => Promise<void>) | undefined,
+): void {
+  commitPublishReclaimHookForTesting = hook
+}
+
+export function _setCommitPublishReclaimHookForTestingSync(
+  hook: (() => void) | undefined,
+): void {
+  commitPublishReclaimHookForTestingSync = hook
+}
+
+// Test-only override for the commit-claim poll budget, so a test can
+// exercise the loop-exhaustion path without three thousand polls.
+// Never set outside tests.
+let commitPublishClaimMaxPollsForTesting: number | undefined
+
+export function _setCommitPublishClaimMaxPollsForTesting(
+  maxPolls: number | undefined,
+): void {
+  commitPublishClaimMaxPollsForTesting = maxPolls
+}
+
+let commitPublishDenialMaxRetriesForTesting: number | undefined
+
+export function _setCommitPublishDenialMaxRetriesForTesting(
+  maxRetries: number | undefined,
+): void {
+  commitPublishDenialMaxRetriesForTesting = maxRetries
 }
 
 async function waitForTerminalFact(
@@ -1859,36 +1934,47 @@ function isTerminalFactClaimTempGoneSync(tmp: string): boolean {
 
 type PublishCommitOutcome = 'committed' | 'exists' | 'gone'
 
+// A terminal-fact claim can name a non-regular entry. As with wait's
+// strict readers, use a nonblocking open and check the descriptor's type
+// before reading, rather than blocking on a FIFO or opening by path twice.
+const PUBLISH_SOURCE_FLAGS = fsConstants.O_RDONLY | fsConstants.O_NONBLOCK
+
+async function readPublishSource(path: string) {
+  const handle = await open(path, PUBLISH_SOURCE_FLAGS)
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) throw new Error(`Expected a regular publish source at ${path}`)
+    return { bytes: await handle.readFile(), mode: info.mode & 0o777 }
+  } finally {
+    await handle.close()
+  }
+}
+
+function readPublishSourceSync(path: string) {
+  const fd = openSync(path, PUBLISH_SOURCE_FLAGS)
+  try {
+    const info = fstatSync(fd)
+    if (!info.isFile()) throw new Error(`Expected a regular publish source at ${path}`)
+    return { bytes: readFileSync(fd), mode: info.mode & 0o777 }
+  } finally {
+    closeSync(fd)
+  }
+}
+
 /**
- * Commits a synced temp file as a published fact or session row, and
- * reports which fact actually ended up at the target.
+ * Publishes a synced temp without replacing an existing record. Prefer
+ * link(), which checks for an existing target atomically. If hard links
+ * are unavailable, install a nonempty claim directory in one rename.
+ * Another claimant cannot rename over it while its uniquely named
+ * staged record is present. Recheck the target after installing the
+ * claim: a previous publisher may have consumed its staged record just
+ * before we installed ours.
  *
- * link() is the atomic commit: it fails with EEXIST when the target is
- * already published, so a delayed owner whose claim was withdrawn can
- * never replace a fact another installer published (maintainer review
- * 5942761094 on #2497) — the rename() pre-checks alone leave a window
- * between the check and the rename, which a successor's publish can
- * land in. A missing temp file means another installer adopted this
- * publish, so the caller waits for the fact at the target instead.
- *
- * On filesystems that reject hard links, link() fails with
- * EPERM/ENOSYS/EOPNOTSUPP and the commit falls back to a
- * claim-serialized rename: mkdir() on `<target>.commit` is atomic, so
- * exactly one publisher wins the claim, rechecks the target under it,
- * and renames, while a loser that finds the claim waits for the target
- * to appear and reports it. A plain rename() cannot replace link()
- * here — it overwrites an existing target, so two publishers that both
- * reach the fallback publish in turn and the second one's readback
- * matches its own bytes, letting both creates succeed instead of
- * rejecting the duplicate (CodeRabbit #2497 review 5945720742). The
- * target still only ever appears complete, via rename, and a stale
- * claim is reclaimed by the waiter. A holder that stalls past the
- * stale threshold can lose its claim that way, so the holder records
- * the claim directory's (dev, ino) identity when it wins the claim
- * and re-verifies it immediately before the rename: a superseded
- * holder reports the successor's publish instead of overwriting it,
- * and the claim directory is only removed while it is still the
- * holder's own (maintainer review 5948202472 on #2497).
+ * The final rename consumes the unique staged path. Reclaim removes that
+ * path before any successor can install a claim, so even a holder that
+ * stalls after its last check cannot overwrite a successor. Staging
+ * before acquiring the shared path also avoids mistaking a recycled
+ * directory inode for ownership or writing into a successor's claim.
  */
 async function commitPublishFile(
   tmp: string,
@@ -1902,73 +1988,154 @@ async function commitPublishFile(
     if (isErrno(error, 'ENOENT')) return 'gone'
     if (!isHardLinkUnsupported(error)) throw error
   }
-  const claimDir = commitPublishClaimDir(target)
-  for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
-    let claimIdentity: CleanupFileIdentity | undefined
-    try {
-      await mkdir(claimDir)
-      claimIdentity = await readCommitPublishClaimIdentity(claimDir)
-    } catch (error) {
-      if (!isErrno(error, 'EEXIST')) throw error
-    }
-    if (claimIdentity === undefined) {
-      // Another publisher holds the claim: its rename lands within
-      // microseconds, so the target appears — report it instead of
-      // racing it.
-      try {
-        await lstat(target)
-        return 'exists'
-      } catch (error) {
-        if (!isErrno(error, 'ENOENT')) throw error
+  const claimDir = `${target}.commit`
+  const maxClaimPolls =
+    commitPublishClaimMaxPollsForTesting ?? COMMIT_PUBLISH_CLAIM_MAX_POLLS
+  const maxDenialRetries =
+    commitPublishDenialMaxRetriesForTesting ?? COMMIT_PUBLISH_DENIAL_MAX_RETRIES
+  const claimIsStale = observeCommitPublishClaimAge()
+  let finalInstallDenial: unknown
+  // Consecutive Windows install denials with no observed claim: these
+  // carry no contention evidence and get their own short budget.
+  let denialRetries = 0
+  for (let attempt = 0; attempt < maxClaimPolls; attempt++) {
+    if (await commitPublishPathStat(target)) return 'exists'
+    const claim = await commitPublishPathStat(claimDir)
+    if (claim) {
+      // An observed claim is contention evidence: it earns the full
+      // poll budget and resets the short denial budget.
+      denialRetries = 0
+      if (!claim.isDirectory()) {
+        throw new Error(`Expected a commit claim directory at ${claimDir}`)
       }
-      if (await isCommitPublishClaimStale(claimDir)) {
-        await rmdir(claimDir).catch(() => {})
+      const entries = await readCommitPublishEntries(claimDir)
+      if (!entries) continue
+      const payload = commitPublishClaimPayload(entries)
+      if (payload === null) {
+        await new Promise(resolve => setTimeout(resolve, 10))
         continue
+      }
+      const installing = payload?.startsWith('installing.') ? payload : undefined
+      const sealed = payload && !installing
+        ? await commitPublishPathStat(join(claimDir, payload))
+        : undefined
+      if (payload && !installing && !sealed) continue
+      if (claimIsStale(sealed?.mtimeMs ?? claim.mtimeMs, installing)) {
+        await commitPublishReclaimHookForTesting?.()
+        if (sameCommitPublishClaim(claim, await commitPublishPathStat(claimDir))) {
+          if (payload) await unlink(join(claimDir, payload)).catch(() => {})
+          // A successor has a different staged name and is nonempty.
+          await rmdir(claimDir).catch(() => {})
+        }
       }
       await new Promise(resolve => setTimeout(resolve, 10))
       continue
     }
-    // We hold the claim: recheck the target, then verify we still own
-    // the claim immediately before the rename. A holder stalled past
-    // the stale threshold can lose its claim to a successor, which
-    // publishes first; without the ownership check the resumed rename
-    // would overwrite the successor's publish and still report success
-    // (maintainer review 5948202472 on #2497). Keep the ownership
-    // check as the last verification before the rename: a target
-    // recheck after it would reopen the same window for a holder
-    // stalled past the stale threshold (CodeRabbit #2497 review
-    // 5950772048).
+    const token = randomUUID()
+    const installingName = `installing.${token}`
+    const pendingDir = await mkdtemp(join(dirname(target), '.publish-'))
+    const pending = join(pendingDir, installingName)
+    const installing = join(claimDir, installingName)
+    const staged = join(claimDir, `staged.${token}`)
+    let installed = false
+    let sealed = false
     try {
       try {
-        await lstat(target)
-        return 'exists'
+        // Create and sync through one writable descriptor. Reopening a
+        // completed copy for write would reject a readable, read-only temp.
+        const { bytes, mode } = await readPublishSource(tmp)
+        const handle = await open(pending, 'wx', mode)
+        try {
+          await handle.writeFile(bytes)
+          // Adoption may run under a more restrictive umask than the owner.
+          if (((await handle.stat()).mode & 0o777) !== mode) {
+            await handle.chmod(mode)
+          }
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
       } catch (error) {
         if (!isErrno(error, 'ENOENT')) throw error
-      }
-      await commitPublishHookForTesting?.()
-      if (!(await ownsCommitPublishClaim(claimDir, claimIdentity))) {
-        try {
-          await lstat(target)
-          return 'exists'
-        } catch (error) {
-          if (!isErrno(error, 'ENOENT')) throw error
-        }
-        // The claim is gone but nothing was published (the successor's
-        // commit failed): re-enter the claim loop instead of reporting
-        // a fact that does not exist.
+        if (await commitPublishPathStat(target)) return 'exists'
+        if (!(await commitPublishPathStat(tmp))) return 'gone'
         continue
       }
       try {
-        await rename(tmp, target)
+        await rename(pendingDir, claimDir)
+        installed = true
+      } catch (error) {
+        if (isErrno(error, 'EEXIST') || isErrno(error, 'ENOTEMPTY')) continue
+        if (!isCommitPublishDirectoryCollisionOnWindows(error)) throw error
+        if (await commitPublishPathStat(target)) return 'exists'
+        const deniedClaim = await commitPublishPathStat(claimDir)
+        if (deniedClaim) {
+          if (!deniedClaim.isDirectory()) {
+            // Same malformed-claim rejection as the poll loop: a file at
+            // the claim path is not contention evidence, and deferring to
+            // a later poll could turn it into a timeout instead.
+            throw new Error(`Expected a commit claim directory at ${claimDir}`)
+          }
+          // A claim can disappear before the next poll. Reset the short
+          // budget at this observation, then let the loop validate or
+          // reclaim the claim if it is still present.
+          denialRetries = 0
+          await new Promise(resolve => setTimeout(resolve, 10))
+          continue
+        }
+        // Both paths are absent: the collision may have cleared, or
+        // this may be a real denial. With no observed claim there is
+        // no contention evidence, so a short denial budget bounds the
+        // wait; the poll budget still applies.
+        if (denialRetries < maxDenialRetries && attempt + 1 < maxClaimPolls) {
+          denialRetries++
+          await new Promise(resolve => setTimeout(resolve, 10))
+          continue
+        }
+        // Run the common final target check after this attempt's cleanup.
+        finalInstallDenial = error
+        break
+      }
+      // Stamp a unique path, not the shared directory: a withdrawn
+      // holder cannot change its successor's age. Publishing the sealed
+      // name makes that stamp distinguishable from a pre-install mtime.
+      try {
+        const acquiredAt = new Date()
+        await utimes(installing, acquiredAt, acquiredAt)
+        await rename(installing, staged)
+        sealed = true
       } catch (error) {
         if (!isErrno(error, 'ENOENT')) throw error
-        return 'gone'
+        continue
       }
-      return 'committed'
+      if (await commitPublishPathStat(target)) return 'exists'
+      await commitPublishHookForTesting?.()
+      if (!(await commitPublishPathStat(staged))) continue
+      await commitPublishOwnedHookForTesting?.()
+      try {
+        await rename(staged, target)
+        return 'committed'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+        // The source was reclaimed. Recheck the target on the next
+        // iteration and retry with the caller's temp if nobody won.
+      }
     } finally {
-      await removeOwnCommitPublishClaim(claimDir, claimIdentity)
+      if (installed) {
+        await unlink(sealed ? staged : installing).catch(() => {})
+        // A fresh holder's claim is nonempty and rmdir cannot remove it.
+        await rmdir(claimDir).catch(() => {})
+      } else {
+        await rm(pendingDir, { force: true, recursive: true }).catch(() => {})
+      }
     }
   }
+  // The final poll can miss a successor that reclaims the staged
+  // source and publishes during that iteration, so recheck the target
+  // once before failing: callers expecting 'exists' must not see the
+  // timeout when the record is already there.
+  if (await commitPublishPathStat(target)) return 'exists'
+  if (finalInstallDenial !== undefined) throw finalInstallDenial
   throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
 }
 
@@ -1984,173 +2151,248 @@ function commitPublishFileSync(
     if (isErrno(error, 'ENOENT')) return 'gone'
     if (!isHardLinkUnsupported(error)) throw error
   }
-  const claimDir = commitPublishClaimDir(target)
-  for (let attempt = 0; attempt < COMMIT_PUBLISH_CLAIM_MAX_POLLS; attempt++) {
-    let claimIdentity: CleanupFileIdentity | undefined
-    try {
-      mkdirSync(claimDir)
-      claimIdentity = readCommitPublishClaimIdentitySync(claimDir)
-    } catch (error) {
-      if (!isErrno(error, 'EEXIST')) throw error
-    }
-    if (claimIdentity === undefined) {
-      try {
-        lstatSync(target)
-        return 'exists'
-      } catch (error) {
-        if (!isErrno(error, 'ENOENT')) throw error
+  const claimDir = `${target}.commit`
+  const maxClaimPolls =
+    commitPublishClaimMaxPollsForTesting ?? COMMIT_PUBLISH_CLAIM_MAX_POLLS
+  const maxDenialRetries =
+    commitPublishDenialMaxRetriesForTesting ?? COMMIT_PUBLISH_DENIAL_MAX_RETRIES
+  const claimIsStale = observeCommitPublishClaimAge()
+  let finalInstallDenial: unknown
+  // Consecutive Windows install denials with no observed claim: these
+  // carry no contention evidence and get their own short budget.
+  let denialRetries = 0
+  for (let attempt = 0; attempt < maxClaimPolls; attempt++) {
+    if (commitPublishPathStatSync(target)) return 'exists'
+    const claim = commitPublishPathStatSync(claimDir)
+    if (claim) {
+      // An observed claim is contention evidence: it earns the full
+      // poll budget and resets the short denial budget.
+      denialRetries = 0
+      if (!claim.isDirectory()) {
+        throw new Error(`Expected a commit claim directory at ${claimDir}`)
       }
-      if (isCommitPublishClaimStaleSync(claimDir)) {
-        try {
-          rmdirSync(claimDir)
-        } catch {}
+      const entries = readCommitPublishEntriesSync(claimDir)
+      if (!entries) continue
+      const payload = commitPublishClaimPayload(entries)
+      if (payload === null) {
+        sleepSync(10)
         continue
+      }
+      const installing = payload?.startsWith('installing.') ? payload : undefined
+      const sealed = payload && !installing
+        ? commitPublishPathStatSync(join(claimDir, payload))
+        : undefined
+      if (payload && !installing && !sealed) continue
+      if (claimIsStale(sealed?.mtimeMs ?? claim.mtimeMs, installing)) {
+        commitPublishReclaimHookForTestingSync?.()
+        if (sameCommitPublishClaim(claim, commitPublishPathStatSync(claimDir))) {
+          if (payload) {
+            try {
+              unlinkSync(join(claimDir, payload))
+            } catch {}
+          }
+          try {
+            rmdirSync(claimDir)
+          } catch {}
+        }
       }
       sleepSync(10)
       continue
     }
-    // We hold the claim: recheck the target, then verify we still own
-    // the claim immediately before the rename (see commitPublishFile).
-    // Keep the ownership check last here too: a target recheck after
-    // it would reopen the same stalled-holder window.
+    const token = randomUUID()
+    const installingName = `installing.${token}`
+    const pendingDir = mkdtempSync(join(dirname(target), '.publish-'))
+    const pending = join(pendingDir, installingName)
+    const installing = join(claimDir, installingName)
+    const staged = join(claimDir, `staged.${token}`)
+    let installed = false
+    let sealed = false
     try {
       try {
-        lstatSync(target)
-        return 'exists'
+        // Match the async staging path, including the original mode.
+        const { bytes, mode } = readPublishSourceSync(tmp)
+        const fd = openSync(pending, 'wx', mode)
+        try {
+          writeFileSync(fd, bytes)
+          if ((fstatSync(fd).mode & 0o777) !== mode) fchmodSync(fd, mode)
+          fsyncSync(fd)
+        } finally {
+          closeSync(fd)
+        }
       } catch (error) {
         if (!isErrno(error, 'ENOENT')) throw error
-      }
-      commitPublishHookForTestingSync?.()
-      if (!ownsCommitPublishClaimSync(claimDir, claimIdentity)) {
-        try {
-          lstatSync(target)
-          return 'exists'
-        } catch (error) {
-          if (!isErrno(error, 'ENOENT')) throw error
-        }
-        // The claim is gone but nothing was published: re-enter the
-        // claim loop instead of reporting a fact that does not exist.
+        if (commitPublishPathStatSync(target)) return 'exists'
+        if (!(commitPublishPathStatSync(tmp))) return 'gone'
         continue
       }
       try {
-        renameSync(tmp, target)
+        renameSync(pendingDir, claimDir)
+        installed = true
+      } catch (error) {
+        if (isErrno(error, 'EEXIST') || isErrno(error, 'ENOTEMPTY')) continue
+        if (!isCommitPublishDirectoryCollisionOnWindows(error)) throw error
+        if (commitPublishPathStatSync(target)) return 'exists'
+        const deniedClaim = commitPublishPathStatSync(claimDir)
+        if (deniedClaim) {
+          if (!deniedClaim.isDirectory()) {
+            // Same malformed-claim rejection as the poll loop: a file at
+            // the claim path is not contention evidence, and deferring to
+            // a later poll could turn it into a timeout instead.
+            throw new Error(`Expected a commit claim directory at ${claimDir}`)
+          }
+          // As in the async path, the next poll may no longer see it.
+          denialRetries = 0
+          sleepSync(10)
+          continue
+        }
+        // Both paths are absent: the collision may have cleared, or
+        // this may be a real denial. With no observed claim there is
+        // no contention evidence, so a short denial budget bounds the
+        // wait; the poll budget still applies.
+        if (denialRetries < maxDenialRetries && attempt + 1 < maxClaimPolls) {
+          denialRetries++
+          sleepSync(10)
+          continue
+        }
+        // Run the common final target check after this attempt's cleanup.
+        finalInstallDenial = error
+        break
+      }
+      // Stamp a unique path, not the shared directory: a withdrawn
+      // holder cannot change its successor's age. Publishing the sealed
+      // name makes that stamp distinguishable from a pre-install mtime.
+      try {
+        const acquiredAt = new Date()
+        utimesSync(installing, acquiredAt, acquiredAt)
+        renameSync(installing, staged)
+        sealed = true
       } catch (error) {
         if (!isErrno(error, 'ENOENT')) throw error
-        return 'gone'
+        continue
       }
-      return 'committed'
+      if (commitPublishPathStatSync(target)) return 'exists'
+      commitPublishHookForTestingSync?.()
+      if (!(commitPublishPathStatSync(staged))) continue
+      commitPublishOwnedHookForTestingSync?.()
+      try {
+        renameSync(staged, target)
+        return 'committed'
+      } catch (error) {
+        if (!isErrno(error, 'ENOENT')) throw error
+        // The source was reclaimed. Recheck the target on the next
+        // iteration and retry with the caller's temp if nobody won.
+      }
     } finally {
-      removeOwnCommitPublishClaimSync(claimDir, claimIdentity)
+      if (installed) {
+        try {
+          unlinkSync(sealed ? staged : installing)
+        } catch {}
+        try {
+          rmdirSync(claimDir)
+        } catch {}
+      } else {
+        try {
+          rmSync(pendingDir, { force: true, recursive: true })
+        } catch {}
+      }
     }
   }
+  // Same final recheck as the async path: a successor can publish
+  // during the last poll iteration.
+  if (commitPublishPathStatSync(target)) return 'exists'
+  if (finalInstallDenial !== undefined) throw finalInstallDenial
   throw new Error(`Timed out waiting for a concurrent publish to ${target}`)
 }
 
-// The publish claim for one commit target: a directory, so creating it
-// with mkdir() is atomic and works on filesystems without hard-link
-// support — the same idiom as the terminal-fact claim directories
-// above. It serializes the recheck-and-rename in the no-hard-link
-// fallback only; the link() path never creates one.
-function commitPublishClaimDir(target: string): string {
-  return `${target}.commit`
-}
-
-// The identity of a commit claim directory, recorded when the claim is
-// won: a stale-reclaiming successor removes this directory and creates
-// a new one, so the (dev, ino) pair no longer matches and a delayed
-// holder can tell its claim was superseded. The pair is the same
-// identity idiom as CleanupFileIdentity above.
-async function readCommitPublishClaimIdentity(
-  claimDir: string,
-): Promise<CleanupFileIdentity | undefined> {
-  try {
-    const stats = await lstat(claimDir)
-    return { dev: stats.dev, ino: stats.ino }
-  } catch {
-    return undefined
+// An atomically installed directory can retain an arbitrarily old mtime.
+// Until its payload is sealed, count age from the first observation of
+// that unique name. A crash before sealing is therefore still recoverable.
+function observeCommitPublishClaimAge() {
+  let unsealed: { name: string; firstSeen: number } | undefined
+  return (mtimeMs: number, installing: string | undefined): boolean => {
+    if (installing === undefined) {
+      unsealed = undefined
+      return Date.now() - mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
+    }
+    const now = performance.now()
+    if (unsealed?.name !== installing) {
+      unsealed = { name: installing, firstSeen: now }
+    }
+    return now - unsealed.firstSeen > COMMIT_PUBLISH_CLAIM_STALE_MS
   }
 }
 
-function readCommitPublishClaimIdentitySync(
-  claimDir: string,
-): CleanupFileIdentity | undefined {
-  try {
-    const stats = lstatSync(claimDir)
-    return { dev: stats.dev, ino: stats.ino }
-  } catch {
-    return undefined
-  }
-}
-
-// Whether the claim directory is still the one this publisher won: a
-// successor that reclaimed a stale claim removed it and created a new
-// directory, so the identity differs (or the directory is gone).
-async function ownsCommitPublishClaim(
-  claimDir: string,
-  identity: CleanupFileIdentity,
-): Promise<boolean> {
-  const current = await readCommitPublishClaimIdentity(claimDir)
-  return (
-    current !== undefined &&
-    current.dev === identity.dev &&
-    current.ino === identity.ino
-  )
-}
-
-function ownsCommitPublishClaimSync(
-  claimDir: string,
-  identity: CleanupFileIdentity,
+function sameCommitPublishClaim(
+  observed: Stats,
+  current: Stats | undefined,
 ): boolean {
-  const current = readCommitPublishClaimIdentitySync(claimDir)
   return (
     current !== undefined &&
-    current.dev === identity.dev &&
-    current.ino === identity.ino
+    current.isDirectory() &&
+    current.dev === observed.dev &&
+    current.ino === observed.ino &&
+    current.mtimeMs === observed.mtimeMs
   )
 }
 
-// Removes a commit claim only while it is still ours: an unguarded
-// rmdir() in the commit finally could delete a successor's active
-// claim directory after our claim was stale-reclaimed, letting a third
-// publisher claim while the successor is mid-publish.
-async function removeOwnCommitPublishClaim(
-  claimDir: string,
-  identity: CleanupFileIdentity,
-): Promise<void> {
-  if (!(await ownsCommitPublishClaim(claimDir, identity))) return
-  await rmdir(claimDir).catch(() => {})
+const COMMIT_PUBLISH_PAYLOAD_RE =
+  /^(?:installing|staged)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+function commitPublishClaimPayload(entries: Dirent[]): string | undefined | null {
+  const [entry] = entries
+  if (!entry) return undefined // An empty claim is recoverable via rmdir.
+  // Preserve unexpected contents. The snapshot can also straddle a seal
+  // rename, so retry rather than failing immediately on an ambiguous read.
+  if (
+    entries.length !== 1 ||
+    !entry.isFile() ||
+    !COMMIT_PUBLISH_PAYLOAD_RE.test(entry.name)
+  ) {
+    return null
+  }
+  return entry.name
 }
 
-function removeOwnCommitPublishClaimSync(
-  claimDir: string,
-  identity: CleanupFileIdentity,
-): void {
-  if (!ownsCommitPublishClaimSync(claimDir, identity)) return
+async function readCommitPublishEntries(path: string): Promise<Dirent[] | undefined> {
   try {
-    rmdirSync(claimDir)
-  } catch {}
-}
-
-// Whether a commit claim belongs to a dead or suspended holder: its
-// mtime is older than the stale threshold. A live holder's critical
-// section (recheck + rename) takes microseconds, so a fresh claim
-// means the holder is about to publish.
-async function isCommitPublishClaimStale(claimDir: string): Promise<boolean> {
-  try {
-    const stats = await lstat(claimDir)
-    return Date.now() - stats.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
-  } catch {
-    // The claim disappeared: not stale, the waiter just retries.
-    return false
+    return await readdir(path, { withFileTypes: true })
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
+    return undefined
   }
 }
 
-function isCommitPublishClaimStaleSync(claimDir: string): boolean {
+function readCommitPublishEntriesSync(path: string): Dirent[] | undefined {
   try {
-    const stats = lstatSync(claimDir)
-    return Date.now() - stats.mtimeMs > COMMIT_PUBLISH_CLAIM_STALE_MS
-  } catch {
-    return false
+    return readdirSync(path, { withFileTypes: true })
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
+    return undefined
+  }
+}
+
+// Windows can report access denied rather than ENOTEMPTY when a
+// directory rename collides. Callers distinguish a claim from a denial.
+function isCommitPublishDirectoryCollisionOnWindows(error: unknown): boolean {
+  return process.platform === 'win32' &&
+    (isErrno(error, 'EACCES') || isErrno(error, 'EPERM'))
+}
+
+async function commitPublishPathStat(path: string) {
+  try {
+    return await lstat(path)
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
+    return undefined
+  }
+}
+
+function commitPublishPathStatSync(path: string) {
+  try {
+    return lstatSync(path)
+  } catch (error) {
+    if (!isErrno(error, 'ENOENT')) throw error
+    return undefined
   }
 }
 
