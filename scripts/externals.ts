@@ -205,4 +205,6 @@ export const INTENTIONALLY_BUNDLED: string[] = [
   'graphology-metrics',
   // Tokenizer for repo map token budgeting
   'js-tiktoken',
+  'quickjs-emscripten-core',
+  '@jitl/quickjs-singlefile-mjs-release-sync',
 ]

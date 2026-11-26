@@ -58,11 +58,19 @@ import {
   type AgentsDispatchOptionValues,
 } from './cli/agentsDispatch.js';
 import { getTools } from './tools.js';
+import {
+  getCodeModeOriginalProcessEnv,
+  isReplModeEnabled,
+  resolveCodeModeActivationAfterConsent,
+  resolveCodeModeEnablement,
+  setReplModeEnabledForSession,
+  shouldShowCodeModeConsent,
+} from './tools/REPLTool/constants.js';
 import { canUserConfigureAdvisor, getInitialAdvisorSetting, isAdvisorEnabled, isValidAdvisorModel, modelSupportsAdvisor } from './utils/advisor.js';
 import { isAgentSwarmsEnabled } from './utils/agentSwarmsEnabled.js';
 import { count, uniq } from './utils/array.js';
 import { getSubscriptionType, isClaudeAISubscriber, prefetchAwsCredentialsAndBedRockInfoIfSafe, prefetchGcpCredentialsIfSafe, validateForceLoginOrg } from './utils/auth.js';
-import { checkHasTrustDialogAccepted, getGlobalConfig, getRemoteControlAtStartup, isAutoUpdaterDisabled, saveGlobalConfig } from './utils/config.js';
+import { checkHasTrustDialogAccepted, getGlobalConfig, getRemoteControlAtStartup, hasAcknowledgedCodeMode, isAutoUpdaterDisabled, markCodeModeAcknowledged, saveGlobalConfig } from './utils/config.js';
 import { seedEarlyInput, stopCapturingEarlyInput } from './utils/earlyInput.js';
 import { clampUltracodeEffort, getInitialEffortSetting, parseEffortValue } from './utils/effort.js';
 import {
@@ -107,7 +115,7 @@ import { filterCommandsForRemoteMode, getCommands } from './commands.js';
 import type { StatsStore } from './context/stats.js';
 import { launchAssistantInstallWizard, launchAssistantSessionChooser, launchInvalidSettingsDialog, launchResumeChooser, launchSnapshotUpdateDialog, launchTeleportRepoMismatchDialog, launchTeleportResumeWrapper } from './dialogLaunchers.js';
 import { SHOW_CURSOR } from './ink/termio/dec.js';
-import { exitWithError, exitWithMessage, getRenderContext, renderAndRun, showSetupScreens } from './interactiveHelpers.js';
+import { exitWithError, exitWithMessage, getRenderContext, renderAndRun, showSetupDialog, showSetupScreens } from './interactiveHelpers.js';
 import { initBuiltinPlugins } from './plugins/bundled/index.js';
 /* eslint-enable @typescript-eslint/no-require-imports */
 import { checkQuotaStatus } from './services/claudeAiLimits.js';
@@ -145,9 +153,10 @@ import { getGlobExclusionsForPluginCache } from './utils/plugins/orphanedPluginF
 import { getPluginSeedDirs } from './utils/plugins/pluginDirectories.js';
 import { countFilesRoundedRg } from './utils/ripgrep.js';
 import { processSessionStartHooks, processSetupHooks } from './utils/sessionStart.js';
-import { cacheSessionTitle, getSessionIdFromLog, saveAgentSetting, saveMode, searchSessionsByCustomTitle, sessionIdExists } from './utils/sessionStorage.js';
+import { cacheSessionTitle, getSessionIdFromLog, saveAgentSetting, saveCodeModeState, saveMode, searchSessionsByCustomTitle, sessionIdExists } from './utils/sessionStorage.js';
 import { ensureMdmSettingsLoaded } from './utils/settings/mdm/settings.js';
 import { eagerLoadSettingsFromArgs } from './utils/settings/flagSettings.js';
+import { isSettingSourceEnabled } from './utils/settings/constants.js';
 import { getInitialSettings, getManagedSettingsKeysForLogging, getSettingsForSource, getSettingsWithErrors } from './utils/settings/settings.js';
 import type { ValidationError } from './utils/settings/validation.js';
 import { logPluginLoadErrors, logPluginsEnabledForSession } from './utils/telemetry/pluginTelemetry.js';
@@ -183,7 +192,7 @@ import { createHeadlessHeartbeat, parseHeadlessHeartbeatDuration, validateHeadle
 import { setCwd } from 'src/utils/Shell.js';
 import { type ProcessedResume, processResumedConversation } from 'src/utils/sessionRestore.js';
 import { plural } from 'src/utils/stringUtils.js';
-import { type ChannelEntry, getInitialMainLoopModel, getIsNonInteractiveSession, getSdkBetas, getSessionId, getProjectRoot, getUserMsgOptIn, setAllowedChannels, setChromeFlagOverride, setClientType, setCwdState, setDirectConnectServerUrl, setInitialMainLoopModel, setInlinePlugins, setIsInteractive, setKairosActive, setOriginalCwd, setQuestionPreviewFormat, setSdkBetas, setProjectRoot, setSessionBypassPermissionsMode, setSessionDangerousPermissionMode, setSessionPersistenceDisabled, setSessionSource, setUserMsgOptIn, switchSession } from './bootstrap/state.js';
+import { type ChannelEntry, getClientType, getInitialMainLoopModel, getIsInteractive, getIsNonInteractiveSession, getSdkBetas, getSessionId, getProjectRoot, getUserMsgOptIn, setAllowedChannels, setChromeFlagOverride, setClientType, setCwdState, setDirectConnectServerUrl, setInitialMainLoopModel, setInlinePlugins, setIsInteractive, setKairosActive, setOriginalCwd, setQuestionPreviewFormat, setSdkBetas, setProjectRoot, setSessionBypassPermissionsMode, setSessionDangerousPermissionMode, setSessionPersistenceDisabled, setSessionSource, setUserMsgOptIn, switchSession } from './bootstrap/state.js';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const autoModeStateModule = feature('TRANSCRIPT_CLASSIFIER') ? require('./utils/permissions/autoModeState.js') as typeof import('./utils/permissions/autoModeState.js') : null;
@@ -498,6 +507,12 @@ function eagerLoadSettings(): void {
   }
   profileCheckpoint('eagerLoadSettings_end');
 }
+// Captured around initializeEntrypoint, before settings can mutate process.env.
+// Code Mode must distinguish the interactive terminal CLI from embedders even
+// when they allocate a TTY.
+let entrypointBeforeNormalization: string | undefined;
+let entrypointAfterInitialization: string | undefined;
+
 function initializeEntrypoint(isNonInteractive: boolean): void {
   // Skip if already set (e.g., by SDK or other entrypoints)
   if (process.env.CLAUDE_CODE_ENTRYPOINT) {
@@ -521,6 +536,59 @@ function initializeEntrypoint(isNonInteractive: boolean): void {
 
   // Set based on interactive status
   process.env.CLAUDE_CODE_ENTRYPOINT = isNonInteractive ? 'sdk-cli' : 'cli';
+}
+
+/**
+ * Resolve and consent-gate Code Mode before the interactive REPL assembles its
+ * tool inventory. This runs only for interactive sessions. Print, SDK, MCP, and
+ * other programmatic entrypoints never call it and therefore keep direct tools
+ * without a consent prompt or failure.
+ */
+async function configureCodeModeForInteractiveSession(root: Root): Promise<void> {
+  const enabled = resolveCodeModeEnablement({
+    originalProcessEnv: getCodeModeOriginalProcessEnv(),
+    userSettingsEnv: isSettingSourceEnabled('userSettings')
+      ? getSettingsForSource('userSettings')?.env
+      : undefined,
+    isInteractive: getIsInteractive(),
+    entrypoint: entrypointBeforeNormalization ??
+      (getClientType() === 'cli' ? entrypointAfterInitialization : getClientType()),
+  });
+  if (!enabled) {
+    setReplModeEnabledForSession(false);
+    saveCodeModeState(false);
+    return;
+  }
+
+  const hasAcknowledged = hasAcknowledgedCodeMode();
+  if (!shouldShowCodeModeConsent(enabled, hasAcknowledged)) {
+    setReplModeEnabledForSession(resolveCodeModeActivationAfterConsent({
+      enablement: enabled,
+      hasAcknowledged,
+    }));
+    saveCodeModeState(isReplModeEnabled());
+    return;
+  }
+
+  try {
+    const { CodeModeConsentDialog } = await import('./components/CodeModeConsentDialog.js');
+    const accepted = await showSetupDialog<boolean>(root, done => (
+      <CodeModeConsentDialog onDone={done} />
+    ));
+    setReplModeEnabledForSession(resolveCodeModeActivationAfterConsent({
+      enablement: enabled,
+      hasAcknowledged: false,
+      consentAccepted: accepted,
+    }));
+    saveCodeModeState(isReplModeEnabled());
+    if (!accepted) return;
+    markCodeModeAcknowledged();
+  } catch (error) {
+    setReplModeEnabledForSession(false);
+    saveCodeModeState(false);
+    logForDebugging(`[main] Code Mode consent dialog failed: ${errorMessage(error)}`, { level: 'warn' });
+    writeToStderr('Code Mode is inactive because the first-use confirmation could not be shown.\n');
+  }
 }
 
 // Set by early argv processing when `claude open <url>` is detected (interactive mode only)
@@ -743,7 +811,9 @@ export async function main() {
   setIsInteractive(isInteractive);
 
   // Initialize entrypoint based on mode - needs to be set before any event is logged
+  entrypointBeforeNormalization = process.env.CLAUDE_CODE_ENTRYPOINT;
   initializeEntrypoint(isNonInteractive);
+  entrypointAfterInitialization = process.env.CLAUDE_CODE_ENTRYPOINT;
 
   // Determine client type
   const clientType = (() => {
@@ -2160,6 +2230,9 @@ async function run(): Promise<CommanderCommand> {
         durationMs: Math.round(process.uptime() * 1000)
       });
       const onboardingShown = await showSetupScreens(root, permissionMode, allowDangerouslySkipPermissions, commands, enableClaudeInChrome, devChannels);
+      if (process.exitCode === undefined) {
+        await configureCodeModeForInteractiveSession(root);
+      }
 
       // Now that trust is established and GrowthBook has auth headers,
       // resolve the --remote-control / --rc entitlement gate.

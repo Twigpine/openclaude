@@ -18,12 +18,13 @@ import { ExitPlanModeV2Tool } from '../../tools/ExitPlanModeTool/ExitPlanModeV2T
 import { FILE_EDIT_TOOL_NAME } from '../../tools/FileEditTool/constants.js'
 import { FILE_WRITE_TOOL_NAME } from '../../tools/FileWriteTool/constants.js'
 import { PowerShellTool } from '../../tools/PowerShellTool/PowerShellTool.js'
+import { REPLTool } from '../../tools/REPLTool/REPLTool.js'
 import { getPlatform } from '../platform.js'
 import {
   getActiveSessionPlanFilePath,
   getScratchpadDir,
 } from './filesystem.js'
-import { hasPermissionsToUseTool } from './permissions.js'
+import { hasPermissionsToUseTool, replClassifierAppliesForMode } from './permissions.js'
 
 const emptyInputSchema = z.object({})
 const assistantMessage = {} as Parameters<typeof hasPermissionsToUseTool>[3]
@@ -272,7 +273,101 @@ function mcpTool(name: string, readOnlyHint?: boolean) {
   })
 }
 
+describe('auto mode REPL classifier bounds', () => {
+  test('requires manual approval when the script exceeds the classifier input budget', async () => {
+    const result = await hasPermissionsToUseTool(
+      REPLTool,
+      { code: `return ${'x'.repeat(32_001)}` },
+      contextFor('auto'),
+      assistantMessage,
+      'repl-tool-use-id',
+    )
+
+    expect(result.behavior).toBe('ask')
+    if (result.behavior !== 'ask') {
+      throw new Error(`Expected ask decision, received ${result.behavior}`)
+    }
+    expect(result.message).toContain('require manual approval')
+    expect(result.message).toContain('32,000')
+  })
+
+  test('applies the REPL classifier budget in every mode that can enter classification', () => {
+    expect(replClassifierAppliesForMode('auto', false)).toBe(true)
+    expect(replClassifierAppliesForMode('plan', true)).toBe(true)
+    expect(replClassifierAppliesForMode('plan', false)).toBe(false)
+    expect(replClassifierAppliesForMode('default', true)).toBe(false)
+  })
+
+  test('measures the serialized legacy representation rather than the raw script length', async () => {
+    // Legacy classifier lines are `REPL <code>\n`: a 31,996-char script
+    // serializes to 32,002 chars even though the raw string passes a
+    // raw-length guard at 32,000.
+    const result = await hasPermissionsToUseTool(
+      REPLTool,
+      { code: 'x'.repeat(31_996) },
+      contextFor('auto'),
+      assistantMessage,
+      'repl-tool-use-id',
+    )
+
+    expect(result.behavior).toBe('ask')
+    if (result.behavior !== 'ask') {
+      throw new Error(`Expected ask decision, received ${result.behavior}`)
+    }
+    expect(result.message).toContain('require manual approval')
+  })
+
+  test('measures the JSON-escaped representation when JSONL transcripts are enabled', async () => {
+    const originalUserType = process.env.USER_TYPE
+    const originalJsonl = process.env.CLAUDE_CODE_JSONL_TRANSCRIPT
+    process.env.USER_TYPE = 'ant'
+    process.env.CLAUDE_CODE_JSONL_TRANSCRIPT = '1'
+    try {
+      // 20,000 tabs JSON-escape to 40,000 chars inside the {"REPL":"..."}
+      // line the classifier receives, far beyond the 32,000-char budget the
+      // raw-length guard measures.
+      const result = await hasPermissionsToUseTool(
+        REPLTool,
+        { code: '\t'.repeat(20_000) },
+        contextFor('auto'),
+        assistantMessage,
+        'repl-tool-use-id',
+      )
+
+      expect(result.behavior).toBe('ask')
+      if (result.behavior !== 'ask') {
+        throw new Error(`Expected ask decision, received ${result.behavior}`)
+      }
+      expect(result.message).toContain('require manual approval')
+    } finally {
+      if (originalUserType === undefined) {
+        delete process.env.USER_TYPE
+      } else {
+        process.env.USER_TYPE = originalUserType
+      }
+      if (originalJsonl === undefined) {
+        delete process.env.CLAUDE_CODE_JSONL_TRANSCRIPT
+      } else {
+        process.env.CLAUDE_CODE_JSONL_TRANSCRIPT = originalJsonl
+      }
+    }
+  })
+})
+
 describe('plan mode mechanical read-only policy', () => {
+  test('lets REPL orchestration continue while inner mutations remain guarded', async () => {
+    const result = await hasPermissionsToUseTool(
+      REPLTool,
+      { code: 'return 1' },
+      contextFor('plan'),
+      assistantMessage,
+      'tool-use-id',
+    )
+
+    expect(result.behavior).toBe('allow')
+    expect(result.decisionReason).toBeUndefined()
+  })
+
   test.each([
     [fileEditTool, { file_path: 'src/index.ts', old_string: 'a', new_string: 'b' }],
     [fileWriteTool, { file_path: 'src/new.ts', content: 'new' }],

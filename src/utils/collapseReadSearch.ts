@@ -1,12 +1,11 @@
 import { feature } from 'bun:bundle'
 import type { UUID } from 'crypto'
-import { findToolByName, type Tools } from '../Tool.js'
+import type { Tools } from '../Tool.js'
 import { extractBashCommentLabel } from '../tools/BashTool/commentLabel.js'
 import { BASH_TOOL_NAME } from '../tools/BashTool/toolName.js'
 import { FILE_EDIT_TOOL_NAME } from '../tools/FileEditTool/constants.js'
 import { FILE_WRITE_TOOL_NAME } from '../tools/FileWriteTool/prompt.js'
 import { REPL_TOOL_NAME } from '../tools/REPLTool/constants.js'
-import { getReplPrimitiveTools } from '../tools/REPLTool/primitiveTools.js'
 import {
   type BranchAction,
   type CommitKind,
@@ -23,6 +22,7 @@ import type {
 } from '../types/message.js'
 import { getDisplayPath } from './file.js'
 import { isFullscreenEnvEnabled } from './fullscreen.js'
+import { findToolForDisplay } from './toolDisplay.js'
 import {
   isAutoManagedMemoryFile,
   isAutoManagedMemoryPattern,
@@ -145,19 +145,15 @@ export function getToolSearchOrReadInfo(
   toolInput: unknown,
   tools: Tools,
 ): SearchOrReadResult {
-  // REPL is absorbed silently — its inner tool calls are emitted as virtual
-  // messages (isVirtual: true) via newMessages and flow through this function
-  // as regular Read/Grep/Bash messages. The REPL wrapper itself contributes
-  // no counts and doesn't break the group, so consecutive REPL calls merge.
   if (toolName === REPL_TOOL_NAME) {
     return {
-      isCollapsible: true,
+      isCollapsible: false,
       isSearch: false,
       isRead: false,
       isList: false,
-      isREPL: true,
+      isREPL: false,
       isMemoryWrite: false,
-      isAbsorbedSilently: true,
+      isAbsorbedSilently: false,
     }
   }
 
@@ -192,13 +188,7 @@ export function getToolSearchOrReadInfo(
     }
   }
 
-  // Fallback to REPL primitives: in REPL mode, Bash/Read/Grep/etc. are
-  // stripped from the execution tools list, but REPL emits them as virtual
-  // messages. Without the fallback they'd return isCollapsible: false and
-  // vanish from the summary line.
-  const tool =
-    findToolByName(tools, toolName) ??
-    findToolByName(getReplPrimitiveTools(), toolName)
+  const tool = findToolForDisplay(tools, toolName)
   if (!tool?.isSearchOrReadCommand) {
     return {
       isCollapsible: false,

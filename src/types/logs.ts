@@ -75,6 +75,7 @@ export type LogOption = {
   worktreeSession?: PersistedWorktreeSession | null // Worktree state at session end (null = exited, undefined = never entered)
   contentReplacements?: ContentReplacementRecord[] // Replacement decisions for resume reconstruction
   goal?: GoalState | null // Last session goal state, if any
+  codeMode?: boolean
   sessionBranch?: SessionBranchEntry // Conversation-branch lineage metadata, if this session is a branch
 }
 
@@ -164,6 +165,12 @@ export type ModeEntry = {
   type: 'mode'
   sessionId: UUID
   mode: 'coordinator' | 'normal'
+}
+
+export type CodeModeEntry = {
+  type: 'code-mode'
+  sessionId: UUID
+  codeMode: boolean
 }
 
 /**
@@ -370,6 +377,7 @@ export type Entry =
   | QueueOperationMessage
   | SpeculationAcceptMessage
   | ModeEntry
+  | CodeModeEntry
   | WorktreeStateEntry
   | ContentReplacementEntry
   | GoalStateEntry

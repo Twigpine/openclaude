@@ -7,6 +7,7 @@ import { FileWriteTool } from '../FileWriteTool/FileWriteTool.js'
 import { GlobTool } from '../GlobTool/GlobTool.js'
 import { GrepTool } from '../GrepTool/GrepTool.js'
 import { NotebookEditTool } from '../NotebookEditTool/NotebookEditTool.js'
+import { isPowerShellToolEnabled } from '../../utils/shell/shellToolUtils.js'
 
 let _primitiveTools: readonly Tool[] | undefined
 
@@ -26,7 +27,8 @@ let _primitiveTools: readonly Tool[] | undefined
  * excludes Glob/Grep when hasEmbeddedSearchTools() is true.
  */
 export function getReplPrimitiveTools(): readonly Tool[] {
-  return (_primitiveTools ??= [
+  if (_primitiveTools) return _primitiveTools
+  const tools: Tool[] = [
     FileReadTool,
     FileWriteTool,
     FileEditTool,
@@ -35,5 +37,12 @@ export function getReplPrimitiveTools(): readonly Tool[] {
     BashTool,
     NotebookEditTool,
     AgentTool,
-  ])
+  ]
+  if (isPowerShellToolEnabled()) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { PowerShellTool } = require('../PowerShellTool/PowerShellTool.js') as typeof import('../PowerShellTool/PowerShellTool.js')
+    tools.push(PowerShellTool)
+  }
+  _primitiveTools = tools
+  return _primitiveTools
 }

@@ -587,6 +587,9 @@ export function createSubagentContext(
       depth: (parentContext.queryTracking?.depth ?? -1) + 1,
     },
     fileReadingLimits: parentContext.fileReadingLimits,
+    replInnerExecution: parentContext.replInnerExecution,
+    replPromptWaitTracker: parentContext.replPromptWaitTracker,
+    replAgentConcurrencyBudget: parentContext.replAgentConcurrencyBudget,
     userModified: parentContext.userModified,
     criticalSystemReminder_EXPERIMENTAL:
       overrides?.criticalSystemReminder_EXPERIMENTAL,

@@ -14,7 +14,12 @@ import { TaskStopTool } from './tools/TaskStopTool/TaskStopTool.js'
 import { BriefTool } from './tools/BriefTool/BriefTool.js'
 // Dead code elimination: conditional import for internal-only tools
 /* eslint-disable @typescript-eslint/no-require-imports */
-const REPLTool = null
+const getREPLTool = () => {
+  if (!isReplModeEnabled()) return null
+  return (
+    require('./tools/REPLTool/REPLTool.js') as typeof import('./tools/REPLTool/REPLTool.js')
+  ).REPLTool
+}
 const SuggestBackgroundPRTool = null
 const SleepTool =
   feature('PROACTIVE') || feature('KAIROS')
@@ -124,7 +129,7 @@ const WorkflowTool = feature('WORKFLOW_SCRIPTS')
   : null
 /* eslint-enable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
 import type { ToolPermissionContext } from './Tool.js'
-import { getDenyRuleForTool } from './utils/permissions/permissions.js'
+import { getAskRuleForTool, getDenyRuleForTool, toolAlwaysAllowedRule } from './utils/permissions/permissions.js'
 import { hasEmbeddedSearchTools } from './utils/embeddedTools.js'
 import { isEnvTruthy } from './utils/envUtils.js'
 import { isPowerShellToolEnabled } from './utils/shell/shellToolUtils.js'
@@ -231,6 +236,7 @@ export function getAllBaseTools(): Tools {
     ...(() => { const pst = getPowerShellTool(); return pst ? [pst] : [] })(),
     ...(SnipTool ? [SnipTool] : []),
     ...(process.env.NODE_ENV === 'test' ? [TestingPermissionTool] : []),
+    ...(() => { const repl = getREPLTool(); return repl ? [repl] : [] })(),
     ListMcpResourcesTool,
     ReadMcpResourceTool,
     // Include ToolSearchTool when tool search might be enabled (optimistic check)
@@ -258,14 +264,54 @@ export function filterToolsByDenyRules<
   return tools.filter(tool => !getDenyRuleForTool(permissionContext, tool))
 }
 
-export const getTools = (permissionContext: ToolPermissionContext): Tools => {
+type GetToolsOptions = {
+  forceDirectToolInventory?: boolean
+}
+
+function isReplUsableInPermissionContext(
+  permissionContext: ToolPermissionContext,
+): boolean {
+  if (permissionContext.mode !== 'dontAsk') {
+    return true
+  }
+  // dontAsk converts the wrapper's mandatory script approval into a denial,
+  // so an allow rule is the only thing keeping REPL usable. The allow rule is
+  // effective only when no ask rule matches the tool: the runtime permission
+  // pipeline evaluates blanket ask rules (step 1b) before blanket allow rules
+  // (step 2b), and the resulting ask is converted into a denial in dontAsk
+  // mode. When the ask rule wins, direct primitives must remain available.
+  const replToolRef = { name: REPL_TOOL_NAME }
+  return (
+    toolAlwaysAllowedRule(permissionContext, replToolRef) !== null &&
+    getAskRuleForTool(permissionContext, replToolRef) === null
+  )
+}
+
+export const getTools = (
+  permissionContext: ToolPermissionContext,
+  options: GetToolsOptions = {},
+): Tools => {
+  const replModeActive = isReplModeEnabled() && !options.forceDirectToolInventory
+
   // Simple mode: only Bash, Read, and Edit tools
   if (isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)) {
     // --bare + REPL mode: REPL wraps Bash/Read/Edit/etc inside the VM, so
     // return REPL instead of the raw primitives. Matches the non-bare path
     // below which also hides REPL_ONLY_TOOLS when REPL is enabled.
-    if (isReplModeEnabled() && REPLTool) {
-      const replSimple: Tool[] = [REPLTool]
+    const activeREPLTool = getREPLTool()
+    // Check the deny rule before selecting the wrapper branch: the deny filter
+    // below would strip REPL from the wrapper-only inventory and leave no
+    // primitives at all, so a denied REPL must fall through to direct tools.
+    const replDenied =
+      activeREPLTool != null &&
+      getDenyRuleForTool(permissionContext, activeREPLTool) !== null
+    if (
+      replModeActive &&
+      activeREPLTool &&
+      !replDenied &&
+      isReplUsableInPermissionContext(permissionContext)
+    ) {
+      const replSimple: Tool[] = [activeREPLTool]
       if (
         feature('COORDINATOR_MODE') &&
         coordinatorModeModule?.isCoordinatorMode()
@@ -303,16 +349,28 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
   let allowedTools = filterToolsByDenyRules(tools, permissionContext)
 
   // When REPL mode is enabled, hide primitive tools from direct use.
-  // They're still accessible inside REPL via the VM context.
-  if (isReplModeEnabled()) {
+  if (replModeActive) {
     const replEnabled = allowedTools.some(tool =>
       toolMatchesName(tool, REPL_TOOL_NAME),
     )
-    if (replEnabled) {
+    const replUsable = isReplUsableInPermissionContext(permissionContext)
+    // dontAsk converts the REPL wrapper's mandatory script approval into a
+    // denial. Unless the user explicitly pre-approved REPL, keep the direct
+    // primitive surface so pre-approved automation and read-only inspection
+    // remain usable under their normal input-specific permission checks.
+    if (replEnabled && !replUsable) {
+      allowedTools = allowedTools.filter(
+        tool => !toolMatchesName(tool, REPL_TOOL_NAME),
+      )
+    } else if (replEnabled) {
       allowedTools = allowedTools.filter(
         tool => !REPL_ONLY_TOOLS.has(tool.name),
       )
     }
+  } else if (isReplModeEnabled()) {
+    allowedTools = allowedTools.filter(
+      tool => !toolMatchesName(tool, REPL_TOOL_NAME),
+    )
   }
 
   // Filter out any null/undefined tools that might have slipped through
@@ -342,8 +400,9 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
 export function assembleToolPool(
   permissionContext: ToolPermissionContext,
   mcpTools: Tools,
+  options: GetToolsOptions = {},
 ): Tools {
-  const builtInTools = getTools(permissionContext)
+  const builtInTools = getTools(permissionContext, options)
 
   // Filter out MCP tools that are in the deny list, and filter out any null/undefined
   // tools that might have been added by MCP client initialization

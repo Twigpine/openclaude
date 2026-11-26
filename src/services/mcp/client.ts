@@ -3281,9 +3281,12 @@ export const fetchToolsForClient = memoizeWithLRU(
                         }
                         : undefined,
                     handleElicitation: context.handleElicitation,
-                    onServerTaskStarted: () => {
-                      taskified = true
-                    },
+                    allowServerTasks: context.replInnerExecution !== true,
+                    onServerTaskStarted: context.replInnerExecution
+                      ? undefined
+                      : () => {
+                        taskified = true
+                      },
                   })
 
                   stopActivityHeartbeat()
@@ -4407,6 +4410,7 @@ export async function callMCPToolWithUrlElicitationRetry({
   callToolFn = callMCPTool,
   handleElicitation,
   onUrlElicitationRequired,
+  allowServerTasks = true,
   onServerTaskStarted,
 }: {
   client: ConnectedMCPServer
@@ -4441,6 +4445,8 @@ export async function callMCPToolWithUrlElicitationRetry({
   ) => Promise<ElicitResult>
   /** Called after validating a URL-elicitation error, before awaiting handling. */
   onUrlElicitationRequired?: () => void
+  /** False for executions whose foreground contract cannot own detached server work. */
+  allowServerTasks?: boolean
   /** Called when the server accepted taskification and the call returned a background handle. */
   onServerTaskStarted?: () => void
 }): Promise<MCPToolCallResult> {
@@ -4459,7 +4465,7 @@ export async function callMCPToolWithUrlElicitationRetry({
         meta,
         signal,
         onProgress,
-        onServerTaskCreated: mcpTask => {
+        onServerTaskCreated: allowServerTasks ? mcpTask => {
           onServerTaskStarted?.()
           const description = `${connectedClient.name}: ${tool}`
           const taskId = trackMcpServerTask({
@@ -4474,7 +4480,7 @@ export async function callMCPToolWithUrlElicitationRetry({
           return {
             content: `MCP server "${connectedClient.name}" started "${tool}" as background task ${taskId}. The task runs on the server; you will be notified when it completes. Do not retry or poll for the result.`,
           }
-        },
+        } : undefined,
       })
     } catch (error) {
       // The MCP SDK's Protocol creates plain McpError (not UrlElicitationRequiredError)

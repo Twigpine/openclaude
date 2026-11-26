@@ -173,6 +173,20 @@ export type CompactProgressEvent =
   | { type: 'compact_end' }
   | { type: 'compact_progress'; ratio: number }
 
+/**
+ * Fail-fast concurrency budget shared by foreground agents inside a single
+ * foreground REPL script invocation. Acquisition never queues: workers hold
+ * their slot while their own nested spawns run, so a blocking acquire could
+ * deadlock. Exactly one release per successful acquire.
+ */
+export type ReplAgentConcurrencyBudget = {
+  readonly cap: number
+  /** Throws when the cap is already saturated; never blocks. */
+  tryAcquire(): void
+  /** Exact release of a previously acquired slot. */
+  release(): void
+}
+
 export type ToolUseContext = {
   options: {
     commands: Command[]
@@ -200,6 +214,8 @@ export type ToolUseContext = {
     refreshTools?: () => Tools
     /** Per-agent provider override from agentRouting config */
     providerOverride?: { model: string; baseURL: string; apiKey: string }
+    /** Primitive tool names the current session contract permits inside Code Mode. */
+    replPrimitiveToolNames?: readonly string[]
   }
   /** Shared by copies with the same options; internal options clones retain separate snapshots. */
   queryModelSelection?: {
@@ -223,6 +239,12 @@ export type ToolUseContext = {
   abortController: AbortController
   /** Cancels work attached to discarded tool results, independently of sibling failures. */
   toolResultAbortSignal?: AbortSignal
+  /** True for canonical tool calls scoped inside a foreground REPL script. */
+  replInnerExecution?: boolean
+  /** Human prompt clock for the foreground REPL script that owns this call. */
+  replPromptWaitTracker?: { begin(): void; end(): void }
+  /** Shared foreground-agent concurrency budget for the owning REPL script. */
+  replAgentConcurrencyBudget?: ReplAgentConcurrencyBudget
   readFileState: FileStateCache
   getAppState(): AppState
   /** Returns untransformed root state when this context belongs to an agent. */

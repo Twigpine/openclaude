@@ -326,7 +326,10 @@ import {
   getTotalInputTokens,
   getTotalOutputTokens,
 } from '../../bootstrap/state.js'
-import { getFeatureValue_CACHED_WITH_REFRESH } from '../../services/analytics/growthbook.js'
+import {
+  getFeatureValue_CACHED_MAY_BE_STALE,
+  getFeatureValue_CACHED_WITH_REFRESH,
+} from '../../services/analytics/growthbook.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -336,7 +339,11 @@ import {
   clearClassifierChecking,
   setClassifierChecking,
 } from '../classifierApprovals.js'
-import { isInProtectedNamespace } from '../envUtils.js'
+import {
+  isEnvDefinedFalsy,
+  isEnvTruthy,
+  isInProtectedNamespace,
+} from '../envUtils.js'
 import { executePermissionRequestHooks } from '../hooks.js'
 import { getInitialSettings } from '../settings/settings.js'
 import {
@@ -359,6 +366,7 @@ import {
 import {
   classifyYoloAction,
   formatActionForClassifier,
+  MAX_CLASSIFIER_BLOCK_VALUE_CHARS,
 } from './yoloClassifier.js'
 
 const PERMISSION_RULE_SOURCES = [
@@ -821,6 +829,44 @@ async function resolvePermissionRequestHooksForHeadlessAgent(
   return null
 }
 
+// Mirror of isJsonlTranscriptEnabled in yoloClassifier.ts. The oversized
+// script guard must measure the exact representation the classifier will
+// receive, so the mode check is duplicated here; keep the two in sync.
+function isClassifierJsonlTranscriptEnabled(): boolean {
+  if (process.env.USER_TYPE === 'ant') {
+    const env = process.env.CLAUDE_CODE_JSONL_TRANSCRIPT
+    if (isEnvTruthy(env)) return true
+    if (isEnvDefinedFalsy(env)) return false
+  }
+  const config = getFeatureValue_CACHED_MAY_BE_STALE(
+    'tengu_auto_mode_config',
+    {} as { jsonlTranscript?: boolean },
+  )
+  return config?.jsonlTranscript === true
+}
+
+// The classifier never receives input.code raw: toCompactBlock in
+// yoloClassifier.ts serializes the tool_use block first. JSONL mode
+// JSON-escapes the script inside a {"REPL":"..."} line, so escape-heavy
+// content inflates well beyond the raw length; legacy mode adds the
+// `REPL ` prefix and trailing newline. Measure the serialized form so the
+// guard trips exactly when the classifier input budget is exceeded. Because
+// escaping only inflates, any script passing this guard is also short enough
+// that truncateClassifierValue never truncates it before classification.
+export function replClassifierAppliesForMode(
+  mode: PermissionMode,
+  autoModeActive: boolean,
+): boolean {
+  return mode === 'auto' || (mode === 'plan' && autoModeActive)
+}
+
+function measureReplClassifierRepresentation(code: string): number {
+  if (isClassifierJsonlTranscriptEnabled()) {
+    return jsonStringify({ [REPL_TOOL_NAME]: code }).length + 1
+  }
+  return `${REPL_TOOL_NAME} ${code}\n`.length
+}
+
 async function hasPermissionsToUseToolWithModeHandling(
   tool: Tool,
   input: Record<string, unknown>,
@@ -865,13 +911,30 @@ async function hasPermissionsToUseToolWithModeHandling(
         message: DONT_ASK_REJECT_MESSAGE(tool.name),
       }
     }
+    const replClassifierApplies = replClassifierAppliesForMode(
+      appState.toolPermissionContext.mode,
+      autoModeStateModule?.isAutoModeActive() ?? false,
+    )
+    if (
+      replClassifierApplies &&
+      tool.name === REPL_TOOL_NAME &&
+      typeof input.code === 'string' &&
+      measureReplClassifierRepresentation(input.code) > MAX_CLASSIFIER_BLOCK_VALUE_CHARS
+    ) {
+      logForDebugging(
+        `Skipping auto mode classifier for ${tool.name}: REPL script exceeds the classifier input budget`,
+      )
+      return suppressPromptIfConfigured(tool, {
+        ...result,
+        message: `REPL scripts whose serialized classifier form exceeds ${MAX_CLASSIFIER_BLOCK_VALUE_CHARS.toLocaleString('en-US')} characters require manual approval because auto mode cannot classify the complete script.`,
+      })
+    }
+
     // Apply auto mode: use AI classifier instead of prompting user
     // Check this BEFORE shouldAvoidPermissionPrompts so classifiers work in headless mode
     if (
       feature('TRANSCRIPT_CLASSIFIER') &&
-      (appState.toolPermissionContext.mode === 'auto' ||
-        (appState.toolPermissionContext.mode === 'plan' &&
-          (autoModeStateModule?.isAutoModeActive() ?? false)))
+      replClassifierApplies
     ) {
       // Non-classifier-approvable safetyCheck decisions stay immune to ALL
       // auto-approve paths: the acceptEdits fast-path, the safe-tool allowlist,
@@ -1798,6 +1861,15 @@ export async function checkPlanModePermissions(
       context.agentId,
     )
   ) {
+    return null
+  }
+
+  // REPL is a transparent orchestration wrapper with no direct filesystem,
+  // process, or network capability. Every inner effect passes back through
+  // this same plan-mode guard under the inner tool identity, so the wrapper
+  // itself is safe to use for read-only planning even though a particular
+  // script may contain mutations that will be denied when reached.
+  if (tool.name === REPL_TOOL_NAME) {
     return null
   }
 

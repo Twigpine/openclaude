@@ -16,6 +16,7 @@ import { GlobTool } from '../../tools/GlobTool/GlobTool.js';
 import { GrepTool } from '../../tools/GrepTool/GrepTool.js';
 import { NotebookEditTool } from '../../tools/NotebookEditTool/NotebookEditTool.js';
 import { PowerShellTool } from '../../tools/PowerShellTool/PowerShellTool.js';
+import { REPLTool } from '../../tools/REPLTool/REPLTool.js';
 import { SkillTool } from '../../tools/SkillTool/SkillTool.js';
 import { WebFetchTool } from '../../tools/WebFetchTool/WebFetchTool.js';
 import type { AssistantMessage } from '../../types/message.js';
@@ -31,6 +32,7 @@ import { FilesystemPermissionRequest } from './FilesystemPermissionRequest/Files
 import { FileWritePermissionRequest } from './FileWritePermissionRequest/FileWritePermissionRequest.js';
 import { NotebookEditPermissionRequest } from './NotebookEditPermissionRequest/NotebookEditPermissionRequest.js';
 import { PowerShellPermissionRequest } from './PowerShellPermissionRequest/PowerShellPermissionRequest.js';
+import { REPLPermissionRequest } from './REPLPermissionRequest.js';
 import { SkillPermissionRequest } from './SkillPermissionRequest/SkillPermissionRequest.js';
 import { WebFetchPermissionRequest } from './WebFetchPermissionRequest/WebFetchPermissionRequest.js';
 
@@ -56,6 +58,8 @@ function permissionComponentForTool(tool: Tool): React.ComponentType<PermissionR
       return BashPermissionRequest;
     case PowerShellTool:
       return PowerShellPermissionRequest;
+    case REPLTool:
+      return REPLPermissionRequest;
     case ReviewArtifactTool:
       return ReviewArtifactPermissionRequest ?? FallbackPermissionRequest;
     case WebFetchTool:

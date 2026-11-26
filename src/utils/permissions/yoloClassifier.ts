@@ -69,7 +69,7 @@ const ANTHROPIC_PERMISSIONS_TEMPLATE: string =
 /* eslint-enable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
 
 const MAX_CLASSIFIER_TRANSCRIPT_CHARS = 200_000
-const MAX_CLASSIFIER_BLOCK_VALUE_CHARS = 32_000
+export const MAX_CLASSIFIER_BLOCK_VALUE_CHARS = 32_000
 
 function isUsingExternalPermissions(): boolean {
   if (process.env.USER_TYPE !== 'ant') return true

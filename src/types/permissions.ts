@@ -224,6 +224,8 @@ export type PermissionAskDecision<
    * message in the tool result. Used when users paste images as feedback.
    */
   contentBlocks?: ContentBlockParam[]
+  /** Typed user feedback supplied with an interactive rejection. */
+  rejectFeedback?: string
 }
 
 /**

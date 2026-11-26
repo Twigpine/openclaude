@@ -18,6 +18,7 @@ import type { Screen } from '../screens/REPL.js';
 import type { Tools } from '../Tool.js';
 import { findToolByName } from '../Tool.js';
 import type { AgentDefinitionsResult } from '../tools/AgentTool/loadAgentsDir.js';
+import { REPL_TOOL_NAME } from '../tools/REPLTool/constants.js';
 import type { Message as MessageType, NormalizedMessage, ProgressMessage as ProgressMessageType, RenderableMessage } from '../types/message.js';
 import { type AdvisorBlock, isAdvisorBlock } from '../utils/advisor.js';
 import { collapseBackgroundBashNotifications } from '../utils/collapseBackgroundBashNotifications.js';
@@ -36,7 +37,7 @@ import { Divider } from './design-system/Divider.js';
 import type { UnseenDivider } from './FullscreenLayout.js';
 import { StreamingMarkdown } from './Markdown.js';
 import { hasContentAfterIndex, MessageRow } from './MessageRow.js';
-import { InVirtualListContext, type MessageActionsNav, MessageActionsSelectedContext, type MessageActionsState } from './messageActions.js';
+import { InVirtualListContext, type MessageActionsNav, MessageActionsSelectedContext, type MessageActionsState, messageExpandKey } from './messageActions.js';
 import { AssistantThinkingMessage } from './messages/AssistantThinkingMessage.js';
 import { isNullRenderingAttachment } from './messages/nullRenderingAttachments.js';
 import { OffscreenFreeze } from './OffscreenFreeze.js';
@@ -596,7 +597,9 @@ const MessagesImpl = ({
   const isItemClickable = useCallback((msg_6: RenderableMessage): boolean => {
     if (msg_6.type === 'collapsed_read_search') return true;
     if (msg_6.type === 'assistant') {
-      const b = msg_6.message.content[0] as unknown as AdvisorBlock | undefined;
+      const block = msg_6.message.content[0];
+      if (block?.type === 'tool_use' && block.name === REPL_TOOL_NAME) return true;
+      const b = block as unknown as AdvisorBlock | undefined;
       return b != null && isAdvisorBlock(b) && b.type === 'advisor_tool_result' && b.content.type === 'advisor_result';
     }
     if (msg_6.type !== 'user') return false;
@@ -635,7 +638,7 @@ const MessagesImpl = ({
     // streaming instead of waiting for the block to finalize.
     const hasContentAfter = msg_8.type === 'collapsed_read_search' && (!!streamingText || hasContentAfterIndex(renderableMessages, index, tools, streamingToolUseIDs));
     const k_0 = messageKey(msg_8);
-    const row = <MessageRow key={k_0} message={msg_8} isUserContinuation={isUserContinuation} hasContentAfter={hasContentAfter} tools={tools} commands={commands} verbose={verbose || isItemExpanded(msg_8) || cursor?.expanded === true && index === selectedIdx} inProgressToolUseIDs={inProgressToolUseIDs} streamingToolUseIDs={streamingToolUseIDs} screen={screen} canAnimate={canAnimate} onOpenRateLimitOptions={onOpenRateLimitOptions} lastThinkingBlockId={lastThinkingBlockId} latestBashOutputUUID={latestBashOutputUUID} columns={columns} isLoading={isLoading} lookups={lookups_0} />;
+    const row = <MessageRow key={k_0} message={msg_8} isUserContinuation={isUserContinuation} hasContentAfter={hasContentAfter} tools={tools} commands={commands} verbose={verbose || isItemExpanded(msg_8) || cursor?.expanded === true && cursor.expandKey === expandKey(msg_8)} inProgressToolUseIDs={inProgressToolUseIDs} streamingToolUseIDs={streamingToolUseIDs} screen={screen} canAnimate={canAnimate} onOpenRateLimitOptions={onOpenRateLimitOptions} lastThinkingBlockId={lastThinkingBlockId} latestBashOutputUUID={latestBashOutputUUID} columns={columns} isLoading={isLoading} lookups={lookups_0} />;
 
     // Per-row Provider — only 2 rows re-render on selection change.
     // Wrapped BEFORE divider branch so both return paths get it.
@@ -737,7 +740,7 @@ const MessagesImpl = ({
 /** Key for click-to-expand: tool_use_id where available (so tool_use + its
  *  tool_result expand together), else uuid for groups/thinking. */
 function expandKey(msg: RenderableMessage): string {
-  return (msg.type === 'assistant' || msg.type === 'user' ? getToolUseID(msg) : null) ?? msg.uuid;
+  return messageExpandKey(msg);
 }
 
 // Custom comparator to prevent unnecessary re-renders during streaming.

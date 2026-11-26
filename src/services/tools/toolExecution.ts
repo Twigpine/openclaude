@@ -39,6 +39,9 @@ import { FILE_READ_TOOL_NAME } from '../../tools/FileReadTool/prompt.js'
 import { FILE_WRITE_TOOL_NAME } from '../../tools/FileWriteTool/prompt.js'
 import { NOTEBOOK_EDIT_TOOL_NAME } from '../../tools/NotebookEditTool/constants.js'
 import { POWERSHELL_TOOL_NAME } from '../../tools/PowerShellTool/toolName.js'
+import { REPL_TOOL_NAME } from '../../tools/REPLTool/constants.js'
+import { validateReplForegroundOnlyInput } from '../../tools/REPLTool/foregroundValidation.js'
+import { boundReplToolUseResultForPersistence } from '../../tools/REPLTool/outputPersistence.js'
 import { SKILL_TOOL_NAME } from '../../tools/SkillTool/constants.js'
 import { parseGitCommitId } from '../../tools/shared/gitOperationTracking.js'
 import {
@@ -327,6 +330,110 @@ function getMcpServerBaseUrlFromToolName(
     return undefined
   }
   return getLoggingSafeMcpBaseUrl(serverConnection.config)
+}
+
+
+const REPL_HOOK_REDACTED_TEXT = '[inner tool output redacted by REPL PostToolUse hook]'
+
+const ATTACHMENT_PROVENANCE_METADATA_KEYS = new Set([
+  'type',
+  'hookName',
+  'hookEvent',
+  'toolUseID',
+  'decision',
+  'exitCode',
+  'durationMs',
+  'processId',
+])
+
+const SYSTEM_PROVENANCE_METADATA_KEYS = new Set([
+  'type',
+  'subtype',
+  'uuid',
+  'timestamp',
+  'level',
+  'isMeta',
+  'isVirtual',
+  'toolUseID',
+  'preventContinuation',
+])
+
+function redactPayloadValue(value: unknown, depth = 0): unknown {
+  if (value === null) return value
+  if (typeof value !== 'object') return REPL_HOOK_REDACTED_TEXT
+  if (depth >= 5) return REPL_HOOK_REDACTED_TEXT
+  if (Array.isArray(value)) {
+    const items = value.slice(0, 10).map(item => redactPayloadValue(item, depth + 1))
+    if (value.length > 10) items.push(`[${value.length - 10} redacted items omitted]`)
+    return items
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .slice(0, 50)
+      .map(([key, entryValue]) => [key, redactPayloadValue(entryValue, depth + 1)]),
+  )
+}
+
+function redactAttachmentProvenance(attachment: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(attachment).map(([key, value]) => [
+      key,
+      ATTACHMENT_PROVENANCE_METADATA_KEYS.has(key) ? value : redactPayloadValue(value),
+    ]),
+  )
+}
+
+function redactSystemProvenance(message: Message): Message {
+  return Object.fromEntries(
+    Object.entries(message).map(([key, value]) => [
+      key,
+      SYSTEM_PROVENANCE_METADATA_KEYS.has(key) ? value : redactPayloadValue(value),
+    ]),
+  ) as Message
+}
+
+function redactUserContentBlock(block: unknown): unknown {
+  if (typeof block !== 'object' || block === null) return REPL_HOOK_REDACTED_TEXT
+  return Object.fromEntries(
+    Object.entries(block as Record<string, unknown>).map(([key, value]) => {
+      if (key === 'type' || key === 'tool_use_id' || key === 'is_error') return [key, value]
+      return [key, redactPayloadValue(value)]
+    }),
+  )
+}
+
+function redactReplInnerProvenance(messages: Message[] | undefined): void {
+  if (!messages) return
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
+    if (message.isVirtual !== true) continue
+    if (message.type === 'attachment') {
+      messages[index] = {
+        ...message,
+        attachment: redactAttachmentProvenance(message.attachment as Record<string, unknown>),
+      } as Message
+      continue
+    }
+    if (message.type === 'system') {
+      messages[index] = redactSystemProvenance(message)
+      continue
+    }
+    if (message.type !== 'user') continue
+    const content = message.message.content
+    const redactedContent = Array.isArray(content)
+      ? content.map(redactUserContentBlock) as ContentBlockParam[]
+      : REPL_HOOK_REDACTED_TEXT
+    messages[index] = {
+      ...message,
+      message: {
+        ...message.message,
+        content: redactedContent,
+      },
+      ...(message.toolUseResult !== undefined
+        ? { toolUseResult: redactPayloadValue(message.toolUseResult) }
+        : {}),
+    }
+  }
 }
 
 export async function* runToolUse(
@@ -1381,7 +1488,6 @@ export async function checkPermissionsAndCallTool(
 
   const startTime = Date.now()
 
-  startSessionActivity('tool_exec')
   // If processedInput still points at the backfill clone, no hook/permission
   // replaced it — pass the pre-backfill callInput so call() sees the model's
   // original field values. Otherwise converge on the hook-supplied input.
@@ -1391,6 +1497,13 @@ export async function checkPermissionsAndCallTool(
   // result string embeds the path the model emitted — keeps transcript/VCR
   // hashes stable. Other hook modifications flow through unchanged.
   callInput = normalizeReplayToolInput(processedInput, callInput, backfilledClone)
+  if (toolUseContext.replInnerExecution === true) {
+    validateReplForegroundOnlyInput(tool.name, callInput)
+  }
+
+  // Activity tracking starts only after validation passes: a foreground
+  // rejection throws here and must not leave the refcount unbalanced.
+  startSessionActivity('tool_exec')
 
   let queryActivityLease: { release(): void } | undefined
 
@@ -1439,9 +1552,6 @@ export async function checkPermissionsAndCallTool(
     )
     const durationMs = Date.now() - startTime
     addToToolDuration(durationMs)
-    const replayResultPreview =
-      typeof result.data === 'string' ? result.data.slice(0, 200) : undefined
-
     // Capture structured output from tool result if present
     if (typeof result === 'object' && 'structured_output' in result) {
       // Store the structured output in an attachment message
@@ -1560,10 +1670,10 @@ export async function checkPermissionsAndCallTool(
     const toolContextModifier = result.contextModifier
     const mcpMeta = result.mcpMeta
 
-    async function addToolResult(
+    async function createToolResultUpdate(
       toolUseResult: unknown,
       preMappedBlock?: ToolResultBlockParam,
-    ) {
+    ): Promise<MessageUpdateLazy> {
       // Use the pre-mapped block when available (non-MCP tools where hooks
       // don't modify the output), otherwise map from scratch.
       const toolResultBlock = preMappedBlock
@@ -1613,7 +1723,7 @@ export async function checkPermissionsAndCallTool(
         }
       }
 
-      resultingMessages.push({
+      return {
         message: createUserMessage({
           content: contentBlocks,
           imagePasteIds: allowImageIds,
@@ -1631,13 +1741,25 @@ export async function checkPermissionsAndCallTool(
               modifyContext: toolContextModifier,
             }
           : undefined,
-      })
+      }
+    }
+
+    async function addToolResult(
+      toolUseResult: unknown,
+      preMappedBlock?: ToolResultBlockParam,
+    ): Promise<number> {
+      resultingMessages.push(
+        await createToolResultUpdate(toolUseResult, preMappedBlock),
+      )
+      return resultingMessages.length - 1
     }
 
     // TODO(hackyon): refactor so we don't have different experiences for MCP tools
-    if (!isMcpTool(tool)) {
-      await addToolResult(toolOutput, mappedToolResultBlock)
-    }
+    // PostToolUse hooks may replace the tool output, so the tool result is
+    // committed only after hooks finish: persisting large output now would
+    // write the pre-hook payload to the artifact store. Remember where the
+    // committed result belongs so hook messages still order after it.
+    const toolResultInsertionIndex = resultingMessages.length
 
     const postToolHookInfos: StopHookInfo[] = []
     const postToolHookStart = Date.now()
@@ -1652,9 +1774,10 @@ export async function checkPermissionsAndCallTool(
       mcpServerType,
       mcpServerBaseUrl,
     )) {
-      if ('updatedMCPToolOutput' in hookResult) {
-        if (isMcpTool(tool)) {
-          toolOutput = hookResult.updatedMCPToolOutput
+      if ('updatedToolOutput' in hookResult) {
+        toolOutput = hookResult.updatedToolOutput
+        if (tool.name === REPL_TOOL_NAME) {
+          redactReplInnerProvenance(result.newMessages)
         }
       } else if (isMcpTool(tool)) {
         hookResults.push(hookResult)
@@ -1698,8 +1821,45 @@ export async function checkPermissionsAndCallTool(
       )
     }
 
+    // Commit the tool result only after hooks finish. Large results spill to
+    // the artifact store here, exactly once, so a hook replacement never
+    // leaves the original pre-hook payload on disk.
+    let committedToolResultIndex: number | undefined
     if (isMcpTool(tool)) {
       await addToolResult(toolOutput)
+    } else {
+      resultingMessages.splice(
+        toolResultInsertionIndex,
+        0,
+        await createToolResultUpdate(
+          toolOutput,
+          toolOutput === result.data ? mappedToolResultBlock : undefined,
+        ),
+      )
+      committedToolResultIndex = toolResultInsertionIndex
+    }
+
+    // The REPL tool result is committed after hooks above. Spill only the
+    // final post-hook output, never the original pre-hook payload, then
+    // replace the committed message in place.
+    if (tool.name === REPL_TOOL_NAME && committedToolResultIndex !== undefined) {
+      const committedUpdate = resultingMessages[committedToolResultIndex]
+      if (committedUpdate?.message.type === 'user') {
+        const preserveToolUseResult = !toolUseContext.agentId || toolUseContext.preserveToolUseResults === true
+        const boundedToolUseResult = preserveToolUseResult
+          ? await boundReplToolUseResultForPersistence(
+              toolOutput,
+              toolUseID,
+            )
+          : undefined
+        resultingMessages[committedToolResultIndex] = {
+          ...committedUpdate,
+          message: {
+            ...committedUpdate.message,
+            toolUseResult: boundedToolUseResult,
+          },
+        }
+      }
     }
 
     // Show PostToolUse hook timing inline below tool result when > 500ms.
@@ -1725,9 +1885,12 @@ export async function checkPermissionsAndCallTool(
 
     // If the tool provided new messages, add them to the list to return.
     if (result.newMessages && result.newMessages.length > 0) {
-      for (const message of result.newMessages) {
-        resultingMessages.push({ message })
-      }
+      const updates = result.newMessages.map(message => ({ message }))
+      const insertionIndex =
+        tool.name === REPL_TOOL_NAME && committedToolResultIndex !== undefined
+          ? committedToolResultIndex
+          : resultingMessages.length
+      resultingMessages.splice(insertionIndex, 0, ...updates)
     }
     // If hook indicated to prevent continuation after successful execution, yield a stop reason message
     if (shouldPreventContinuation) {
@@ -1753,7 +1916,7 @@ export async function checkPermissionsAndCallTool(
           toolUseID,
           tool.name,
           'success',
-          replayResultPreview,
+          typeof toolOutput === 'string' ? toolOutput.slice(0, 200) : undefined,
           getReplayModifiedFiles(tool.name, callInput),
         )
       } catch {

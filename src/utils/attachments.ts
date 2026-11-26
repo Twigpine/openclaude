@@ -130,6 +130,7 @@ import {
   formatAgentLine,
   shouldInjectAgentListInMessages,
 } from '../tools/AgentTool/prompt.js'
+import { REPL_TOOL_NAME } from '../tools/REPLTool/constants.js'
 import { filterDeniedAgents } from './permissions/permissions.js'
 import { getSubscriptionType } from './auth.js'
 import { mcpInfoFromString } from '../services/mcp/mcpStringUtils.js'
@@ -1616,8 +1617,14 @@ export function getAgentListingDeltaAttachment(
   messages: Message[] | undefined,
 ): Attachment[] {
   if (!shouldInjectAgentListInMessages()) return []
+  // In Code Mode the REPL tool description owns the agent catalog.
+  // Suppress this attachment whenever REPL is present so the model receives
+  // one catalog rather than duplicate or conflicting listings.
+  if (toolUseContext.options.tools.some(t => toolMatchesName(t, REPL_TOOL_NAME))) {
+    return []
+  }
 
-  // Skip if AgentTool isn't in the pool — the listing would be unactionable.
+  // Skip if AgentTool is not in the pool because the listing would be unactionable.
   if (
     !toolUseContext.options.tools.some(t => toolMatchesName(t, AGENT_TOOL_NAME))
   ) {

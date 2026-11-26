@@ -5,8 +5,9 @@ import React, { useCallback, useMemo, useRef } from 'react';
 import { Box, Text } from '../ink.js';
 import { useKeybindings } from '../keybindings/useKeybinding.js';
 import { logEvent } from '../services/analytics/index.js';
+import { REPL_TOOL_NAME } from '../tools/REPLTool/constants.js';
 import type { NormalizedUserMessage, RenderableMessage } from '../types/message.js';
-import { isEmptyMessageText, SYNTHETIC_MESSAGES } from '../utils/messages.js';
+import { getToolUseID, isEmptyMessageText, SYNTHETIC_MESSAGES } from '../utils/messages.js';
 const NAVIGABLE_TYPES = ['user', 'assistant', 'grouped_tool_use', 'collapsed_read_search', 'system', 'attachment'] as const;
 export type NavigableType = (typeof NAVIGABLE_TYPES)[number];
 export type NavigableOf<T extends NavigableType> = Extract<RenderableMessage, {
@@ -90,6 +91,10 @@ const PRIMARY_INPUT: Record<string, PrimaryInput> = {
     label: 'command',
     extract: str('command')
   },
+  [REPL_TOOL_NAME]: {
+    label: 'code',
+    extract: str('code')
+  },
   Grep: {
     label: 'pattern',
     extract: str('pattern')
@@ -141,6 +146,16 @@ export function toolCallOf(msg: NavigableMessage): {
   }
   return undefined;
 }
+export function primaryInputOf(msg: NavigableMessage): string | undefined {
+  const tc = toolCallOf(msg);
+  return tc ? PRIMARY_INPUT[tc.name]?.extract(tc.input) : undefined;
+}
+
+/** Key shared by a tool_use and its tool_result so expansion toggles both. */
+export function messageExpandKey(msg: NavigableMessage): string {
+  return (msg.type === 'assistant' || msg.type === 'user' ? getToolUseID(msg) : null) ?? msg.uuid;
+}
+
 export type MessageActionCaps = {
   copy: (text: string) => void;
   edit: (msg: NormalizedUserMessage) => Promise<void>;
@@ -159,8 +174,15 @@ function action<const T extends NavigableType, const K extends string>(a: {
 }
 export const MESSAGE_ACTIONS = [action({
   key: 'enter',
-  label: s => s.expanded ? 'collapse' : 'expand',
-  types: ['grouped_tool_use', 'collapsed_read_search', 'attachment', 'system'],
+  label: s => {
+    if (s.expanded) return 'to collapse';
+    if (s.toolName === REPL_TOOL_NAME && s.primaryInputLineCount !== undefined) {
+      return `to show ${s.primaryInputLineCount} ${s.primaryInputLineCount === 1 ? 'line' : 'lines'}`;
+    }
+    return 'expand';
+  },
+  types: ['assistant', 'grouped_tool_use', 'collapsed_read_search', 'attachment', 'system'],
+  applies: s => s.msgType !== 'assistant' || s.toolName === REPL_TOOL_NAME,
   stays: true,
   // Empty — `stays` handled inline by dispatch.
   run: () => {}
@@ -195,7 +217,9 @@ export type MessageActionsState = {
   uuid: string;
   msgType: NavigableType;
   expanded: boolean;
+  expandKey: string;
   toolName?: string;
+  primaryInputLineCount?: number;
 };
 export type MessageActionsNav = {
   enterCursor: () => void;

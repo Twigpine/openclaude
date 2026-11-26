@@ -2,7 +2,7 @@ import { feature } from 'bun:bundle';
 import { statSync } from 'fs';
 import { isAbsolute } from 'path';
 import * as React from 'react';
-import { buildTool, type ToolDef, toolMatchesName } from 'src/Tool.js';
+import { buildTool, type ReplAgentConcurrencyBudget, type ToolDef, toolMatchesName } from 'src/Tool.js';
 import type { Message as MessageType, NormalizedUserMessage } from 'src/types/message.js';
 import { getQuerySourceForAgent } from 'src/utils/promptCategory.js';
 import { z } from 'zod/v4';
@@ -60,7 +60,7 @@ import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extra
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
-import { closeForegroundAgentForBackground, createForegroundAgentAbortController } from './foregroundAgentHandoff.js';
+import { closeForegroundAgentForBackground, createForegroundAgentAbortController, resolveReplAgentConcurrencyBudget } from './foregroundAgentHandoff.js';
 import type { AgentDefinition } from './loadAgentsDir.js';
 import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } from './loadAgentsDir.js';
 import { getPrompt } from './prompt.js';
@@ -378,6 +378,9 @@ export const AgentTool = buildTool({
     if (isTeammate() && teamName && name) {
       throw new Error('Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter.');
     }
+    if (toolUseContext.replInnerExecution === true && teamName && name) {
+      throw new Error('Teammate spawning is unavailable inside a foreground REPL script. Omit `name` to use a synchronous subagent.');
+    }
     // In-process teammates cannot spawn background agents (their lifecycle is
     // tied to the leader's process). Tmux teammates are separate processes and
     // can manage their own background agents.
@@ -605,9 +608,14 @@ export const AgentTool = buildTool({
         `or GITHUB_COPILOT_OPTIMIZATION_DISABLED=1.`,
       );
     }
-    const shouldRunAsync = forceSyncCopilot || forcePlanModeSync
+    const replInnerExecution = toolUseContext.replInnerExecution === true;
+    const asyncRequiredByAgentOrRuntime = selectedAgent.background === true || isCoordinator || forceAsync || assistantForceAsync || (proactiveModule?.isProactiveActive() ?? false);
+    if (replInnerExecution && asyncRequiredByAgentOrRuntime && !forceSyncCopilot && !forcePlanModeSync && !isBackgroundTasksDisabled) {
+      throw new Error(`Agent '${selectedAgent.agentType}' requires background execution, which is unavailable inside a foreground REPL script.`);
+    }
+    const shouldRunAsync = forceSyncCopilot || forcePlanModeSync || replInnerExecution
       ? false
-      : (run_in_background === true || selectedAgent.background === true || isCoordinator || forceAsync || assistantForceAsync || (proactiveModule?.isProactiveActive() ?? false)) && !isBackgroundTasksDisabled;
+      : (run_in_background === true || asyncRequiredByAgentOrRuntime) && !isBackgroundTasksDisabled;
 
     // Resolve agent params for logging and prebuilt system prompts. runAgent
     // resolves the same settings again before the actual query.
@@ -744,7 +752,9 @@ export const AgentTool = buildTool({
       ...appState.toolPermissionContext,
       mode: selectedAgent.permissionMode ?? 'acceptEdits'
     };
-    const workerTools = assembleToolPool(workerPermissionContext, appState.mcp.tools);
+    const workerTools = assembleToolPool(workerPermissionContext, appState.mcp.tools, {
+      forceDirectToolInventory: toolUseContext.replInnerExecution === true,
+    });
 
     // Create a stable agent ID early so it can be used for worktree slug
     const earlyAgentId = createAgentId();
@@ -985,9 +995,34 @@ export const AgentTool = buildTool({
         invocationEmitted: false
       };
 
+      // Foreground REPL scripts share a fail-fast concurrency budget across
+      // direct fanout and nested spawns. Nested agents bypass the inner tool
+      // runner's per-call Agent() caps, so acquisition must happen here,
+      // before the worker starts. The budget is pinned onto the worker's
+      // toolUseContext so createSubagentContext propagates it to nested
+      // spawns even if the prompt wait tracker is ever dropped.
+      let replAgentBudget: ReplAgentConcurrencyBudget | undefined;
+      if (replInnerExecution) {
+        try {
+          replAgentBudget = resolveReplAgentConcurrencyBudget(toolUseContext);
+          replAgentBudget?.tryAcquire();
+        } catch (error) {
+          // Acquisition happens after worktree setup, so a fail-fast rejection
+          // must still release the freshly created isolation worktree.
+          await cleanupWorktreeIfNeeded();
+          throw error;
+        }
+        if (replAgentBudget) {
+          runAgentParams.toolUseContext = {
+            ...toolUseContext,
+            replAgentConcurrencyBudget: replAgentBudget,
+          };
+        }
+      }
+
       // Wrap entire sync agent execution in context for analytics attribution
       // and optionally in a worktree cwd override for filesystem isolation
-      return runWithAgentContext(syncAgentContext, () => wrapWithCwd(async () => {
+      const syncWorkerPromise = runWithAgentContext(syncAgentContext, () => wrapWithCwd(async () => {
         const agentMessages: MessageType[] = [];
         const agentStartTime = Date.now();
         const syncTracker = createProgressTracker();
@@ -1020,7 +1055,7 @@ export const AgentTool = buildTool({
           type: 'background';
         }> | undefined;
         let cancelAutoBackground: (() => void) | undefined;
-        if (!isBackgroundTasksDisabled && !forceSyncCopilot && !forcePlanModeSync) {
+        if (!isBackgroundTasksDisabled && !forceSyncCopilot && !forcePlanModeSync && !replInnerExecution) {
           const registration = registerAgentForeground({
             agentId: syncAgentId,
             description,
@@ -1078,10 +1113,11 @@ export const AgentTool = buildTool({
             const elapsed = Date.now() - agentStartTime;
 
             // Show background hint after threshold (but task is already registered)
-            // Skip if background tasks are disabled or if Copilot mode is
-            // forcing synchronous execution (no foreground registration, so
-            // the hint would advertise a non-existent affordance).
-            if (!isBackgroundTasksDisabled && !forceSyncCopilot && !forcePlanModeSync && !backgroundHintShown && elapsed >= PROGRESS_THRESHOLD_MS && toolUseContext.setToolJSX) {
+            // Skip if background tasks are disabled, if Copilot/plan mode is
+            // forcing synchronous execution, or inside REPL inner agents
+            // (no foreground registration in any of these cases, so the hint
+            // would advertise a non-existent affordance).
+            if (!isBackgroundTasksDisabled && !forceSyncCopilot && !forcePlanModeSync && !replInnerExecution && !backgroundHintShown && elapsed >= PROGRESS_THRESHOLD_MS && toolUseContext.setToolJSX) {
               backgroundHintShown = true;
               toolUseContext.setToolJSX({
                 jsx: <BackgroundHint />,
@@ -1475,6 +1511,12 @@ export const AgentTool = buildTool({
           }
         };
       }));
+      if (!replAgentBudget) return syncWorkerPromise;
+      const acquiredBudget = replAgentBudget;
+      // Inside a foreground REPL script the worker can never be backgrounded,
+      // so this promise settles exactly once on completion, failure, or abort.
+      // finally() releases the acquired slot exactly once in every outcome.
+      return syncWorkerPromise.finally(() => acquiredBudget.release());
     }
   },
   isReadOnly() {

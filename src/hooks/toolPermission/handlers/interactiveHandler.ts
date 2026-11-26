@@ -81,11 +81,13 @@ function handleInteractivePermission(
   // Idempotent: resume runs from both claim() and the resolveOnce safety net,
   // but the QueryActivity resume fn must be called at most once.
   const rawResume = ctx.toolUseContext.queryActivity?.beginUserInteraction?.()
+  ctx.toolUseContext.replPromptWaitTracker?.begin()
   let watchdogResumed = false
   const resumeWatchdog = () => {
     if (watchdogResumed) return
     watchdogResumed = true
     rawResume?.()
+    ctx.toolUseContext.replPromptWaitTracker?.end()
   }
   let removeExternalAbortListener = () => {}
   try {

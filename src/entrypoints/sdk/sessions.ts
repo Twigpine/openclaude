@@ -13,9 +13,14 @@
  */
 
 import { randomUUID, type UUID } from 'crypto'
-import { existsSync } from 'fs'
+import { createReadStream, existsSync } from 'fs'
 import { appendFile, mkdir, unlink, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
+import {
+  CODE_MODE_ENV_VAR,
+  isReplModeEligibleForSession,
+  setReplModeForConversation,
+} from '../../tools/REPLTool/constants.js'
 import {
   listSessionsImpl,
   parseSessionInfoFromLite,
@@ -44,6 +49,123 @@ import {
   type ForkSessionResult,
   type SessionMessage,
 } from './shared.js'
+
+// ============================================================================
+// Internal: Code Mode transcript boundary enforcement
+// ============================================================================
+
+export class CodeModeTranscriptCompatibilityError extends Error {
+  constructor() {
+    super(
+      `This session was created in Code Mode and cannot be resumed with direct tools. Restart with ${CODE_MODE_ENV_VAR}=1 to resume it.`,
+    )
+    this.name = 'CodeModeTranscriptCompatibilityError'
+  }
+}
+
+function codeModeFromEntries(
+  entries: JsonlEntry[],
+  sessionId: string,
+): boolean | undefined {
+  let codeMode: boolean | undefined
+  for (const entry of entries) {
+    if (entry.type !== 'code-mode' || entry.sessionId !== sessionId) continue
+    if (typeof entry.codeMode === 'boolean') codeMode = entry.codeMode
+  }
+  return codeMode
+}
+
+const CODE_MODE_MARKER = Buffer.from('"type":"code-mode"')
+const NEWLINE = 0x0a
+const MAX_METADATA_CARRY_BYTES = 64 * 1024
+
+function parseCodeModeLine(line: string, sessionId: string): boolean | undefined {
+  if (!line.includes('"type":"code-mode"')) return undefined
+  try {
+    const entry = JSON.parse(line) as JsonlEntry
+    if (entry.type !== 'code-mode' || entry.sessionId !== sessionId) {
+      return undefined
+    }
+    return typeof entry.codeMode === 'boolean' ? entry.codeMode : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Scan the bytes before a compact boundary for code-mode metadata. This is
+ * the SDK-local equivalent of sessionStorage's metadata scan. It stays small
+ * because importing the interactive resume module here would pull in UI and
+ * hook modules that cycle back through SDK types.
+ */
+async function scanPreBoundaryCodeMode(
+  filePath: string,
+  endOffset: number,
+  sessionId: string,
+): Promise<boolean | undefined> {
+  if (endOffset <= 0) return undefined
+
+  let codeMode: boolean | undefined
+  let carry: Buffer<ArrayBufferLike> = Buffer.alloc(0)
+  const stream = createReadStream(filePath, { end: endOffset - 1 })
+  for await (const chunk of stream) {
+    const chunkBuf = chunk as Buffer
+    const buf = carry.length > 0 ? Buffer.concat([carry, chunkBuf]) : chunkBuf
+    let lineStart = 0
+    let newline = buf.indexOf(NEWLINE)
+    while (newline !== -1) {
+      const markerIndex = buf.indexOf(CODE_MODE_MARKER, lineStart)
+      if (markerIndex !== -1 && markerIndex < newline) {
+        const parsed = parseCodeModeLine(
+          buf.toString('utf8', lineStart, newline),
+          sessionId,
+        )
+        if (parsed !== undefined) codeMode = parsed
+      }
+      lineStart = newline + 1
+      newline = buf.indexOf(NEWLINE, lineStart)
+    }
+    carry = buf.subarray(lineStart)
+    // Metadata entries are small. A larger carry is message content, and its
+    // continuation cannot parse as a complete metadata line anyway.
+    if (carry.length > MAX_METADATA_CARRY_BYTES) carry = Buffer.alloc(0)
+  }
+
+  if (carry.length > 0) {
+    const parsed = parseCodeModeLine(carry.toString('utf8'), sessionId)
+    if (parsed !== undefined) codeMode = parsed
+  }
+  return codeMode
+}
+
+/**
+ * Apply the CLI Code Mode resume contract before transcript messages enter an
+ * SDK engine. A post-boundary marker is newer than anything before the last
+ * compact boundary, so only scan pre-boundary bytes when no marker survives in
+ * the parsed entries.
+ */
+export async function enforceSdkCodeModeTranscriptCompatibility(input: {
+  filePath: string
+  entries: JsonlEntry[]
+  sessionId: string
+  preBoundaryEndOffset?: number
+}): Promise<boolean> {
+  let codeMode = codeModeFromEntries(input.entries, input.sessionId)
+  if (codeMode === undefined && input.preBoundaryEndOffset) {
+    codeMode = await scanPreBoundaryCodeMode(
+      input.filePath,
+      input.preBoundaryEndOffset,
+      input.sessionId,
+    )
+  }
+
+  const transcriptUsedCodeMode = codeMode === true
+  if (transcriptUsedCodeMode && !isReplModeEligibleForSession()) {
+    throw new CodeModeTranscriptCompatibilityError()
+  }
+  setReplModeForConversation(transcriptUsedCodeMode)
+  return transcriptUsedCodeMode
+}
 
 // ============================================================================
 // Internal: SessionInfo → SDKSessionInfo mapping
@@ -145,6 +267,9 @@ function entryToSessionMessage(entry: JsonlEntry): SessionMessage {
     timestamp: entry.timestamp,
     uuid: entry.uuid,
     parentUuid: entry.parentUuid,
+    ...(typeof entry.isVirtual === 'boolean'
+      ? { isVirtual: entry.isVirtual }
+      : {}),
   }
 }
 

@@ -522,6 +522,51 @@ short-circuit also skips OpenClaude’s numbered precedence, including
 be measured, OpenClaude prints one warning on stderr and uses `8192` instead
 of an unrelated megabyte environment value.
 
+## Experimental Code Mode
+
+Code Mode is an opt-in interactive mode in which the model writes JavaScript for the `REPL` tool instead of calling primitive tools one at a time. One script can chain dependent calls, run independent calls in parallel, transform intermediate results, and return only the reduced result the model needs.
+
+Enable it for an interactive session from the process environment:
+
+```bash
+export CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1
+openclaude
+```
+
+A truthy user-level settings environment value can also enable it. An explicit falsy value in an accepted source wins over a truthy value elsewhere. Project and local settings are ignored for this variable, so cloning a repository cannot opt you in. The first interactive use asks for explicit acknowledgement. Print, SDK, MCP, and other programmatic entrypoints always keep the direct tool surface, even when the variable is set.
+
+Code Mode is provider-neutral: it does not require an Anthropic account, a particular cloud provider, or a particular Claude model. Generated-code quality still depends on the active model, and weaker models may make more scripting mistakes.
+
+Scripts run in a sealed QuickJS runtime. They can use documented tool functions and ordinary JavaScript data manipulation, including `async`/`await` and `Promise.all`, but they have no direct host filesystem, process-control, network, module-loader, or environment-variable access. Shell and file effects occur only through the same canonical tools available to the session. One script can contain at most 100,000 characters. Foreground scripts stop after ten minutes, excluding time spent waiting for permission answers. Timeout and runtime failures return a tool error to the model instead of ending the session. Background or detached inner execution is rejected in this version.
+
+Programmatic fanout is bounded. One script can run at most 8 inner calls concurrently, 100 inner calls total, 50 mutation calls, 25 shell or process calls, and 5 Agent calls. Agent calls are synchronous foreground invocations. Inputs that request background execution, teams, worktree isolation, model overrides, or mode control are rejected rather than approximated.
+
+Primitive tools are exposed under their exact names, such as `Read`, `Edit`, `Bash`, and `Agent`, and under lower-case ergonomic aliases such as `read`, `edit`, `bash`, and `agent`. MCP tools that are enabled for the session keep their canonical names and permission identities. When a canonical MCP name is not a legal JavaScript identifier, the model can invoke it through the generic `tool(name, input)` function. Tools that are unavailable to the session, recursive `REPL` calls, and control-plane tools fail closed instead of silently disappearing.
+
+A typical orchestration can search, edit, and test in one model turn:
+
+```js
+await Edit({
+  file_path: 'src/example.ts',
+  old_string: 'const enabled = false',
+  new_string: 'const enabled = true',
+})
+const test = await Bash({ command: 'bun test src/example.test.ts' })
+return { updated: 'src/example.ts', test }
+```
+
+For permissions, a script like the one above can first require approval of the outer `REPL` call when your rules prompt for `REPL`. Approval of that script does not bypass inner rules: the `Edit` and `Bash` calls still use their usual tool names, validation, hooks, and permission prompts.
+
+Permissions and hooks keep their usual meaning. Rules and `PreToolUse` hooks for `REPL` apply to the script as a whole, and an interactive `REPL` prompt lets you inspect the code before approval. Rules and hooks for inner tools such as `Bash`, `Edit`, or MCP tools apply under those same tool names inside the script. In prompting permission modes, inner calls prompt as they would outside Code Mode. Plan mode allows the sealed outer script to run because the runtime itself has no direct side effects; each inner mutation is still denied under the inner tool's normal plan-mode check. In `dontAsk` mode, an unapproved script cannot prompt and is denied, so `REPL` is hidden and the direct primitive tools remain visible unless `REPL` itself is explicitly pre-approved. Refusing an inner call without a comment stops the script; a refusal with a comment can be returned to the script so it can choose different work. `PostToolUse` hooks for `REPL` receive structured script output, including the exact code, reduced result, stdout, stderr, error metadata, and tools used. A hook can replace that output with `hookSpecificOutput.updatedToolOutput` before it reaches model context, rendering, or session persistence. The legacy `updatedMCPToolOutput` field remains MCP-only.
+
+The main conversation emphasizes meaningful inner activity such as edits and command results rather than the JavaScript source. The transcript keeps a compact Code row for the outer script. Keyboard transcript navigation can expand that row to reveal the exact source, and click expansion is also available. Session transcripts store the outer script, its structured result, and virtual inner tool activity as audit provenance. Those virtual inner messages are not replayed to the model as independent direct tool calls; the model receives the reduced outer `REPL` result instead.
+
+Audit provenance is bounded in aggregate as well as per message. One script has a conservative 256 KiB UTF-8 budget for virtual inner audit rows, including space reserved for an elision marker. Rows that no longer fit are represented in that marker with counts, tool-use IDs, error state, and compact mutation evidence rather than being dropped without a trace.
+
+Large structured script output is also bounded before it enters live session state or the JSONL transcript. When the raw structured output exceeds 16,000 characters, the complete serialized output is written to the existing session `tool-results` artifact store. The inline structured result keeps status, duration, tool usage, error metadata, bounded excerpts, and the artifact path, size, and preview. `PostToolUse` replacement runs before this artifact spill, so a hook redaction cannot accidentally persist the pre-redaction output.
+
+Resume is mode-aware. A session created in Code Mode can be resumed only when Code Mode is enabled; otherwise resume refuses with a clear reason. A session created with direct tools keeps the direct-tool contract even if the variable is enabled later. This prevents either kind of transcript from changing tool contracts in the middle of its history.
+
 ## Environment Variables
 
 ### Custom (Anthropic-compatible) APIs
@@ -596,6 +641,7 @@ host. Without this variable the behavior is unchanged.
 | `CHATGPT_ACCOUNT_ID` / `CODEX_ACCOUNT_ID` | Codex only | Required for manual Codex env setup when the account id is not coming from `auth.json` or stored OAuth credentials |
 | `CODEX_AUTH_JSON_PATH` | Codex only | Path to a Codex CLI `auth.json` file |
 | `CODEX_HOME` | Codex only | Alternative Codex home directory |
+| `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE` | No | Set to `1` to opt interactive sessions into experimental Code Mode. Project and local settings cannot enable it. See Experimental Code Mode above for consent, permission, timeout, visibility, and resume behavior. |
 | `OPENCLAUDE_MAX_RETRIES` | No | Maximum retry attempts for retryable API failures, capped at 100 (default: 10). Set to `0` to disable retries after the initial request. If unset, deprecated `CLAUDE_CODE_MAX_RETRIES` is still honored for compatibility. |
 | `OPENCLAUDE_MAX_TURNS` | No | Per-prompt **local** interactive REPL turn cap for the in-process query loop. Defaults to `50`. Set a larger positive integer for long autonomous local interactive sessions (for example models that take many small tool steps). CLI `--max-turns 0` explicitly disables this cap and prints a cautionary warning. Precedence for a valid override: CLI `--max-turns` → this env var → legacy `CLAUDE_CODE_MAX_TURNS` (only when this var is unset/empty) → `/config` → Max turns (interactive) → `50`. If this env var is set but invalid (zero, negative, non-integer), the default `50` is used and lower layers are not consulted — same pattern as `OPENCLAUDE_MAX_RETRIES`. Does not apply to remote-backed interactive sessions (`connect` / `ssh` / `--remote`). |
 | `OPENCLAUDE_RETRY_DELAY_MS` | No | Base retry delay in milliseconds for APIs that do not send `Retry-After`; exponential backoff starts from this value, capped at 60000 (default: 500) |

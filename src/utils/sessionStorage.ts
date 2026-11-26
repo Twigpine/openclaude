@@ -43,7 +43,10 @@ import {
 } from '../constants/xml.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 import * as sessionIngress from '../services/api/sessionIngress.js'
-import { REPL_TOOL_NAME } from '../tools/REPLTool/constants.js'
+import {
+  isReplModeEnabled,
+  REPL_TOOL_NAME,
+} from '../tools/REPLTool/constants.js'
 import {
   type AgentId,
   asAgentId,
@@ -1138,6 +1141,7 @@ type SessionMetadata = {
   lastPrompt?: string
   agentSetting?: string
   mode?: 'coordinator' | 'normal'
+  codeMode?: boolean
   // Tri-state: absent = never touched (don't write), null = exited worktree,
   // object = currently in worktree. reAppendSessionMetadata writes null so
   // --resume knows the session exited (vs. crashed while inside).
@@ -1457,6 +1461,12 @@ class Project {
   }
   set currentSessionMode(mode: 'coordinator' | 'normal' | undefined) {
     this.setSessionMetadataField('mode', mode)
+  }
+  get currentSessionCodeMode(): boolean | undefined {
+    return this.metadataForRead()?.codeMode
+  }
+  set currentSessionCodeMode(codeMode: boolean | undefined) {
+    this.setSessionMetadataField('codeMode', codeMode)
   }
   get currentSessionWorktree(): PersistedWorktreeSession | null | undefined {
     return this.metadataForRead()?.worktree
@@ -2117,6 +2127,7 @@ class Project {
       ? {
           title: this.currentSessionTitle,
           agentSetting: this.currentSessionAgentSetting,
+          codeMode: this.currentSessionCodeMode,
           worktree: this.currentSessionWorktree,
           worktreeSeq: this.sessionMetadata.get(this.sessionFileKey())
             ?.worktreeSeq,
@@ -2148,6 +2159,7 @@ class Project {
       if (startupMetadata) {
         this.currentSessionTitle = startupMetadata.title
         this.currentSessionAgentSetting = startupMetadata.agentSetting
+        this.currentSessionCodeMode = startupMetadata.codeMode
         this.currentSessionWorktree = startupMetadata.worktree
         // The restore re-asserts a value cached before the switch: keep
         // its original write order instead of the setter's fresh stamp,
@@ -2319,6 +2331,13 @@ class Project {
       appendEntryToFile(sessionFile, {
         type: 'last-prompt',
         lastPrompt: entry.lastPrompt,
+        sessionId,
+      })
+    }
+    if (entry?.codeMode !== undefined) {
+      appendEntryToFile(sessionFile, {
+        type: 'code-mode',
+        codeMode: entry.codeMode,
         sessionId,
       })
     }
@@ -2885,6 +2904,15 @@ class Project {
       const sessionId = sidechainDestination?.sessionId ?? getSessionId()
       const slug = getPlanSlugCache().get(sessionId)
 
+      // Resolved parentUuid of each chain participant written in this batch,
+      // keyed by message uuid. Used to detect when the sourceToolAssistantUUID
+      // override would fork a sibling branch off a chain this batch already
+      // extended past the assistant (REPL virtual inner provenance).
+      const resolvedParentByUuid = new Map<UUID, UUID | null>()
+      const persistedParentByUuid = isSidechain
+        ? undefined
+        : (await getSessionMessageIndex(sessionId as UUID)).parents
+
       for (const message of messages) {
         const isCompactBoundary = isCompactBoundaryMessage(message)
 
@@ -2896,7 +2924,34 @@ class Project {
           'sourceToolAssistantUUID' in message &&
           message.sourceToolAssistantUUID
         ) {
-          effectiveParentUuid = message.sourceToolAssistantUUID
+          const sourceUuid = message.sourceToolAssistantUUID
+          effectiveParentUuid = sourceUuid
+          // The override exists for late-arriving parallel tool results that
+          // must attach back to their own assistant across separate inserts.
+          // Across one batch or earlier persisted writes it can instead fork
+          // a sibling branch: a Code Mode REPL turn writes the virtual inner
+          // provenance chain off the outer assistant first, then the outer
+          // tool_result last. Pointing the outer result back at the outer
+          // assistant makes it a sibling of the virtual chain root, and
+          // buildConversationChain's single parent walk drops the entire
+          // virtual branch on resume. When the sequential parent already
+          // descends from the source assistant, the linear write-order parent
+          // preserves both the pairing (carried by tool_use_id) and every
+          // intermediate message, so keep it.
+          let cursor: UUID | null = parentUuid
+          const ancestrySeen = new Set<UUID>()
+          while (cursor !== null && !ancestrySeen.has(cursor)) {
+            if (cursor === sourceUuid) {
+              effectiveParentUuid = parentUuid
+              break
+            }
+            ancestrySeen.add(cursor)
+            const next = resolvedParentByUuid.has(cursor)
+              ? resolvedParentByUuid.get(cursor)
+              : persistedParentByUuid?.get(cursor)
+            if (next === undefined) break
+            cursor = next
+          }
         }
 
         const transcriptMessage: TranscriptMessage = {
@@ -2968,6 +3023,10 @@ class Project {
           }
         }
         if (isChainParticipant(message)) {
+          resolvedParentByUuid.set(
+            message.uuid as UUID,
+            transcriptMessage.parentUuid ?? null,
+          )
           parentUuid = message.uuid
         }
       }
@@ -3172,6 +3231,9 @@ class Project {
     } else if (entry.type === 'mode') {
       // Mode entries can always be appended
       void this.enqueueWrite(sessionFile, entry)
+    } else if (entry.type === 'code-mode') {
+      // Code Mode entries can always be appended
+      void this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'worktree-state') {
       void this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'content-replacement') {
@@ -3195,7 +3257,8 @@ class Project {
       // Always append. Last-wins on restore — later entries supersede.
       void this.enqueueWrite(sessionFile, entry)
     } else {
-      const messageSet = await getSessionMessages(sessionId)
+      const messageIndex = await getSessionMessageIndex(sessionId)
+      const messageSet = messageIndex.uuids
       if (entry.type === 'queue-operation') {
         // Queue operations are always appended to the session file
         void this.enqueueWrite(sessionFile, entry)
@@ -3240,6 +3303,7 @@ class Project {
             // Same constraint for remote (inc-4718 above): sidechain persisting a
             // UUID the main thread hasn't written yet → 409 when main writes it.
             messageSet.add(entry.uuid)
+            messageIndex.parents.set(entry.uuid, entry.parentUuid ?? null)
 
             if (isTranscriptMessage(entry)) {
               await this.persistToRemote(sessionId, entry)
@@ -4803,9 +4867,11 @@ function recoverOrphanedParallelToolResults(
     if (a.message.id) anchorByMsgId.set(a.message.id, a)
   }
 
-  // O(n) precompute: sibling groups and TR index.
-  // TRs indexed by parentUuid — insertMessageChain:~894 already wrote that
-  // as the srcUUID, and --fork-session strips srcUUID but keeps parentUuid.
+  // O(n) precompute: sibling groups and TR index. Prefer the result's
+  // sourceToolAssistantUUID over its write parent: a late parallel result can be
+  // parented to another result or an intermediate non-virtual message when the
+  // linear write chain has already moved past its assistant. The source uuid is
+  // the pairing authority; parentUuid is only the legacy/fork fallback.
   const siblingsByMsgId = new Map<string, TranscriptMessage[]>()
   const toolResultsByAsst = new Map<UUID, TranscriptMessage[]>()
   for (const m of messages.values()) {
@@ -4815,13 +4881,16 @@ function recoverOrphanedParallelToolResults(
       else siblingsByMsgId.set(m.message.id, [m])
     } else if (
       m.type === 'user' &&
-      m.parentUuid &&
       Array.isArray(m.message.content) &&
       m.message.content.some(b => b.type === 'tool_result')
     ) {
-      const group = toolResultsByAsst.get(m.parentUuid)
+      const ownerUuid = 'sourceToolAssistantUUID' in m && m.sourceToolAssistantUUID
+        ? m.sourceToolAssistantUUID
+        : m.parentUuid
+      if (!ownerUuid) continue
+      const group = toolResultsByAsst.get(ownerUuid)
       if (group) group.push(m)
-      else toolResultsByAsst.set(m.parentUuid, [m])
+      else toolResultsByAsst.set(ownerUuid, [m])
     }
   }
 
@@ -4976,6 +5045,7 @@ export async function loadTranscriptFromFile(
       contextCollapseSnapshot,
       leafUuids,
       contentReplacements,
+      codeModes,
       worktreeStates,
       goalStates,
       sessionBranches,
@@ -5024,6 +5094,7 @@ export async function loadTranscriptFromFile(
       worktreeSession: worktreeStates.has(sessionId)
         ? worktreeStates.get(sessionId)
         : undefined,
+      codeMode: codeModes.get(sessionId),
       goal: goalStates.get(sessionId),
       sessionBranch: sessionBranches.get(sessionId),
     }
@@ -5439,6 +5510,7 @@ export function restoreSessionMetadata(meta: {
   agentColor?: string
   agentSetting?: string
   mode?: 'coordinator' | 'normal'
+  codeMode?: boolean
   worktreeSession?: PersistedWorktreeSession | null
   prNumber?: number
   prUrl?: string
@@ -5455,6 +5527,7 @@ export function restoreSessionMetadata(meta: {
   if (meta.agentColor) project.currentSessionAgentColor = meta.agentColor
   if (meta.agentSetting) project.currentSessionAgentSetting = meta.agentSetting
   if (meta.mode) project.currentSessionMode = meta.mode
+  project.currentSessionCodeMode = meta.codeMode ?? false
   if (meta.worktreeSession !== undefined)
     project.currentSessionWorktree = meta.worktreeSession
   if (meta.prNumber !== undefined)
@@ -5557,6 +5630,15 @@ export function cacheSessionTitle(customTitle: string): void {
  */
 export function saveMode(mode: 'coordinator' | 'normal'): void {
   getProject().currentSessionMode = mode
+}
+
+/**
+ * Record whether this interactive session uses Code Mode. The transcript
+ * metadata is the resume contract: a session must be resumed in the same
+ * orchestration mode that wrote it.
+ */
+export function saveCodeModeState(codeMode: boolean): void {
+  getProject().currentSessionCodeMode = codeMode
 }
 
 /**
@@ -5672,6 +5754,7 @@ export async function loadFullLog(
       prUrls,
       prRepositories,
       modes,
+      codeModes,
       worktreeStates,
       fileHistorySnapshots,
       attributionSnapshots,
@@ -5720,6 +5803,7 @@ export async function loadFullLog(
       agentColor: sessionId ? agentColors.get(sessionId) : log.agentColor,
       agentSetting: sessionId ? agentSettings.get(sessionId) : log.agentSetting,
       mode: sessionId ? (modes.get(sessionId) as LogOption['mode']) : log.mode,
+      codeMode: sessionId ? codeModes.get(sessionId) : log.codeMode,
       worktreeSession:
         sessionId && worktreeStates.has(sessionId)
           ? worktreeStates.get(sessionId)
@@ -5828,6 +5912,7 @@ const METADATA_TYPE_MARKERS = [
   '"type":"agent-color"',
   '"type":"agent-setting"',
   '"type":"mode"',
+  '"type":"code-mode"',
   '"type":"worktree-state"',
   '"type":"pr-link"',
   '"type":"goal-state"',
@@ -6196,6 +6281,7 @@ export async function loadTranscriptFile(
   prUrls: Map<UUID, string>
   prRepositories: Map<UUID, string>
   modes: Map<UUID, string>
+  codeModes: Map<UUID, boolean>
   worktreeStates: Map<UUID, PersistedWorktreeSession | null>
   fileHistorySnapshots: Map<UUID, FileHistorySnapshotMessage>
   attributionSnapshots: Map<UUID, AttributionSnapshotMessage>
@@ -6218,6 +6304,7 @@ export async function loadTranscriptFile(
   const prUrls = new Map<UUID, string>()
   const prRepositories = new Map<UUID, string>()
   const modes = new Map<UUID, string>()
+  const codeModes = new Map<UUID, boolean>()
   const worktreeStates = new Map<UUID, PersistedWorktreeSession | null>()
   const fileHistorySnapshots = new Map<UUID, FileHistorySnapshotMessage>()
   const attributionSnapshots = new Map<UUID, AttributionSnapshotMessage>()
@@ -6321,6 +6408,8 @@ export async function loadTranscriptFile(
           agentSettings.set(entry.sessionId, entry.agentSetting)
         } else if (entry.type === 'mode' && entry.sessionId) {
           modes.set(entry.sessionId, entry.mode)
+        } else if (entry.type === 'code-mode' && entry.sessionId) {
+          codeModes.set(entry.sessionId, entry.codeMode)
         } else if (entry.type === 'worktree-state' && entry.sessionId) {
           worktreeStates.set(entry.sessionId, entry.worktreeSession)
         } else if (entry.type === 'pr-link' && entry.sessionId) {
@@ -6389,6 +6478,8 @@ export async function loadTranscriptFile(
         agentSettings.set(entry.sessionId, entry.agentSetting)
       } else if (entry.type === 'mode' && entry.sessionId) {
         modes.set(entry.sessionId, entry.mode)
+      } else if (entry.type === 'code-mode' && entry.sessionId) {
+        codeModes.set(entry.sessionId, entry.codeMode)
       } else if (entry.type === 'worktree-state' && entry.sessionId) {
         worktreeStates.set(entry.sessionId, entry.worktreeSession)
       } else if (entry.type === 'pr-link' && entry.sessionId) {
@@ -6453,6 +6544,20 @@ export async function loadTranscriptFile(
 
   // Find all terminal messages (messages with no children)
   const terminalMessages = allMessages.filter(msg => !parentUuids.has(msg.uuid))
+  const resolvedToolUseIds = new Set<string>()
+  for (const msg of allMessages) {
+    if (msg.type !== 'user' || !Array.isArray(msg.message.content)) continue
+    for (const block of msg.message.content) {
+      if (block.type === 'tool_result') resolvedToolUseIds.add(block.tool_use_id)
+    }
+  }
+  const isResumeLeafCandidate = (msg: TranscriptMessage): boolean => {
+    if ((msg.type !== 'user' && msg.type !== 'assistant') || msg.isVirtual === true) return false
+    if (msg.type !== 'assistant' || !Array.isArray(msg.message.content)) return true
+    return msg.message.content.every(block =>
+      block.type !== 'tool_use' || resolvedToolUseIds.has(block.id),
+    )
+  }
 
   const leafUuids = new Set<UUID>()
   let hasCycle = false
@@ -6462,7 +6567,7 @@ export async function loadTranscriptFile(
     // (these are mid-conversation nodes, not dead ends)
     const hasUserAssistantChild = new Set<UUID>()
     for (const msg of allMessages) {
-      if (msg.parentUuid && (msg.type === 'user' || msg.type === 'assistant')) {
+      if (msg.parentUuid && isResumeLeafCandidate(msg)) {
         hasUserAssistantChild.add(msg.parentUuid)
       }
     }
@@ -6480,7 +6585,7 @@ export async function loadTranscriptFile(
           break
         }
         seen.add(current.uuid)
-        if (current.type === 'user' || current.type === 'assistant') {
+        if (isResumeLeafCandidate(current)) {
           if (!hasUserAssistantChild.has(current.uuid)) {
             leafUuids.add(current.uuid)
           }
@@ -6503,7 +6608,7 @@ export async function loadTranscriptFile(
           break
         }
         seen.add(current.uuid)
-        if (current.type === 'user' || current.type === 'assistant') {
+        if (isResumeLeafCandidate(current)) {
           leafUuids.add(current.uuid)
           break
         }
@@ -6530,6 +6635,7 @@ export async function loadTranscriptFile(
     prUrls,
     prRepositories,
     modes,
+    codeModes,
     worktreeStates,
     fileHistorySnapshots,
     attributionSnapshots,
@@ -6579,6 +6685,7 @@ async function loadSessionFile(
   customTitles: Map<UUID, string>
   tags: Map<UUID, string>
   agentSettings: Map<UUID, string>
+  codeModes: Map<UUID, boolean>
   worktreeStates: Map<UUID, PersistedWorktreeSession | null>
   fileHistorySnapshots: Map<UUID, FileHistorySnapshotMessage>
   attributionSnapshots: Map<UUID, AttributionSnapshotMessage>
@@ -6591,26 +6698,49 @@ async function loadSessionFile(
   return loadTranscriptFile(destination)
 }
 
+type SessionMessageIndex = {
+  uuids: Set<UUID>
+  parents: Map<UUID, UUID | null>
+}
+
+function buildSessionMessageIndex(
+  messages: Map<UUID, TranscriptMessage>,
+): SessionMessageIndex {
+  const index: SessionMessageIndex = {
+    uuids: new Set(messages.keys()),
+    parents: new Map(),
+  }
+  for (const [uuid, message] of messages) {
+    index.parents.set(uuid, message.parentUuid ?? null)
+  }
+  return index
+}
+
 /**
- * Gets message UUIDs for a specific session without loading all sessions.
- * Memoized per resolved transcript destination — not per session id — to
- * avoid re-reading the same session file multiple times. The same id in
- * two project directories is two destinations, so each keeps its own set.
+ * Gets message UUIDs and persisted parents for a specific session without
+ * loading all sessions. Memoized per resolved transcript destination, not
+ * per session id, to avoid re-reading the same session file multiple times.
+ * The same id in two project directories is two destinations, so each keeps
+ * its own index.
  */
-const getSessionMessages = memoize(
-  async (sessionId: UUID): Promise<Set<UUID>> => {
+const getSessionMessageIndex = memoize(
+  async (sessionId: UUID): Promise<SessionMessageIndex> => {
     const { messages } = await loadSessionFile(sessionId)
-    return new Set(messages.keys())
+    return buildSessionMessageIndex(messages)
   },
   (sessionId: UUID) => sessionMessagesDestination(sessionId),
 )
+
+async function getSessionMessages(sessionId: UUID): Promise<Set<UUID>> {
+  return (await getSessionMessageIndex(sessionId)).uuids
+}
 
 /**
  * Clear the memoized session messages cache.
  * Call after compaction when old message UUIDs are no longer valid.
  */
 export function clearSessionMessagesCache(): void {
-  getSessionMessages.cache.clear?.()
+  getSessionMessageIndex.cache.clear?.()
 }
 
 /**
@@ -6643,6 +6773,7 @@ export async function getLastSessionLog(
     customTitles,
     tags,
     agentSettings,
+    codeModes,
     worktreeStates,
     fileHistorySnapshots,
     attributionSnapshots,
@@ -6660,10 +6791,10 @@ export async function getLastSessionLog(
   // with a stale disk snapshot would lose unflushed UUIDs and break dedup.
   // The cache is keyed by resolved transcript destination, so prime under
   // the same destination the load read from.
-  if (!getSessionMessages.cache.has(destination)) {
-    getSessionMessages.cache.set(
+  if (!getSessionMessageIndex.cache.has(destination)) {
+    getSessionMessageIndex.cache.set(
       destination,
-      Promise.resolve(new Set(messages.keys())),
+      Promise.resolve(buildSessionMessageIndex(messages)),
     )
   }
 
@@ -6692,6 +6823,7 @@ export async function getLastSessionLog(
       contentReplacements.get(sessionId) ?? [],
     ),
     worktreeSession: worktreeStates.get(sessionId),
+    codeMode: codeModes.get(sessionId),
     goal: goalStates.get(sessionId),
     sessionBranch: sessionBranches.get(sessionId),
     contextCollapseCommits: contextCollapseCommits.filter(
@@ -7153,14 +7285,15 @@ function collectReplIds(messages: readonly Message[]): Set<string> {
 }
 
 /**
- * For external users, make REPL invisible in the persisted transcript: strip
- * REPL tool_use/tool_result pairs and promote isVirtual messages to real. On
- * --resume the model then sees a coherent native-tool-call history (assistant
- * called Bash, got result, called Read, got result) without the REPL wrapper.
- * Ant transcripts keep the wrapper so /share training data sees REPL usage.
+ * Legacy upstream REPL transcripts were hidden from external users by
+ * stripping REPL tool_use/tool_result pairs and promoting isVirtual messages
+ * to real messages. Code Mode must not use that transform: its transcript is
+ * the audit record, so the outer script and the virtual inner tool provenance
+ * both persist unchanged. The legacy transform remains only for a non-Code
+ * Mode session that somehow contains legacy REPL rows.
  *
  * replIds is pre-collected from the FULL session array, not the slice being
- * transformed — recordTranscript receives incremental slices where the REPL
+ * transformed. recordTranscript receives incremental slices where the REPL
  * tool_use (earlier render) and its tool_result (later render, after async
  * execution) land in separate calls. A fresh per-call Set would miss the id
  * and leave an orphaned tool_result on disk.
@@ -7224,7 +7357,7 @@ export function cleanMessagesForLogging(
   allMessages: readonly Message[] = messages,
 ): Transcript {
   const filtered = messages.filter(isLoggableMessage) as Transcript
-  return getUserType() !== 'ant'
+  return getUserType() !== 'ant' && !isReplModeEnabled()
     ? transformMessagesForExternalTranscript(
         filtered,
         collectReplIds(allMessages),
@@ -7456,6 +7589,7 @@ export async function loadAllLogsFromSessionFile(
     prUrls,
     prRepositories,
     modes,
+    codeModes,
     fileHistorySnapshots,
     attributionSnapshots,
     contentReplacements,
@@ -7520,6 +7654,7 @@ export async function loadAllLogsFromSessionFile(
       agentColor: agentColors.get(sessionId),
       agentSetting: agentSettings.get(sessionId),
       mode: modes.get(sessionId) as LogOption['mode'],
+      codeMode: codeModes.get(sessionId),
       prNumber: prNumbers.get(sessionId),
       prUrl: prUrls.get(sessionId),
       prRepository: prRepositories.get(sessionId),

@@ -348,6 +348,8 @@ export type CompactMockOptions = {
   getGlobalConfig?: ReturnType<typeof mock>
   /** Override for queryModelWithStreaming(), to inspect the model/options passed in. */
   queryModelWithStreaming?: ReturnType<typeof mock>
+  /** Override for normalizeMessagesForAPI() when a test needs the real projection. */
+  normalizeMessagesForAPI?: (msgs: Message[]) => Message[]
   /** Override for getMaxOutputTokensForModel(). */
   getMaxOutputTokensForModel?: ReturnType<typeof mock>
   /** Spy on generateFileAttachment to inspect the read context it receives. */
@@ -463,7 +465,8 @@ async function registerCommonCompactStubs(options: CompactMockOptions = {}) {
     ),
     getMessagesAfterCompactBoundary: mock((msgs: Message[]) => msgs),
     isCompactBoundaryMessage: mock(() => false),
-    normalizeMessagesForAPI: mock((msgs: Message[]) => msgs),
+    normalizeMessagesForAPI:
+      options.normalizeMessagesForAPI ?? mock((msgs: Message[]) => msgs),
     selectToolPairSafeMessageRange:
       _realMessagesModule.selectToolPairSafeMessageRange,
   }))
@@ -1209,6 +1212,85 @@ describe('compactConversation compactModel override', () => {
     ]
     expect(streamOptions.model).toBe(resolvedCompactModel)
     expect(streamOptions.maxOutputTokensOverride).toBe(4096)
+  })
+})
+
+
+describe('compactConversation Code Mode projection', () => {
+  test('omits virtual inner REPL messages without breaking the outer tool pair', async () => {
+    const queryModelWithStreaming = mock(async function* () {
+      yield {
+        type: 'assistant' as const,
+        message: {
+          role: 'assistant' as const,
+          content: [{ type: 'text' as const, text: 'Code Mode summary.' }],
+        },
+        uuid: `stream-${Math.random()}`,
+        timestamp: new Date().toISOString(),
+      }
+    })
+    const { compactConversation } = await importCompact({
+      getGlobalConfig: mock(() => ({
+        ..._realConfigModule.getGlobalConfig(),
+        compactModel: 'claude-opus-4-1',
+      })),
+      queryModelWithStreaming,
+      normalizeMessagesForAPI:
+        _realMessagesModule.normalizeMessagesForAPI as (msgs: Message[]) => Message[],
+    })
+
+    const outerUse = assistantToolUseMessage('repl-use-compact')
+    const outerBlock = outerUse.message.content[0] as never as {
+      name: string
+      input: Record<string, unknown>
+    }
+    outerBlock.name = 'REPL'
+    outerBlock.input = { code: 'await Read({file_path:"a.ts"})' }
+    const innerUse = {
+      ...assistantToolUseMessage('inner-use-compact'),
+      isVirtual: true as const,
+    }
+    const innerResult = {
+      ...toolResultMessage('inner-use-compact'),
+      isVirtual: true as const,
+    }
+    ;(innerResult as { message: { content: Array<{ content: string }> } }).message.content[0]!.content =
+      'inner-secret-payload'
+    const outerResult = toolResultMessage('repl-use-compact')
+    ;(outerResult.message.content as Array<{ content: string }>)[0]!.content =
+      'reduced outer result'
+    const messages = [
+      userMessage('compact this'),
+      outerUse,
+      innerUse,
+      innerResult,
+      outerResult,
+    ]
+
+    await compactConversation(messages, toolUseContext(), cacheSafeParams(messages), false)
+
+    expect(queryModelWithStreaming).toHaveBeenCalled()
+    const [{ messages: sentMessages }] = queryModelWithStreaming.mock.calls[0] as unknown as [
+      { messages: Message[] },
+    ]
+    const serialized = JSON.stringify(sentMessages)
+    expect(serialized).toContain('REPL')
+    expect(serialized).toContain('reduced outer result')
+    expect(serialized).not.toContain('inner-secret-payload')
+    expect(serialized).not.toContain('inner-use-compact')
+
+    const outerUseIndex = sentMessages.findIndex(message =>
+      message.type === 'assistant' &&
+      Array.isArray(message.message.content) &&
+      message.message.content.some(block => block.type === 'tool_use' && block.id === 'repl-use-compact'),
+    )
+    const outerResultIndex = sentMessages.findIndex(message =>
+      message.type === 'user' &&
+      Array.isArray(message.message.content) &&
+      message.message.content.some(block => block.type === 'tool_result' && block.tool_use_id === 'repl-use-compact'),
+    )
+    expect(outerUseIndex).toBeGreaterThanOrEqual(0)
+    expect(outerResultIndex).toBeGreaterThan(outerUseIndex)
   })
 })
 
