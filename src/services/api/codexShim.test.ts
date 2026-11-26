@@ -1514,6 +1514,29 @@ describe('Codex request translation', () => {
   })
 })
 
+describe('Codex stream error events', () => {
+  test('throws on a bare SSE error event instead of ending the stream silently', async () => {
+    const text = [
+      'event: error',
+      'data: {"type":"error","code":"server_error","message":"upstream exploded"}',
+      '',
+      '',
+    ].join('\n')
+    await expect(collectStreamEventTypes(text)).rejects.toThrow(
+      'upstream exploded',
+    )
+  })
+
+  test('throws on a data-only error frame with a nested error object', async () => {
+    const text = [
+      'data: {"type":"error","error":{"message":"rate limited"}}',
+      '',
+      '',
+    ].join('\n')
+    await expect(collectStreamEventTypes(text)).rejects.toThrow('rate limited')
+  })
+})
+
 describe('convertSystemPrompt', () => {
   test('strips Anthropic attribution header block from text-block array (#607)', () => {
     const result = convertSystemPrompt([
