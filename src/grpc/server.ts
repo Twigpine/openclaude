@@ -10,6 +10,9 @@ import { FileStateCache, READ_FILE_STATE_CACHE_SIZE } from '../utils/fileStateCa
 import { getBuiltInAgents } from '../tools/AgentTool/builtInAgents.js'
 import { getCombinedTools, loadReexposedMcpTools } from '../entrypoints/mcp.js'
 import { runWithCwdOverride } from '../utils/cwd.js'
+import { reconnectMcpServerImpl } from '../services/mcp/client.js'
+import { getMcpPrefix } from '../services/mcp/mcpStringUtils.js'
+import type { MCPServerConnection } from '../services/mcp/types.js'
 import type { Message } from '../types/message.js'
 
 const PROTO_PATH = path.resolve(import.meta.dirname, '../proto/openclaude.proto')
@@ -108,6 +111,8 @@ function toolResultContentToString(content: ToolResultBlock['content']): string 
   return ''
 }
 
+const RETRIED_MCP_STATES: ReadonlySet<MCPServerConnection['type']> = new Set(['failed', 'needs-auth'])
+
 export class GrpcServer {
   private server: grpc.Server
   private sessions: Map<string, Message[]> = new Map()
@@ -150,20 +155,26 @@ export class GrpcServer {
     return loaded
   }
 
-  // A server that could not connect (offline, say) is tried again by each chat until it does;
-  // the servers that did connect keep their connections. A failed server has no tools to replace.
+  // A server that could not connect (offline, say) or that waited for sign-in is reconnected by
+  // the next chat in that directory until it connects; the others keep their connections. The
+  // reconnect clears the connector's memo for that server, which still holds the old result.
   private async reconnectFailed(
     cwd: string,
     current: Awaited<ReturnType<typeof loadReexposedMcpTools>>,
   ): ReturnType<typeof loadReexposedMcpTools> {
-    const failed = current.mcpClients.filter(client => client.type === 'failed')
-    if (failed.length === 0) return current
-    const retried = await runWithCwdOverride(cwd, () =>
-      loadReexposedMcpTools(Object.fromEntries(failed.map(client => [client.name, client.config]))),
+    const retry = current.mcpClients.filter(client => RETRIED_MCP_STATES.has(client.type))
+    if (retry.length === 0) return current
+    const results = await runWithCwdOverride(cwd, () =>
+      Promise.all(retry.map(client => reconnectMcpServerImpl(client.name, client.config))),
     )
+    const replaced = new Map(results.map(result => [result.client.name, result]))
+    const prefixes = retry.map(client => getMcpPrefix(client.name))
     return {
-      mcpClients: [...current.mcpClients.filter(client => client.type !== 'failed'), ...retried.mcpClients],
-      mcpTools: [...current.mcpTools, ...retried.mcpTools],
+      mcpClients: current.mcpClients.map(client => replaced.get(client.name)?.client ?? client),
+      mcpTools: [
+        ...current.mcpTools.filter(tool => !prefixes.some(prefix => tool.name.startsWith(prefix))),
+        ...results.flatMap(result => result.tools),
+      ],
     }
   }
 
