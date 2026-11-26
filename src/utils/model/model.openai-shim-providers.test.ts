@@ -339,6 +339,17 @@ test('getSmallFastModel returns OPENAI_MODEL for Xiaomi MiMo', async () => {
   expect(getSmallFastModel()).toBe('mimo-v2-flash')
 })
 
+test('Gemini small-fast and haiku defaults use a model that is still served', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI = '1'
+  delete process.env.GEMINI_MODEL
+  delete process.env.ANTHROPIC_SMALL_FAST_MODEL
+
+  const { getSmallFastModel, getDefaultHaikuModel } =
+    await importFreshModelModule()
+  expect(getSmallFastModel()).toBe('gemini-3.1-flash-lite')
+  expect(getDefaultHaikuModel()).toBe('gemini-3.1-flash-lite')
+})
+
 test('getDefaultOpusModel returns OPENAI_MODEL for MiniMax', async () => {
   process.env.MINIMAX_API_KEY = 'minimax-test'
   process.env.OPENAI_MODEL = 'MiniMax-M2.7'
