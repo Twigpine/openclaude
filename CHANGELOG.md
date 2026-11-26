@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.38.0](https://github.com/Twigpine/openclaude/compare/v0.37.0...v0.38.0) (2026-11-26)
+
+
+### Features
+
+* /focus command and focus view for the fullscreen transcript ([#2546](https://github.com/Twigpine/openclaude/issues/2546)) ([97a3158](https://github.com/Twigpine/openclaude/commit/97a3158a03d88a4bed71a9f9a0344a4acfb0aa38))
+* **bg:** add scriptable wait command for background sessions ([#2557](https://github.com/Twigpine/openclaude/issues/2557)) ([c61b6b5](https://github.com/Twigpine/openclaude/commit/c61b6b58a2d0f8bb11eaf5d5eec41629ccc49080))
+* permission settings, plugin engine checks, and four bundled skills ([#2523](https://github.com/Twigpine/openclaude/issues/2523)) ([e998598](https://github.com/Twigpine/openclaude/commit/e9985989e08abd0f3229cd73887be64af4a86d28))
+* **repo-map:** capture plain function calls as references ([#2555](https://github.com/Twigpine/openclaude/issues/2555)) ([e587a56](https://github.com/Twigpine/openclaude/commit/e587a5662bbc75ef78e91b2542d4b57b97f478c6))
+* **repo-map:** support Go and Rust source files ([#2551](https://github.com/Twigpine/openclaude/issues/2551)) ([12203a3](https://github.com/Twigpine/openclaude/commit/12203a3d899e2d58c95b8b205c97c450cbd42e76))
+* **repo-map:** support Java source files ([#2559](https://github.com/Twigpine/openclaude/issues/2559)) ([4ba28e2](https://github.com/Twigpine/openclaude/commit/4ba28e2537ce6a099b534c62ca53838fe18ce3bf))
+* run task-capable MCP tools as server tasks in the background ([#2541](https://github.com/Twigpine/openclaude/issues/2541)) ([036abbd](https://github.com/Twigpine/openclaude/commit/036abbd6dc88a51abb7b78113a5b30415aa5b9de))
+* **sdk:** add host-facing authenticateMcpServer for OAuth MCP servers ([#2493](https://github.com/Twigpine/openclaude/issues/2493)) ([3beebbf](https://github.com/Twigpine/openclaude/commit/3beebbfdca7bdb1ff35eeb1f94a2b33187e26f77))
+
+
+### Bug Fixes
+
+* **bg:** keep a superseded no-hard-link publisher from overwriting the committed record ([#2564](https://github.com/Twigpine/openclaude/issues/2564)) ([1d06a64](https://github.com/Twigpine/openclaude/commit/1d06a646ac964624e1fe9e57210f519b87be6cb9))
+* **gemini:** show a blocked-reply notice for SAFETY/RECITATION instead of max_tokens ([#2548](https://github.com/Twigpine/openclaude/issues/2548)) ([9b92b89](https://github.com/Twigpine/openclaude/commit/9b92b89ccbaf7fc070b5ee0c01a2126bb7930643))
+* **gemini:** update retired Vertex default model to gemini-3.8-flash ([#2569](https://github.com/Twigpine/openclaude/issues/2569)) ([12651f7](https://github.com/Twigpine/openclaude/commit/12651f7aa2ac8a2be2b888dc7c83aadaafc5dc30))
+* **ink:** keep ANSI slicing and truncation within the cell budget ([#2553](https://github.com/Twigpine/openclaude/issues/2553)) ([63a6ffc](https://github.com/Twigpine/openclaude/commit/63a6ffc255147775849ee7823350b5730fb8a538))
+* **repomap:** report invalid arguments instead of ignoring them ([#2563](https://github.com/Twigpine/openclaude/issues/2563)) ([528f065](https://github.com/Twigpine/openclaude/commit/528f065d65bf6a6edede50daa3c400140424f04e))
+* **sdk:** isolate transcript file pointer per SDK session context ([#2489](https://github.com/Twigpine/openclaude/issues/2489)) ([7079222](https://github.com/Twigpine/openclaude/commit/7079222e76a4eeab1285da8690f0d4fa25f92aca))
+
 ## [0.37.0](https://github.com/Twigpine/openclaude/compare/v0.36.0...v0.37.0) (2026-11-17)
 
 
