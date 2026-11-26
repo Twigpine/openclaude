@@ -138,14 +138,33 @@ export class GrpcServer {
   }
 
   private mcpFor(cwd: string): ReturnType<typeof loadReexposedMcpTools> {
-    let loaded = this.mcpByCwd.get(cwd)
-    if (!loaded) {
-      loaded = runWithCwdOverride(cwd, () => loadReexposedMcpTools())
-      // A failed load is tried again by the next chat in that directory.
-      loaded.catch(() => this.mcpByCwd.delete(cwd))
-      this.mcpByCwd.set(cwd, loaded)
-    }
+    const cached = this.mcpByCwd.get(cwd)
+    const loaded = cached
+      ? cached.then(current => this.reconnectFailed(cwd, current))
+      : runWithCwdOverride(cwd, () => loadReexposedMcpTools())
+    // A load that throws is tried again in full by the next chat in that directory.
+    loaded.catch(() => {
+      if (this.mcpByCwd.get(cwd) === loaded) this.mcpByCwd.delete(cwd)
+    })
+    this.mcpByCwd.set(cwd, loaded)
     return loaded
+  }
+
+  // A server that could not connect (offline, say) is tried again by each chat until it does;
+  // the servers that did connect keep their connections. A failed server has no tools to replace.
+  private async reconnectFailed(
+    cwd: string,
+    current: Awaited<ReturnType<typeof loadReexposedMcpTools>>,
+  ): ReturnType<typeof loadReexposedMcpTools> {
+    const failed = current.mcpClients.filter(client => client.type === 'failed')
+    if (failed.length === 0) return current
+    const retried = await runWithCwdOverride(cwd, () =>
+      loadReexposedMcpTools(Object.fromEntries(failed.map(client => [client.name, client.config]))),
+    )
+    return {
+      mcpClients: [...current.mcpClients.filter(client => client.type !== 'failed'), ...retried.mcpClients],
+      mcpTools: [...current.mcpTools, ...retried.mcpTools],
+    }
   }
 
   private handleChat(call: grpc.ServerDuplexStream<ClientMessage, unknown>) {

@@ -97,3 +97,36 @@ test('while the MCP servers connect, a second request is refused and a cancel st
     submit.mockRestore()
   }
 })
+
+test('a server that failed to connect is tried again by the next chat, without reconnecting the others', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'grpc-mcp-retry-'))
+  const up = { name: 'up', type: 'connected' } as unknown as MCPServerConnection
+  const downConfig = { type: 'http', url: 'https://example.invalid/mcp', scope: 'project' }
+  const down = { name: 'down', type: 'failed', config: downConfig } as unknown as MCPServerConnection
+  const back = { name: 'down', type: 'connected', config: downConfig } as unknown as MCPServerConnection
+  const upTool = { name: 'mcp__up__a' } as unknown as Tool
+  const backTool = { name: 'mcp__down__b' } as unknown as Tool
+  const requested: unknown[] = []
+  const load = spyOn(mcpEntrypoint, 'loadReexposedMcpTools').mockImplementation(async configs => {
+    requested.push(configs)
+    return configs
+      ? { mcpClients: [back], mcpTools: [backTool] }
+      : { mcpClients: [up, down], mcpTools: [upTool] }
+  })
+  try {
+    const server = new GrpcServer()
+    const first = await configFor(server, project)
+    expect(first.tools.map(t => t.name)).toContain('mcp__up__a')
+    expect(first.tools.map(t => t.name)).not.toContain('mcp__down__b')
+
+    const second = await configFor(server, project)
+    expect(second.mcpClients).toEqual([up, back])
+    expect(second.tools.map(t => t.name)).toEqual(expect.arrayContaining(['mcp__up__a', 'mcp__down__b']))
+
+    await configFor(server, project)
+    expect(requested).toEqual([undefined, { down: downConfig }])
+  } finally {
+    load.mockRestore()
+    rmSync(project, { recursive: true, force: true })
+  }
+})

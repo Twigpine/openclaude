@@ -19,7 +19,7 @@ import review from '../commands/review.js'
 import type { Command } from '../commands.js'
 import { getMcpToolsCommandsAndResources } from '../services/mcp/client.js'
 import { createMcpStdioServerTransport } from '../services/mcp/stdioTransport.js'
-import type { MCPServerConnection } from '../services/mcp/types.js'
+import type { MCPServerConnection, ScopedMcpServerConfig } from '../services/mcp/types.js'
 import {
   findToolByName,
   getEmptyToolPermissionContext,
@@ -53,7 +53,10 @@ export function getCombinedTools(
   return [...mcpTools, ...deduplicatedBuiltins]
 }
 
-export async function loadReexposedMcpTools(): Promise<{
+/** Connects the configured MCP servers, or only those in `mcpConfigs` when it is given. */
+export async function loadReexposedMcpTools(
+  mcpConfigs?: Record<string, ScopedMcpServerConfig>,
+): Promise<{
   mcpClients: MCPServerConnection[]
   mcpTools: InternalTool[]
 }> {
@@ -64,7 +67,7 @@ export async function loadReexposedMcpTools(): Promise<{
   await getMcpToolsCommandsAndResources(({ client, tools: clientTools }) => {
     mcpClients.push(client)
     mcpTools.push(...clientTools)
-  })
+  }, mcpConfigs)
 
   return { mcpClients, mcpTools }
 }
