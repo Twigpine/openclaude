@@ -35,7 +35,7 @@ export const OPENAI_MODEL_DEFAULTS = {
 export const GEMINI_MODEL_DEFAULTS = {
   opus: 'gemini-2.5-pro',   // most capable
   sonnet: 'gemini-2.0-flash',              // balanced
-  haiku: 'gemini-2.0-flash-lite',          // fast & cheap
+  haiku: 'gemini-3.1-flash-lite',          // fast & cheap
 } as const
 
 // @[MODEL LAUNCH]: Add a new CLAUDE_*_CONFIG constant here. Double check the correct model strings
@@ -79,7 +79,7 @@ export const CLAUDE_3_5_HAIKU_CONFIG = {
   vertex: 'claude-3-5-haiku@20241022',
   foundry: 'claude-3-5-haiku',
   openai: 'gpt-4o-mini',
-  gemini: 'gemini-2.0-flash-lite',
+  gemini: 'gemini-3.1-flash-lite',
   mistral: 'ministral-3b-latest',
   github: 'github:copilot',
   codex: 'gpt-5.6-sol',
@@ -95,7 +95,7 @@ export const CLAUDE_HAIKU_4_5_CONFIG = {
   vertex: 'claude-haiku-4-5@20251001',
   foundry: 'claude-haiku-4-5',
   openai: 'gpt-4o-mini',
-  gemini: 'gemini-2.0-flash-lite',
+  gemini: 'gemini-3.1-flash-lite',
   mistral: 'ministral-3b-latest',
   github: 'github:copilot',
   codex: 'gpt-5.6-sol',

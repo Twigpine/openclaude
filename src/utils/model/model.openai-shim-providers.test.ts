@@ -4,7 +4,10 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
-import { resetStateForTests } from '../../bootstrap/state.js'
+import {
+  resetModelStringsForTestingOnly,
+  resetStateForTests,
+} from '../../bootstrap/state.js'
 import {
   type GlobalConfig,
   getGlobalConfig,
@@ -346,8 +349,13 @@ test('Gemini small-fast and haiku defaults use a model that is still served', as
 
   const { getSmallFastModel, getDefaultHaikuModel } =
     await importFreshModelModule()
+  const { getModelStrings } = await import('./modelStrings.js')
   expect(getSmallFastModel()).toBe('gemini-3.1-flash-lite')
   expect(getDefaultHaikuModel()).toBe('gemini-3.1-flash-lite')
+  // The /model picker compares these two to pick the Haiku option label.
+  resetModelStringsForTestingOnly()
+  expect(getModelStrings().haiku45).toBe(getDefaultHaikuModel())
+  resetModelStringsForTestingOnly()
 })
 
 test('getDefaultOpusModel returns OPENAI_MODEL for MiniMax', async () => {
