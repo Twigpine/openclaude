@@ -209,7 +209,7 @@ describe('resolveGeminiCredential', () => {
 describe('Gemini auth helpers', () => {
   test('defaults Vertex to global endpoint and current flash model', () => {
     expect(getGeminiVertexLocation({})).toBe('global')
-    expect(getGeminiVertexModel({})).toBe('gemini-2.5-flash')
+    expect(getGeminiVertexModel({})).toBe('gemini-3.8-flash')
   })
 
   test('explicit GEMINI_VERTEX_* overrides win over defaults and Google fallbacks', () => {

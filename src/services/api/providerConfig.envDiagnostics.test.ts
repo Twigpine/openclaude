@@ -201,8 +201,8 @@ test('uses current Gemini Vertex fallback model instead of OPENAI_MODEL when ver
 
   const resolved = resolveProviderRequest()
 
-  expect(resolved.requestedModel).toBe('gemini-2.5-flash')
-  expect(resolved.resolvedModel).toBe('gemini-2.5-flash')
+  expect(resolved.requestedModel).toBe('gemini-3.8-flash')
+  expect(resolved.resolvedModel).toBe('gemini-3.8-flash')
 })
 
 test('exposes Gemini Vertex project and location from dedicated env vars', async () => {

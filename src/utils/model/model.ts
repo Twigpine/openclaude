@@ -1,4 +1,4 @@
-import { getGeminiVertexModel } from '../geminiAuth.js'
+import { DEFAULT_GEMINI_VERTEX_MODEL, getGeminiVertexModel } from '../geminiAuth.js'
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 /**
  * Ensure that any model codenames introduced here are also added to
@@ -95,7 +95,7 @@ export function getSmallFastModel(): ModelName {
   // Gemini on Vertex AI: keep requests inside the same provider so background
   // helper tasks don't try a non-existent Claude name on the Vertex endpoint.
   if (getAPIProvider() === 'gemini-vertex') {
-    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+    return process.env.GEMINI_VERTEX_MODEL || DEFAULT_GEMINI_VERTEX_MODEL
   }
   if (getAPIProvider() === 'mistral') {
     return process.env.MISTRAL_MODEL || 'ministral-3b-latest'
@@ -300,7 +300,7 @@ export function getDefaultSonnetModel(): ModelName {
   }
   // Gemini on Vertex AI
   if (getAPIProvider() === 'gemini-vertex') {
-    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+    return process.env.GEMINI_VERTEX_MODEL || DEFAULT_GEMINI_VERTEX_MODEL
   }
   // Mistral provider
   if (getAPIProvider() === 'mistral') {
@@ -368,7 +368,7 @@ export function getDefaultHaikuModel(): ModelName {
   }
   // Gemini on Vertex AI — Claude haiku is not available on this endpoint.
   if (getAPIProvider() === 'gemini-vertex') {
-    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+    return process.env.GEMINI_VERTEX_MODEL || DEFAULT_GEMINI_VERTEX_MODEL
   }
   // NVIDIA NIM
   if (getAPIProvider() === 'nvidia-nim') {
@@ -465,7 +465,7 @@ export function getDefaultMainLoopModelSetting(): ModelName | ModelAlias {
   }
   // Gemini on Vertex AI: always use the configured Vertex Gemini model
   if (getAPIProvider() === 'gemini-vertex') {
-    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-flash'
+    return process.env.GEMINI_VERTEX_MODEL || DEFAULT_GEMINI_VERTEX_MODEL
   }
   if (getAPIProvider() === 'mistral') {
     return process.env.MISTRAL_MODEL || 'devstral-latest'

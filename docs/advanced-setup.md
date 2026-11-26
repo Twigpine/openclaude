@@ -118,11 +118,11 @@ npm i -g google-auth-library
 gcloud auth application-default login
 export GEMINI_VERTEX_PROJECT=my-gcp-project
 export GEMINI_VERTEX_LOCATION=global
-openclaude --provider gemini-vertex --model gemini-2.5-flash
+openclaude --provider gemini-vertex --model gemini-3.8-flash
 ```
 
 Alternatively set `CLAUDE_CODE_USE_GEMINI_VERTEX=1` and
-`GEMINI_VERTEX_MODEL=gemini-2.5-flash`. Project aliases are checked in order:
+`GEMINI_VERTEX_MODEL=gemini-3.8-flash`. Project aliases are checked in order:
 `GEMINI_VERTEX_PROJECT`, `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`,
 `GOOGLE_PROJECT_ID`. ADC may supply the project when none is set. ADC supports
 `GOOGLE_APPLICATION_CREDENTIALS` and the ambient Google credential chain.

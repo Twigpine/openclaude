@@ -466,7 +466,7 @@ test.each([
     if (project) process.env.GEMINI_VERTEX_PROJECT = project
     if (mode) process.env.GEMINI_VERTEX_AUTH_MODE = mode
     expect(detectProvider()).toMatchObject({
-      name: 'Gemini Vertex', model: 'gemini-2.5-flash',
+      name: 'Gemini Vertex', model: 'gemini-3.8-flash',
       baseUrl: 'https://aiplatform.googleapis.com/v1/projects/' + displayed + '/locations/global',
     })
   } finally {
