@@ -4,7 +4,10 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
-import { resetStateForTests } from '../../bootstrap/state.js'
+import {
+  resetModelStringsForTestingOnly,
+  resetStateForTests,
+} from '../../bootstrap/state.js'
 import {
   type GlobalConfig,
   getGlobalConfig,
@@ -337,6 +340,22 @@ test('getSmallFastModel returns OPENAI_MODEL for Xiaomi MiMo', async () => {
 
   const { getSmallFastModel } = await importFreshModelModule()
   expect(getSmallFastModel()).toBe('mimo-v2-flash')
+})
+
+test('Gemini small-fast and haiku defaults use a model that is still served', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI = '1'
+  delete process.env.GEMINI_MODEL
+  delete process.env.ANTHROPIC_SMALL_FAST_MODEL
+
+  const { getSmallFastModel, getDefaultHaikuModel } =
+    await importFreshModelModule()
+  const { getModelStrings } = await import('./modelStrings.js')
+  expect(getSmallFastModel()).toBe('gemini-3.1-flash-lite')
+  expect(getDefaultHaikuModel()).toBe('gemini-3.1-flash-lite')
+  // The /model picker compares these two to pick the Haiku option label.
+  resetModelStringsForTestingOnly()
+  expect(getModelStrings().haiku45).toBe(getDefaultHaikuModel())
+  resetModelStringsForTestingOnly()
 })
 
 test('getDefaultOpusModel returns OPENAI_MODEL for MiniMax', async () => {

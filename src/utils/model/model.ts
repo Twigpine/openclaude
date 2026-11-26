@@ -90,7 +90,7 @@ export function getSmallFastModel(): ModelName {
   }
   // For Gemini provider, use a fast model
   if (getAPIProvider() === 'gemini') {
-    return process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite'
+    return process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite'
   }
   // Gemini on Vertex AI: keep requests inside the same provider so background
   // helper tasks don't try a non-existent Claude name on the Vertex endpoint.
@@ -364,7 +364,7 @@ export function getDefaultHaikuModel(): ModelName {
   }
   // Gemini provider
   if (getAPIProvider() === 'gemini') {
-    return process.env.GEMINI_MODEL || 'gemini-2.0-flash-lite'
+    return process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite'
   }
   // Gemini on Vertex AI — Claude haiku is not available on this endpoint.
   if (getAPIProvider() === 'gemini-vertex') {
