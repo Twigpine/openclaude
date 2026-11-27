@@ -232,8 +232,9 @@ export class GrpcServer {
           } finally {
             connectingMcp = false
           }
-          // A cancel or the end of the stream while the servers were connecting.
-          if (interrupted) return
+          // A cancel, the end of the stream, or the client cancelling the call itself (grpc-js
+          // sets call.cancelled and sends neither) while the servers were connecting.
+          if (interrupted || call.cancelled) return
 
           engine = new QueryEngine({
             cwd,

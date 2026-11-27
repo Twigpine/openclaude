@@ -161,3 +161,32 @@ test('a reconnected server replaces only its own tools; one still signed out kee
     rmSync(project, { recursive: true, force: true })
   }
 })
+
+test('a call the client cancelled while the MCP servers connect starts no engine', async () => {
+  let finishLoading!: () => void
+  const loading = new Promise<void>(resolve => {
+    finishLoading = resolve
+  })
+  const load = spyOn(mcpEntrypoint, 'loadReexposedMcpTools').mockImplementation(async () => {
+    await loading
+    return { mcpClients: [], mcpTools: [] }
+  })
+  const submit = spyOn(QueryEngine.prototype, 'submitMessage').mockImplementation(async function* () {})
+  try {
+    const call = new FakeCall() as FakeCall & { cancelled: boolean }
+    call.cancelled = false
+    ;(new GrpcServer() as unknown as { handleChat(call: FakeCall): void }).handleChat(call)
+    call.emit('data', { request: { message: 'hi', working_directory: process.cwd(), model: 'sonnet' } })
+    await Bun.sleep(5)
+    // grpc-js marks the call cancelled and emits 'cancelled', with no 'end' and no cancel message.
+    call.cancelled = true
+    call.emit('cancelled')
+    finishLoading()
+    await Bun.sleep(20)
+
+    expect(submit).not.toHaveBeenCalled()
+  } finally {
+    load.mockRestore()
+    submit.mockRestore()
+  }
+})
