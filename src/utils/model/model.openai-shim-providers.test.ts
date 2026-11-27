@@ -660,3 +660,19 @@ test('Vertex sonnet, haiku and small-fast defaults use the current flash model',
   process.env.GEMINI_VERTEX_MODEL = 'gemini-2.5-pro'
   for (const getModel of getters) expect(getModel()).toBe('gemini-2.5-pro')
 })
+
+test('Vertex opus default and the provider default model are not retired', async () => {
+  process.env.CLAUDE_CODE_USE_GEMINI_VERTEX = '1'
+  delete process.env.GEMINI_VERTEX_MODEL
+  delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
+  const { getDefaultOpusModel } = await importFreshModelModule()
+  const { default: vendor } = await import('../../integrations/vendors/gemini-vertex.js')
+  expect(getDefaultOpusModel()).toBe('gemini-3.8-flash')
+  expect(vendor.defaultModel).toBe('gemini-3.8-flash')
+  const catalog = vendor.catalog?.models?.map(model => model.apiName)
+  expect(catalog).toContain('gemini-3.8-flash')
+  expect(catalog).not.toContain('gemini-2.5-flash')
+  expect(catalog).not.toContain('gemini-2.5-pro')
+  process.env.GEMINI_VERTEX_MODEL = 'gemini-3.5-flash'
+  expect(getDefaultOpusModel()).toBe('gemini-3.5-flash')
+})

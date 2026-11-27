@@ -5,7 +5,7 @@ export default defineVendor({
   label: 'Google Vertex AI Gemini',
   classification: 'native',
   defaultBaseUrl: 'https://aiplatform.googleapis.com',
-  defaultModel: 'gemini-2.5-flash',
+  defaultModel: 'gemini-3.8-flash',
   setup: {
     requiresAuth: true,
     authMode: 'adc',
@@ -26,16 +26,9 @@ export default defineVendor({
     source: 'static',
     models: [
       {
-        id: 'gemini-2.5-flash',
-        apiName: 'gemini-2.5-flash',
-        label: 'Gemini 2.5 Flash',
-        contextWindow: 1_048_576,
-        maxOutputTokens: 65_536,
-      },
-      {
-        id: 'gemini-2.5-pro',
-        apiName: 'gemini-2.5-pro',
-        label: 'Gemini 2.5 Pro',
+        id: 'gemini-3.8-flash',
+        apiName: 'gemini-3.8-flash',
+        label: 'Gemini 3.8 Flash',
         contextWindow: 1_048_576,
         maxOutputTokens: 65_536,
       },

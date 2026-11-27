@@ -246,7 +246,7 @@ export function getDefaultOpusModel(): ModelName {
   }
   // Gemini on Vertex AI
   if (getAPIProvider() === 'gemini-vertex') {
-    return process.env.GEMINI_VERTEX_MODEL || 'gemini-2.5-pro'
+    return process.env.GEMINI_VERTEX_MODEL || DEFAULT_GEMINI_VERTEX_MODEL
   }
   // Mistral provider
   if (getAPIProvider() === 'mistral') {
