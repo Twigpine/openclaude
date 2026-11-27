@@ -597,6 +597,38 @@ export function isCanonicalRequestyInferenceBaseUrl(
   }
 }
 
+const STRAITLY_CANONICAL_INFERENCE_BASE_URL = 'https://api.straitly.ai/v1'
+
+/**
+ * Straitly serves its OpenAI-compatible /v1 API at https://api.straitly.ai/v1.
+ * Only that exact https origin with the /v1 path may receive STRAITLY_API_KEY.
+ */
+export function isCanonicalStraitlyInferenceBaseUrl(
+  value: string | undefined,
+): boolean {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const canonical = new URL(STRAITLY_CANONICAL_INFERENCE_BASE_URL)
+    const candidate = new URL(trimmed)
+    return (
+      candidate.protocol === 'https:' &&
+      !candidate.port &&
+      !candidate.username &&
+      !candidate.password &&
+      !candidate.search &&
+      !candidate.hash &&
+      candidate.hostname.toLowerCase() === canonical.hostname.toLowerCase() &&
+      candidate.pathname.replace(/\/+$/, '') === '/v1'
+    )
+  } catch {
+    return false
+  }
+}
+
 const MERGE_GATEWAY_CANONICAL_INFERENCE_BASE_URL = 'https://api-gateway.merge.dev/v1/openai'
 
 export function isCanonicalMergeGatewayInferenceBaseUrl(
@@ -1414,6 +1446,13 @@ export function resolveRouteCredentialValue(
     routeId === 'requesty' &&
     options?.baseUrl !== undefined &&
     !isCanonicalRequestyInferenceBaseUrl(options.baseUrl)
+  ) {
+    return undefined
+  }
+  if (
+    routeId === 'straitly' &&
+    options?.baseUrl !== undefined &&
+    !isCanonicalStraitlyInferenceBaseUrl(options.baseUrl)
   ) {
     return undefined
   }
