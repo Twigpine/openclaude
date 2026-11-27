@@ -527,6 +527,17 @@ export const PROVIDER_PRESET_MANIFEST = [
     ]
   },
   {
+    "preset": "straitly",
+    "routeKind": "gateway",
+    "routeId": "straitly",
+    "vendorId": "openai",
+    "gatewayId": "straitly",
+    "description": "Straitly OpenAI-compatible gateway",
+    "apiKeyEnvVars": [
+      "STRAITLY_API_KEY"
+    ]
+  },
+  {
     "preset": "together",
     "routeKind": "gateway",
     "routeId": "together",
@@ -702,6 +713,7 @@ export const ORDERED_PROVIDER_PRESETS = [
   "orcarouter",
   "requesty",
   "runcrate",
+  "straitly",
   "together",
   "venice",
   "xai",

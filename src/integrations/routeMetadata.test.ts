@@ -9,6 +9,7 @@ import {
   isApismartBaseUrl,
   isCanonicalApismartInferenceBaseUrl,
   isCanonicalRequestyInferenceBaseUrl,
+  isCanonicalStraitlyInferenceBaseUrl,
   isCloudflareBaseUrl,
   isConcentrateBaseUrl,
   isLongcatBaseUrl,
@@ -588,6 +589,78 @@ test('Requesty credential is limited to the canonical inference base URLs', () =
     resolveRouteCredentialValue({
       routeId: 'requesty',
       baseUrl: 'https://router.requesty.ai/v1/models',
+      processEnv,
+    }),
+  ).toBeUndefined()
+})
+
+test('isCanonicalStraitlyInferenceBaseUrl accepts only https://api.straitly.ai/v1', () => {
+  for (const baseUrl of [
+    'https://api.straitly.ai/v1',
+    'https://api.straitly.ai/v1/',
+  ]) {
+    expect(isCanonicalStraitlyInferenceBaseUrl(baseUrl)).toBe(true)
+  }
+
+  for (const baseUrl of [
+    undefined,
+    '',
+    'not a url',
+    'http://api.straitly.ai/v1',
+    'https://api.straitly.ai:8443/v1',
+    'https://user:pass@api.straitly.ai/v1',
+    'https://api.straitly.ai/v1?x=1',
+    'https://api.straitly.ai/v1#fragment',
+    'https://api.straitly.ai',
+    'https://api.straitly.ai/v1/models',
+    'https://api.straitly.ai.evil.example/v1',
+    'https://evil-api.straitly.ai/v1',
+    'https://straitly.ai/v1',
+  ]) {
+    expect(isCanonicalStraitlyInferenceBaseUrl(baseUrl)).toBe(false)
+  }
+})
+
+test('Straitly host resolves to the straitly route', () => {
+  expect(resolveRouteIdFromBaseUrl('https://api.straitly.ai/v1')).toBe(
+    'straitly',
+  )
+  expect(
+    resolveRouteIdFromBaseUrl('https://api.straitly.ai.evil.example/v1'),
+  ).toBe(null)
+})
+
+test('Straitly credential is limited to the canonical inference base URL', () => {
+  const processEnv = {
+    STRAITLY_API_KEY: 'straitly-secret',
+    OPENAI_API_KEY: 'sk-openai-fallback',
+  }
+
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'straitly',
+      baseUrl: 'https://api.straitly.ai/v1',
+      processEnv,
+    }),
+  ).toBe('straitly-secret')
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'straitly',
+      baseUrl: 'https://api.straitly.ai/v1',
+      processEnv: { OPENAI_API_KEY: 'sk-openai-fallback' },
+    }),
+  ).toBe('sk-openai-fallback')
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'straitly',
+      baseUrl: 'http://api.straitly.ai/v1',
+      processEnv,
+    }),
+  ).toBeUndefined()
+  expect(
+    resolveRouteCredentialValue({
+      routeId: 'straitly',
+      baseUrl: 'https://api.straitly.ai/v1/models',
       processEnv,
     }),
   ).toBeUndefined()

@@ -201,6 +201,7 @@ const PRESET_ORDER = [
   'OrcaRouter',
   'Requesty',
   'Runcrate',
+  'Straitly',
   'Together AI',
   'Venice',
   'xAI',

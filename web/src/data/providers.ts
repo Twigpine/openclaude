@@ -149,6 +149,14 @@ export const providers: Provider[] = [
     notes: 'OpenAI-compatible gateway at https://router.requesty.ai/v1 (regional: https://router.eu.requesty.ai/v1, https://router.us.requesty.ai/v1, https://router.ap.requesty.ai/v1); /provider and --provider requesty default to openai/gpt-5-mini, while raw env setup must set CLAUDE_CODE_USE_OPENAI=1, OPENAI_BASE_URL, and OPENAI_MODEL. REQUESTY_API_KEY is sent only to these Requesty URLs; any other OPENAI_BASE_URL uses OPENAI_API_KEY. Uses public discovery of chat models.',
   },
   {
+    id: 'straitly',
+    name: 'Straitly',
+    group: 'gateways',
+    setup: '/provider or OpenAI-compatible env vars',
+    envVars: ['STRAITLY_API_KEY', 'OPENAI_API_KEY'],
+    notes: 'OpenAI-compatible gateway at https://api.straitly.ai/v1 with access to more than 100 models; /provider and --provider straitly default to deepseek/deepseek-v4-1-flash-1017, while raw env setup must set CLAUDE_CODE_USE_OPENAI=1, OPENAI_BASE_URL, and OPENAI_MODEL. STRAITLY_API_KEY is sent only to https://api.straitly.ai/v1; any other OPENAI_BASE_URL uses OPENAI_API_KEY. Uses public discovery of chat models.',
+  },
+  {
     id: 'llmtr',
     name: 'LLMTR',
     group: 'gateways',

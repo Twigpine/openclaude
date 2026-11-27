@@ -39,6 +39,7 @@ const TEST_ENV_KEYS = [
   'OPENAI_MODEL',
   'OPENCLAUDE_OLLAMA_NUM_CTX',
   'REQUESTY_API_KEY',
+  'STRAITLY_API_KEY',
   'OLLAMA_API_KEY',
   'OLLAMA_BASE_URL',
   ...PROVIDER_SELECTION_FLAGS,
@@ -421,6 +422,17 @@ describe('loadEnvFile', () => {
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
     expect(process.env.OPENAI_BASE_URL).toBeUndefined()
     expect(loaded).toEqual({ REQUESTY_API_KEY: 'requesty-key' })
+  })
+
+  it('loads the dedicated Straitly credential without selecting a route', () => {
+    const filePath = writeTempEnvFile('STRAITLY_API_KEY=straitly-key')
+
+    const loaded = loadEnvFile(filePath)
+
+    expect(process.env.STRAITLY_API_KEY).toBe('straitly-key')
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+    expect(process.env.OPENAI_BASE_URL).toBeUndefined()
+    expect(loaded).toEqual({ STRAITLY_API_KEY: 'straitly-key' })
   })
 
   it('loads the dedicated Command Code credential without selecting a route', () => {

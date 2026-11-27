@@ -86,6 +86,13 @@ describe('loaded registry validation', () => {
       'runcrate:runcrate-deepseek-v4.1-flash',
       'runcrate:runcrate-qwen3.8-flash',
       'runcrate:runcrate-gpt-oss-120b',
+      // Straitly's offline fallback entries use live Straitly catalog IDs
+      // (`deepseek/deepseek-v4-1-flash-1017`, `claude-sonnet-5-5`,
+      // `gpt-6.1-sol`) that do not have shared OpenClaude model descriptors
+      // yet, so they pin their advertised limits directly.
+      'straitly:straitly-deepseek-v4-1-flash-1017',
+      'straitly:straitly-claude-sonnet-5-5',
+      'straitly:straitly-gpt-6.1-sol',
       // Cloudflare Workers AI serves provider-specific quantized builds
       // (`@cf/...`) with no shared cross-provider model descriptor, the same
       // situation as azure-deployment above. See gateways/cloudflare.ts (#1100).
