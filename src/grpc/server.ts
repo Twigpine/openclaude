@@ -2,6 +2,7 @@ import * as grpc from '@grpc/grpc-js'
 import * as protoLoader from '@grpc/proto-loader'
 import path from 'path'
 import { randomUUID } from 'crypto'
+import uniqBy from 'lodash-es/uniqBy.js'
 import { QueryEngine } from '../QueryEngine.js'
 import { getTools } from '../tools.js'
 import { getDefaultAppState } from '../state/AppStateStore.js'
@@ -11,7 +12,6 @@ import { getBuiltInAgents } from '../tools/AgentTool/builtInAgents.js'
 import { getCombinedTools, loadReexposedMcpTools } from '../entrypoints/mcp.js'
 import { runWithCwdOverride } from '../utils/cwd.js'
 import { reconnectMcpServerImpl } from '../services/mcp/client.js'
-import { getMcpPrefix } from '../services/mcp/mcpStringUtils.js'
 import type { MCPServerConnection } from '../services/mcp/types.js'
 import type { Message } from '../types/message.js'
 
@@ -158,6 +158,10 @@ export class GrpcServer {
   // A server that could not connect (offline, say) or that waited for sign-in is reconnected by
   // the next chat in that directory until it connects; the others keep their connections. The
   // reconnect clears the connector's memo for that server, which still holds the old result.
+  // Only a reconnect that connected replaces anything: a server still signed out keeps its
+  // sign-in tool. Tools belong to a server by mcpInfo.serverName, not by name prefix (server
+  // names can contain `__`), and a reconnect re-adds the shared resource tools, so the merged
+  // list is deduplicated by name.
   private async reconnectFailed(
     cwd: string,
     current: Awaited<ReturnType<typeof loadReexposedMcpTools>>,
@@ -167,14 +171,19 @@ export class GrpcServer {
     const results = await runWithCwdOverride(cwd, () =>
       Promise.all(retry.map(client => reconnectMcpServerImpl(client.name, client.config))),
     )
-    const replaced = new Map(results.map(result => [result.client.name, result]))
-    const prefixes = retry.map(client => getMcpPrefix(client.name))
+    const connected = new Map(
+      results.filter(result => result.client.type === 'connected').map(result => [result.client.name, result]),
+    )
+    if (connected.size === 0) return current
     return {
-      mcpClients: current.mcpClients.map(client => replaced.get(client.name)?.client ?? client),
-      mcpTools: [
-        ...current.mcpTools.filter(tool => !prefixes.some(prefix => tool.name.startsWith(prefix))),
-        ...results.flatMap(result => result.tools),
-      ],
+      mcpClients: current.mcpClients.map(client => connected.get(client.name)?.client ?? client),
+      mcpTools: uniqBy(
+        [
+          ...current.mcpTools.filter(tool => !connected.has(tool.mcpInfo?.serverName ?? '')),
+          ...[...connected.values()].flatMap(result => result.tools),
+        ],
+        tool => tool.name,
+      ),
     }
   }
 

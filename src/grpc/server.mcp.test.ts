@@ -99,42 +99,62 @@ test('while the MCP servers connect, a second request is refused and a cancel st
   }
 })
 
-test('servers that failed or needed sign-in reconnect on the next chat, alone, without duplicate tools', async () => {
+test('a reconnected server replaces only its own tools; one still signed out keeps its sign-in tool', async () => {
   const project = mkdtempSync(join(tmpdir(), 'grpc-mcp-retry-'))
   const config = (url: string) => ({ type: 'http', url, scope: 'project' })
   const up = { name: 'up', type: 'connected' } as unknown as MCPServerConnection
   const down = { name: 'down', type: 'failed', config: config('https://down.invalid/mcp') } as unknown as MCPServerConnection
   const locked = { name: 'locked', type: 'needs-auth', config: config('https://locked.invalid/mcp') } as unknown as MCPServerConnection
-  const tool = (name: string) => ({ name }) as unknown as Tool
+  // Shares the failed server's tool-name prefix (mcp__down__) but is a healthy server of its own.
+  const neighbour = { name: 'down__beta', type: 'connected' } as unknown as MCPServerConnection
+  const tool = (name: string, serverName?: string) =>
+    ({ name, ...(serverName ? { mcpInfo: { serverName, toolName: name } } : {}) }) as unknown as Tool
   const shared = [tool('ListMcpResourcesTool'), tool('ReadMcpResourceTool')]
   const load = spyOn(mcpEntrypoint, 'loadReexposedMcpTools').mockImplementation(async () => ({
-    mcpClients: [up, down, locked],
-    mcpTools: [tool('mcp__up__a'), tool('mcp__locked__authenticate'), ...shared],
+    mcpClients: [up, down, locked, neighbour],
+    mcpTools: [
+      tool('mcp__up__a', 'up'),
+      tool('mcp__locked__authenticate', 'locked'),
+      tool('mcp__down__beta__c', 'down__beta'),
+      ...shared,
+    ],
   }))
   const reconnected: string[] = []
   const reconnect = spyOn(mcpClient, 'reconnectMcpServerImpl').mockImplementation(async name => {
     reconnected.push(name)
+    if (name === 'locked') {
+      // Still signed out: the connector returns the client and no tools.
+      return { client: locked, tools: [], commands: [] }
+    }
+    // A resource-capable server's reconnect adds the shared resource tools again.
     return {
       client: { name, type: 'connected' } as unknown as MCPServerConnection,
-      tools: [tool(`mcp__${name}__b`)],
+      tools: [tool(`mcp__${name}__b`, name), ...shared],
       commands: [],
     }
   })
   try {
     const server = new GrpcServer()
     const first = await configFor(server, project)
-    expect(first.mcpClients).toEqual([up, down, locked])
+    expect(first.mcpClients).toEqual([up, down, locked, neighbour])
 
     const second = await configFor(server, project)
-    expect(second.mcpClients.map(c => `${c.name}:${c.type}`)).toEqual(['up:connected', 'down:connected', 'locked:connected'])
+    expect(second.mcpClients.map(c => `${c.name}:${c.type}`)).toEqual([
+      'up:connected',
+      'down:connected',
+      'locked:needs-auth',
+      'down__beta:connected',
+    ])
     const names = second.tools.map(t => t.name)
-    expect(names).toEqual(expect.arrayContaining(['mcp__up__a', 'mcp__down__b', 'mcp__locked__b']))
-    expect(names).not.toContain('mcp__locked__authenticate')
+    expect(names).toEqual(
+      expect.arrayContaining(['mcp__up__a', 'mcp__down__b', 'mcp__down__beta__c', 'mcp__locked__authenticate']),
+    )
     expect(names.filter(n => n === 'ListMcpResourcesTool')).toHaveLength(1)
+    expect(names.filter(n => n === 'ReadMcpResourceTool')).toHaveLength(1)
 
     await configFor(server, project)
     expect(load).toHaveBeenCalledTimes(1)
-    expect(reconnected.sort()).toEqual(['down', 'locked'])
+    expect(reconnected.sort()).toEqual(['down', 'locked', 'locked'])
   } finally {
     load.mockRestore()
     reconnect.mockRestore()
